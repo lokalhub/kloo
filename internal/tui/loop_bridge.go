@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/edit"
 	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/session"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -33,6 +35,12 @@ type LoopRunner struct {
 	// SessionHistory so follow-ups ("what's the issue?", "now the other file") have
 	// context. Working memory compacts it under the window each turn.
 	session []llm.Message
+	// store + sess persist that conversation to disk so it also survives a restart
+	// (resume). Both nil ⇒ in-memory only (tests, or a workspace store that failed
+	// to init); the in-session carry still works.
+	store *session.Store
+	sess  *session.Session
+	now   func() time.Time // injectable clock for persistence timestamps
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
@@ -41,7 +49,18 @@ type LoopRunner struct {
 // status line / stop-report. The model is passed per-run to Start (so /model
 // can switch it between runs) — not fixed at construction.
 func NewLoopRunner(loop *agent.Loop, ws tools.Workspace, maxTokens int) *LoopRunner {
-	return &LoopRunner{loop: loop, ws: ws, baseSystem: loop.System, maxTokens: maxTokens}
+	return &LoopRunner{loop: loop, ws: ws, baseSystem: loop.System, maxTokens: maxTokens, now: time.Now}
+}
+
+// WithSession attaches a persistent session: the runner seeds its in-memory carry
+// from the session's saved messages and writes the session back after each run, so
+// the conversation survives a restart. Returns the runner for chaining.
+func (r *LoopRunner) WithSession(store *session.Store, sess *session.Session) *LoopRunner {
+	r.store, r.sess = store, sess
+	if sess != nil {
+		r.session = append([]llm.Message{}, sess.Messages...)
+	}
+	return r
 }
 
 // setSend connects the program's message sink (called by Run).
@@ -98,8 +117,25 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 		r.session = append(r.session, rep.Transcript...)
 		r.session = append(r.session, sessionOutcome(rep))
 		r.session = capSession(r.session)
+		r.persist(task)
 	}
 	r.send(reportFor(rep, r.maxTokens))
+}
+
+// persist writes the updated session to disk (resume across restarts). No-op when
+// there is no store (in-memory-only runs). A write error is non-fatal — the run
+// already happened and the in-memory carry still works; we don't crash the TUI.
+func (r *LoopRunner) persist(task string) {
+	if r.store == nil || r.sess == nil {
+		return
+	}
+	r.sess.Messages = r.session
+	r.sess.Runs++
+	r.sess.Updated = r.now()
+	if r.sess.Title == "" {
+		r.sess.Title = session.Title(task)
+	}
+	_ = r.store.Save(r.sess)
 }
 
 // maxSessionMessages bounds the carried session so a very long interactive session

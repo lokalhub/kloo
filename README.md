@@ -35,6 +35,12 @@ codebase, kloo rebuilds the prompt each turn — pinning the goal, the current f
 (re-read fresh), and the last verify result, while folding old exploration into a
 running summary. **[docs/memory.md](docs/memory.md)** has the diagrams.
 
+kloo also remembers the conversation **across runs and restarts**, per workspace,
+so follow-ups ("what's the issue?", "continue") resume with context. Sessions live
+in `{workspace}/.kloo/sessions/` (git-ignored automatically); plain `kloo`
+auto-resumes a workspace's session (`--new` / `--resume <id>` to override). See
+**[docs/sessions.md](docs/sessions.md)**.
+
 ## Quick start
 
 **Requires [Go 1.22+](https://go.dev/dl/)** to build or `go install` from source —
@@ -92,7 +98,9 @@ verify command) and the local/hosted recipes.
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | `go test ./...` | Verify command the loop runs each step (the real success signal). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
-| `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.config/kloo/profiles.json`). |
+| `--new` | `false` | Start a fresh session instead of resuming this workspace's saved one. |
+| `--resume` | _(unset)_ | Resume a specific saved session by id (`{workspace}/.kloo/sessions`). |
+| `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.kloo/profiles.json`, falls back to `~/.config/kloo/`). |
 
 Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
 Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and

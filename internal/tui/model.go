@@ -101,6 +101,7 @@ type Config struct {
 	MaxTokens int        // token budget (status line "used/budget")
 	Runner    Runner     // optional: launches a real run on task submit
 	Source    TaskSource // optional: defaults to the keyboard source
+	Banner    string     // optional: a startup notice shown in the transcript (e.g. "resumed session …")
 }
 
 // New constructs the root model in its idle state.
@@ -133,6 +134,9 @@ func New(cfg Config) Model {
 	m.source = cfg.Source
 	if m.source == nil {
 		m.source = keyboardSource{} // the one v1 implementation of TaskSource
+	}
+	if cfg.Banner != "" {
+		m = m.appendItem(infoItem{text: cfg.Banner}) // e.g. "resumed session …"
 	}
 	return m
 }

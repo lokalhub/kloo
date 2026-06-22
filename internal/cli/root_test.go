@@ -123,7 +123,7 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	clientCalled := false
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string) error {
+		LaunchTUI: func(cfg config.Config, verifyCmd string, sess SessionOpts) error {
 			launched = true
 			gotCfg = cfg
 			gotVerify = verifyCmd
@@ -158,7 +158,7 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	clientCalled, tuiCalled := false, false
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string) error { tuiCalled = true; return nil },
+		LaunchTUI: func(cfg config.Config, verifyCmd string, sess SessionOpts) error { tuiCalled = true; return nil },
 		RunHeadless: func(cfg config.Config, task, verifyCmd string, out io.Writer) error {
 			ran, gotCfg, gotTask, gotVerify = true, cfg, task, verifyCmd
 			return nil
@@ -190,7 +190,7 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 func TestHeadlessWithoutTaskErrors(t *testing.T) {
 	tuiCalled := false
 	deps := Deps{
-		LaunchTUI:   func(cfg config.Config, verifyCmd string) error { tuiCalled = true; return nil },
+		LaunchTUI:   func(cfg config.Config, verifyCmd string, sess SessionOpts) error { tuiCalled = true; return nil },
 		RunHeadless: func(cfg config.Config, task, verifyCmd string, out io.Writer) error { return nil },
 	}
 	if _, _, err := runCmd(t, deps, "--headless"); err == nil {

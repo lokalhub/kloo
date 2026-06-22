@@ -18,6 +18,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// SessionOpts is the user's session choice for an interactive launch: --new forces
+// a fresh session, --resume <id> resumes a specific one; both unset uses the
+// default policy (resume the single session, prompt when several, new when none).
+type SessionOpts struct {
+	New      bool
+	ResumeID string
+}
+
 // Deps are the injectable dependencies of the root command, so tests can run
 // offline (fake client) and capture output.
 type Deps struct {
@@ -25,8 +33,9 @@ type Deps struct {
 	// llm.Client; tests inject a fake.
 	NewClient func(cfg config.Config) llm.LLMClient
 	// LaunchTUI starts the interactive TUI session (the autonomous loop wired
-	// under the Bubble Tea UI). Injected so tests stay offline.
-	LaunchTUI func(cfg config.Config, verifyCmd string) error
+	// under the Bubble Tea UI). sess carries the user's session choice (--new /
+	// --resume). Injected so tests stay offline.
+	LaunchTUI func(cfg config.Config, verifyCmd string, sess SessionOpts) error
 	// RunHeadless runs the autonomous loop NON-interactively (no TTY), streaming
 	// progress to out and returning the loop's terminal report. Used for the
 	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. Injected
@@ -75,6 +84,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagVerify   string
 		flagHeadless bool
 		flagEffort   string
+		flagNewSess  bool
+		flagResume   string
 	)
 
 	cmd := &cobra.Command{
@@ -126,7 +137,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
-				return deps.LaunchTUI(cfg, flagVerify)
+				return deps.LaunchTUI(cfg, flagVerify, SessionOpts{New: flagNewSess, ResumeID: flagResume})
 			}
 
 			if flagHeadless {
@@ -153,6 +164,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "go test ./...", "verify command the loop runs each step (the real success signal)")
 	f.BoolVar(&flagHeadless, "headless", false, "run the autonomous loop non-interactively (no TTY), streaming progress to stdout; requires a task arg")
+	f.BoolVar(&flagNewSess, "new", false, "start a fresh session instead of resuming this workspace's saved one")
+	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (see {workspace}/.kloo/sessions)")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd
