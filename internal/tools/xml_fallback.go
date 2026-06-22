@@ -72,7 +72,7 @@ func (XMLAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		if err != nil {
 			return nil, err
 		}
-		calls = append(calls, Call{Name: name, Args: args})
+		calls = append(calls, Call{Name: name, Args: sanitizeArgs(args)})
 		i = openTagEnd + relClose + len("</tool>")
 	}
 	return calls, nil
