@@ -205,5 +205,23 @@ func TestReportSurfacesError(t *testing.T) {
 	}
 }
 
+// TestHumanizeError: common run failures map to natural-language reasons with a
+// hint; anything unrecognized passes through (still better than a bare "ERROR").
+func TestHumanizeError(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"refused", "llm: dial tcp 127.0.0.1:8080: connect: connection refused", "Couldn't reach"},
+		{"no-router", `llm: stream error: {"error":"no router for requested model"}`, "doesn't serve that model"},
+		{"timeout", "llm: context deadline exceeded", "timed out"},
+		{"tool-format", "llm: stream error chunk: output does not match the expected peg-native format", "tool call"},
+		{"auth", "llm: 401 unauthorized", "Authentication failed"},
+		{"passthrough", "some weird unrecognized failure", "some weird unrecognized failure"},
+	}
+	for _, c := range cases {
+		if got := humanizeError(errors.New(c.in)); !contains(got, c.want) {
+			t.Errorf("%s: humanizeError(%q) = %q, want it to contain %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
 var _ sendSetter = (*LoopRunner)(nil)
 var _ tea.Msg = submitTaskMsg{}

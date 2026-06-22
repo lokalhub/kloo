@@ -137,6 +137,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.resize(msg.Width, msg.Height)
+	case tea.MouseMsg:
+		// Mouse wheel scrolls the transcript viewport (scrollback).
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case streamDeltaMsg:
@@ -186,8 +191,11 @@ func (m Model) resize(w, h int) (tea.Model, tea.Cmd) {
 		m.vp.Width = w - 2
 		m.vp.Height = vpHeight
 	}
+	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(m.renderTranscript())
-	m.vp.GotoBottom()
+	if atBottom { // sticky bottom: a resize must not yank a scrolled-up user back down
+		m.vp.GotoBottom()
+	}
 	return m, nil
 }
 
@@ -204,6 +212,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.Type {
+	case tea.KeyPgUp, tea.KeyPgDown:
+		// Page the transcript viewport for scrollback (the input never uses these,
+		// so they're safe to hijack even while typing). Mouse wheel also works.
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 	case tea.KeyEnter:
 		return m.submit()
 	case tea.KeyCtrlO:

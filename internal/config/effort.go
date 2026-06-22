@@ -23,17 +23,27 @@ const DefaultEffort = "medium"
 // EnvEffort selects the tier from the environment (below the flag).
 const EnvEffort = "KLOO_EFFORT"
 
-// builtinEfforts are the shipped tiers, in increasing intensity. A tier seeds
-// only the loop budgets (steps/tokens/churn/wall-clock):
-//   - fast:   quick & decisive — bail early if stuck.
-//   - medium: the balanced default (== legacy defaults).
+// builtinEfforts are the shipped tiers, in increasing intensity. CHURN detection
+// (no-progress) is the primary "stop when stuck" signal; the tiers mainly tune how
+// patient it is. The other budgets are deliberately LOOSE backstops, not the thing
+// that ends a productive run:
+//   - tokens are UNBOUNDED (0) — cost is the endpoint/service's domain (like other
+//     CLI agents), free for local models, and the working-memory feature is built
+//     to let small models run long many-step tasks; a token cap would guillotine
+//     exactly those runs.
+//   - steps / wall-clock are generous so a slow local model isn't cut off
+//     mid-progress; wall-clock is the final net for a churn-evading loop.
+//
+// Tiers:
+//   - fast:   quick & decisive — low churn patience, bail early if stuck.
+//   - medium: the balanced default — generous budgets.
 //   - heavy:  patient & thorough — for hard multi-file work.
 //
 // Any field is overridable per tier via the "efforts" section of profiles.json.
 var builtinEfforts = map[string]EffortTier{
-	"fast":   {MaxSteps: 20, ChurnRounds: 2, MaxTokens: 80_000, MaxWallClockSeconds: 300},
-	"medium": {MaxSteps: 40, ChurnRounds: 3, MaxTokens: 200_000, MaxWallClockSeconds: 600},
-	"heavy":  {MaxSteps: 80, ChurnRounds: 10, MaxTokens: 500_000, MaxWallClockSeconds: 1800},
+	"fast":   {MaxSteps: 50, ChurnRounds: 2, MaxTokens: 0, MaxWallClockSeconds: 900},
+	"medium": {MaxSteps: 500, ChurnRounds: 3, MaxTokens: 0, MaxWallClockSeconds: 3600},
+	"heavy":  {MaxSteps: 1000, ChurnRounds: 10, MaxTokens: 0, MaxWallClockSeconds: 7200},
 }
 
 // EffortNames lists the built-in tiers in increasing intensity (help/UX).

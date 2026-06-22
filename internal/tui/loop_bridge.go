@@ -166,6 +166,44 @@ func parseDiffEdits(path, diff string) []editPair {
 	return out
 }
 
+// humanizeError turns a raw run error into a short, natural-language reason with
+// an actionable hint, so the stop-report reads like a sentence instead of a Go
+// error dump. The common local-endpoint failures get a tailored message; anything
+// unrecognized falls back to the raw error (still better than a bare "ERROR").
+func humanizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := err.Error()
+	low := strings.ToLower(raw)
+	switch {
+	case strings.Contains(low, "connection refused"):
+		return "Couldn't reach the model endpoint — is the server running at your --endpoint? (connection refused)"
+	case strings.Contains(low, "no such host"), strings.Contains(low, "no route to host"):
+		return "Couldn't reach the model endpoint — check the --endpoint address. (host unreachable)"
+	case strings.Contains(low, "no router for requested model"),
+		strings.Contains(low, "unknown model"), strings.Contains(low, "model not found"):
+		return "The endpoint doesn't serve that model — set --model (or /model) to a name it has. Multi-model servers like llama-swap/Ollama route by name."
+	case strings.Contains(low, "context deadline exceeded"),
+		strings.Contains(low, "timeout"), strings.Contains(low, "timed out"):
+		return "The model endpoint timed out — it may be loading or overloaded. Retry, or give it more time."
+	case strings.Contains(low, "peg-native"),
+		strings.Contains(low, "does not match the expected"):
+		return "The model's reply wasn't a tool call kloo could parse — it may not support tool-calling. Serve it with --jinja, or try a more capable model."
+	case strings.Contains(low, "missing required scope"),
+		strings.Contains(low, "unauthorized"), strings.Contains(low, "forbidden"),
+		strings.Contains(low, "401"), strings.Contains(low, "invalid api key"):
+		return "Authentication failed — check your API key (KLOO_API_KEY, falls back to OPENAI_API_KEY)."
+	case strings.Contains(low, "rate limit"), strings.Contains(low, "429"):
+		return "The endpoint rate-limited the request — wait a moment and retry, or check your plan's limits."
+	case strings.Contains(low, "below the irreducible prompt floor"),
+		strings.Contains(low, "window too small"):
+		return "The context window is too small for the task + system prompt — raise maxContextTokens."
+	default:
+		return raw
+	}
+}
+
 // reportFor translates a Phase-04 Report into the terminal reportMsg.
 func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 	if rep == nil {
@@ -183,9 +221,9 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 	}
 	switch {
 	case rep.Err != nil:
-		// Surface the actual failure (e.g. "connection refused", "no router for
-		// requested model", a tool-call parse error) instead of a bare "ERROR".
-		msg.Detail = rep.Err.Error()
+		// Surface the failure as a short, natural-language reason with a hint
+		// instead of a bare "ERROR" or a raw Go error dump.
+		msg.Detail = humanizeError(rep.Err)
 	case rep.Budget != nil:
 		msg.Detail = string(rep.Budget.Kind) + " (" + rep.Budget.Observed + "/" + rep.Budget.Limit + ")"
 	case rep.Churn != nil:

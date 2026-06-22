@@ -67,8 +67,14 @@ func appendItems(base []item, more ...item) []item {
 // streaming tail.
 func (m Model) refreshViewport() Model {
 	if m.vpReady {
+		// Sticky bottom: auto-scroll to the tail ONLY if the user was already at the
+		// bottom. If they scrolled up to read earlier output, new content must not
+		// yank them back down (that was the "can't scroll back" bug).
+		atBottom := m.vp.AtBottom()
 		m.vp.SetContent(m.renderTranscript())
-		m.vp.GotoBottom()
+		if atBottom {
+			m.vp.GotoBottom()
+		}
 	}
 	return m
 }

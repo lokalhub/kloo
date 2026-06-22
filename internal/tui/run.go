@@ -30,7 +30,9 @@ func Run(cfg Config) error {
 	}
 
 	m := New(cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// WithMouseCellMotion enables mouse-wheel events so the transcript viewport
+	// is scrollable (paired with PgUp/PgDn + sticky-bottom auto-scroll in model.go).
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if ss, ok := cfg.Runner.(sendSetter); ok {
 		ss.setSend(p.Send)
 	}

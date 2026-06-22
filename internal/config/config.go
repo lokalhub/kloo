@@ -25,17 +25,20 @@ const (
 	// set your actual model via --model or KLOO_MODEL.
 	DefaultModel       = "local"
 	DefaultTemperature = 0.1
-	DefaultMaxSteps    = 40
+	DefaultMaxSteps    = 500
 	DefaultMode        = "auto"
 	DefaultToolFormat  = "native" // native function-calling; XML is the fallback (Phase 02)
 	// DefaultMaxContextTokens bounds the per-step repo-map/context window the
 	// curator assembles (Phase 03). A conservative default for small local models.
 	DefaultMaxContextTokens = 8000
-	// Autonomous-loop safety budgets (Phase 04). Conservative, sized for a
-	// small-model run.
-	DefaultMaxTokens           = 200000 // cumulative prompt+completion tokens per run
-	DefaultMaxWallClockSeconds = 600    // 10 minutes
-	DefaultChurnRounds         = 3      // repeated failure/edit rounds before halting
+	// Autonomous-loop safety budgets (Phase 04). CHURN is the primary "stop when
+	// stuck" guard; these are loose backstops (see internal/config/effort.go).
+	// MaxTokens 0 ⇒ UNBOUNDED — cost is the endpoint/service's domain, and the
+	// working-memory feature is meant to let small models run long; steps/wall-clock
+	// are generous so a slow local model isn't cut off mid-progress.
+	DefaultMaxTokens           = 0    // 0 ⇒ unbounded cumulative tokens (churn/steps/wall-clock guard)
+	DefaultMaxWallClockSeconds = 3600 // 1 hour (final net for a churn-evading loop)
+	DefaultChurnRounds         = 3    // repeated failure/edit rounds before halting (the primary guard)
 )
 
 // Env var names (KLOO_-prefixed, SCREAMING_SNAKE). Extendable.

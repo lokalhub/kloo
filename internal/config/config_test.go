@@ -231,7 +231,7 @@ func TestResolveEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fast: %v", err)
 	}
-	if got.Effort != "fast" || got.Model != DefaultModel || got.MaxSteps != 20 || got.ChurnRounds != 2 || got.MaxTokens != 80000 {
+	if got.Effort != "fast" || got.Model != DefaultModel || got.MaxSteps != 50 || got.ChurnRounds != 2 || got.MaxTokens != 0 {
 		t.Errorf("fast tier = %+v", got)
 	}
 
@@ -240,13 +240,13 @@ func TestResolveEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("heavy: %v", err)
 	}
-	if got.Effort != "heavy" || got.Model != DefaultModel || got.MaxSteps != 80 || got.ChurnRounds != 10 {
+	if got.Effort != "heavy" || got.Model != DefaultModel || got.MaxSteps != 1000 || got.ChurnRounds != 10 {
 		t.Errorf("heavy tier = %+v", got)
 	}
 
 	// --model sets the model independently of the tier; the tier's budgets apply.
 	got, _ = Resolve(Flags{Effort: strp("heavy"), Model: strp("my-model")}, noEnv, missing)
-	if got.Model != "my-model" || got.MaxSteps != 80 {
+	if got.Model != "my-model" || got.MaxSteps != 1000 {
 		t.Errorf("model flag with tier = %+v", got)
 	}
 

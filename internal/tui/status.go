@@ -83,7 +83,12 @@ func (m Model) renderHeader() string {
 
 	// Trailing cluster: step (dim/secondary) · live token total · [⟲ compactions] · mode.
 	step := muted.Render(fmt.Sprintf("step %d/%d", s.step, s.maxSteps))
-	right := fmt.Sprintf("%s · %s/%s tok", step, human(s.tokens), human(s.maxTokens))
+	// maxTokens 0 ⇒ unbounded: show a plain counter, not "N/0".
+	tok := human(s.tokens) + " tok"
+	if s.maxTokens > 0 {
+		tok = human(s.tokens) + "/" + human(s.maxTokens) + " tok"
+	}
+	right := fmt.Sprintf("%s · %s", step, tok)
 	if s.compactions > 0 {
 		// Working memory folded the transcript this run — surfaced only when it
 		// actually happened, so a no-compaction run renders identically to before.
