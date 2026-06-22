@@ -133,6 +133,18 @@ func failResult() VerifyResult {
 	return VerifyResult{Command: "test", ExitCode: 1, Passed: false, Stdout: "FAIL"}
 }
 
+// proseResp is a model reply with prose content and NO tool call (a conversational
+// answer) — what triggers the ReasonAnswered path.
+func proseResp(t *testing.T, text string) string {
+	t.Helper()
+	resp := llm.ChatResponse{
+		Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: text}}},
+		Usage:   llm.Usage{TotalTokens: 5},
+	}
+	b, _ := json.Marshal(resp)
+	return string(b)
+}
+
 // ─── tests ──────────────────────────────────────────────────────────────────
 
 func TestLoopTransitionsInOrder(t *testing.T) {
@@ -152,6 +164,28 @@ func TestLoopTransitionsInOrder(t *testing.T) {
 	want := []State{StateAct, StateApply, StateVerify, StateDecide, StateStop}
 	if fmt.Sprint(seq) != fmt.Sprint(want) {
 		t.Errorf("state sequence = %v, want %v", seq, want)
+	}
+}
+
+// TestLoopConversationalReplyAnswers: a prose reply with no tool call (on the turn
+// and its corrective re-prompt) stops the loop calmly with ReasonAnswered — not
+// ReasonError/ReasonChurn. This is the "asked a question / said hi" case; the answer
+// is already streamed, so the loop must not churn on a (failing) verify.
+func TestLoopConversationalReplyAnswers(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: proseResp(t, "I listed the dir to understand the project.")},
+		llmtest.Mock{Body: proseResp(t, "No tool needed — just answering your question.")},
+	)
+	loop, calls := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
+	rep, err := loop.Run(context.Background(), "why did you list the dir?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonAnswered {
+		t.Errorf("reason = %q, want %q (conversational reply)", rep.Reason, ReasonAnswered)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("no tools should have been dispatched for a prose answer, got %v", *calls)
 	}
 }
 
