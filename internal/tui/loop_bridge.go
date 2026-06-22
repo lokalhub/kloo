@@ -144,9 +144,38 @@ func toolEvent(call tools.Call, res tools.Result) toolEventMsg {
 		return toolEventMsg{Name: "edit_file", Path: path, Edits: parseDiffEdits(path, str(call.Args["diff"]))}
 	case "run_command":
 		return toolEventMsg{Name: "run_command", Command: str(call.Args["command"]), ExitCode: res.ExitCode, Stderr: res.Stderr}
+	case "read_file":
+		// Read-only browsing is noise if it dumps the whole file: show the path and a
+		// dim line count, not the contents.
+		return toolEventMsg{Name: "read_file", Summary: pathSummary(call, res.Output, "line", "lines")}
+	case "list_dir":
+		return toolEventMsg{Name: "list_dir", Summary: pathSummary(call, res.Output, "entry", "entries")}
 	default:
 		return toolEventMsg{Name: call.Name, Summary: res.Output}
 	}
+}
+
+// pathSummary renders the compact one-line summary for a read-only tool: its path
+// argument (root "." shown as ".") plus a dim count of the result size — so the
+// transcript reads "read_file src/app.ts · 48 lines" instead of dumping the file.
+func pathSummary(call tools.Call, output, unit, units string) string {
+	path := str(call.Args["path"])
+	if path == "" {
+		path = "."
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimRight(output, "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return path
+	}
+	if n == 1 {
+		return fmt.Sprintf("%s  · 1 %s", path, unit)
+	}
+	return fmt.Sprintf("%s  · %d %s", path, n, units)
 }
 
 // parseDiffEdits parses an edit_file `diff` arg (a bare fenced SEARCH/REPLACE
