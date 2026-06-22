@@ -113,10 +113,11 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	m.tickCount = 0
 	files := append([]string{}, m.contextFiles...)
 	mode := m.mode
+	model := m.modelName // current model (switchable via /model) — applied to this run
 	runner := m.runner
 	return m, tea.Batch(
 		func() tea.Msg {
-			go runner.Start(ctx, line, mode, files)
+			go runner.Start(ctx, line, model, mode, files)
 			return nil
 		},
 		tickCmd(),

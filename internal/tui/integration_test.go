@@ -21,7 +21,7 @@ type scriptRunner struct {
 }
 
 func (r *scriptRunner) setSend(send func(tea.Msg)) { r.send = send }
-func (r *scriptRunner) Start(ctx context.Context, task string, mode Mode, files []string) {
+func (r *scriptRunner) Start(ctx context.Context, task, model string, mode Mode, files []string) {
 	for _, msg := range r.steps {
 		r.send(msg)
 	}
