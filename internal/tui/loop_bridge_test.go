@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lokalhub/kloo/internal/agent"
+	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -247,6 +248,49 @@ func TestReadonlyToolEventIsCompact(t *testing.T) {
 	one := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "x"}}, tools.Result{Output: "only line"})
 	if one.Summary != "x  · 1 line" {
 		t.Errorf("single-line summary = %q, want singular", one.Summary)
+	}
+}
+
+// TestSessionOutcomeCarriesError: the note appended after a run (fed to the next
+// submission) carries the stop reason, the error, and the failing verify output —
+// what a follow-up "what's the issue?" needs to be answerable.
+func TestSessionOutcomeCarriesError(t *testing.T) {
+	note := sessionOutcome(&agent.Report{
+		Reason: agent.ReasonError,
+		Steps:  4,
+		Err:    errors.New("verify: command not runnable"),
+		FinalVerify: agent.VerifyResult{
+			Command: "go test ./...", ExitCode: 1, Passed: false, Stderr: "no Go files in /app",
+		},
+	})
+	for _, want := range []string{"error", "command not runnable", "go test ./...", "exit 1", "no Go files"} {
+		if !strings.Contains(note.Content, want) {
+			t.Errorf("outcome note missing %q:\n%s", want, note.Content)
+		}
+	}
+}
+
+func TestSessionOutcomeSuccessIsClean(t *testing.T) {
+	note := sessionOutcome(&agent.Report{Reason: agent.ReasonSuccess, Steps: 12,
+		FinalVerify: agent.VerifyResult{Command: "npm run build", ExitCode: 0, Passed: true}})
+	if !strings.Contains(note.Content, "success") || !strings.Contains(note.Content, "passed=true") {
+		t.Errorf("success outcome note = %q", note.Content)
+	}
+}
+
+// TestCapSession keeps the most recent messages and never grows past the cap.
+func TestCapSession(t *testing.T) {
+	var s []llm.Message
+	for i := 0; i < maxSessionMessages+50; i++ {
+		s = append(s, llm.Message{Role: llm.RoleUser, Content: string(rune('a' + i%26))})
+	}
+	last := s[len(s)-1].Content
+	capped := capSession(s)
+	if len(capped) != maxSessionMessages {
+		t.Errorf("len = %d, want %d", len(capped), maxSessionMessages)
+	}
+	if capped[len(capped)-1].Content != last {
+		t.Errorf("cap dropped the newest message")
 	}
 }
 

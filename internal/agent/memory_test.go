@@ -92,6 +92,62 @@ func TestMemoryA1ShortTranscript(t *testing.T) {
 	}
 }
 
+// TestMemoryHistorySeededAsTail: prior-session History is included (so a follow-up
+// has context) and ordered before this run's turns, with the current task pinned.
+func TestMemoryHistorySeededAsTail(t *testing.T) {
+	task := "what's the issue?"
+	history := []llm.Message{
+		userMsg("rework the tabs"),
+		assistantMsg("[Previous run ended: error after 3 steps. Last verify: go test ./... (exit 1, passed=false).\nno Go files]"),
+	}
+	convo := []llm.Message{userMsg(task)} // fresh run, no steps yet
+
+	wm := NewWorkingMemory()
+	out, err := wm.Assemble(MemoryInput{Task: task, Convo: convo, History: history, WindowTokens: 8000, SystemTokens: 0})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if out[0].Content != task {
+		t.Errorf("out[0] = %q, want the current task pinned", out[0].Content)
+	}
+	joined := joinContents(out)
+	if !strings.Contains(joined, "go test ./... (exit 1") || !strings.Contains(joined, "rework the tabs") {
+		t.Errorf("history (prior task + outcome) not seeded into the prompt:\n%s", joined)
+	}
+}
+
+// TestMemoryHistoryCompactedFirst: under window pressure the OLDEST history is the
+// first thing folded into the summary, while the current task stays pinned and the
+// recent run turns stay verbatim.
+func TestMemoryHistoryCompactedFirst(t *testing.T) {
+	task := "continue"
+	// Bulky prior-session history that can't fit verbatim in a small window.
+	var history []llm.Message
+	for i := 0; i < 40; i++ {
+		history = append(history, obsTurn("HIST", i, 30))
+	}
+	convo := []llm.Message{userMsg(task), assistantMsg("recent-step-marker")}
+
+	wm := NewWorkingMemory()
+	out, err := wm.Assemble(MemoryInput{Task: task, Convo: convo, History: history, WindowTokens: 600, SystemTokens: 50})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if out[0].Content != task {
+		t.Errorf("task not pinned under pressure: out[0]=%q", out[0].Content)
+	}
+	if _, ok := hasSummary(out); !ok {
+		t.Errorf("expected a running summary when history overflows the window")
+	}
+	if wm.Stats().Compactions == 0 {
+		t.Errorf("expected a compaction (history overflowed the window)")
+	}
+	// The newest run turn survives verbatim (it's the freshest context).
+	if !strings.Contains(joinContents(out), "recent-step-marker") {
+		t.Errorf("most-recent run turn was dropped; it should survive verbatim")
+	}
+}
+
 // ─── A2: task is always first, regardless of tail length ──────────────────────
 
 func TestMemoryA2TaskAlwaysFirst(t *testing.T) {

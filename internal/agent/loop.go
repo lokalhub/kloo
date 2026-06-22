@@ -39,6 +39,13 @@ type Loop struct {
 	Model         string
 	Temperature   float64
 	Now           func() time.Time // injectable clock (defaults to time.Now)
+	// SessionHistory is the conversation from PRIOR runs in the same session (the
+	// TUI reuses one Loop across submissions). It is seeded into working memory as
+	// the oldest tail, so a follow-up ("what's the issue?", "now do the other
+	// file") sees what happened before — summarized oldest-first under window
+	// pressure, while the current task stays pinned. nil ⇒ a standalone run
+	// (byte-identical to before; headless and one-shot set nothing).
+	SessionHistory []llm.Message
 	// MaxConversation bounds how many recent transcript messages (plus the
 	// original task) are sent to the model per request, so the per-request prompt
 	// can't grow unbounded across a long run and overflow a small model's context
@@ -151,6 +158,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Elapsed:     st.Elapsed,
 			Compactions: compactions,
 			Ignored:     ignoredAll,
+			Transcript:  append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 		}
 		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
 			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
@@ -278,6 +286,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		h, merr := l.Memory.Assemble(MemoryInput{
 			Task:         task,
 			Convo:        convo,
+			History:      l.SessionHistory,
 			LastVerify:   lastVerify,
 			EditPath:     curEditPath,
 			FreshFile:    l.reread(curEditPath),

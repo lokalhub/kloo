@@ -176,6 +176,7 @@ var ErrWindowTooSmall = errors.New("agent: maxContextTokens below the irreducibl
 type MemoryInput struct {
 	Task         string        // convo[0], the goal — always pinned, never dropped
 	Convo        []llm.Message // full running transcript (Convo[0] is the task)
+	History      []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
 	LastVerify   VerifyResult  // pinned: the last real verify signal
 	EditPath     string        // file currently under edit ("" if none)
 	FreshFile    string        // EditPath re-read from disk this turn (bounded)
@@ -241,4 +242,8 @@ type Report struct {
 	Compactions int
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
+	// Transcript is this run's full conversation (task + every step). The TUI
+	// accumulates it into the session so the next submission carries context
+	// (seeded back via Loop.SessionHistory). Empty for callers that don't read it.
+	Transcript []llm.Message
 }

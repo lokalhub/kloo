@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,6 +216,47 @@ func TestLoopReadonlyRunDoesNotChurn(t *testing.T) {
 	}
 	if rep.Reason != ReasonAnswered {
 		t.Errorf("reason = %q, want %q", rep.Reason, ReasonAnswered)
+	}
+}
+
+// TestLoopSessionHistoryReachesModel is the end-to-end guard for session memory:
+// after a first run, seeding Loop.SessionHistory with its transcript (what the TUI
+// runner does) makes a SECOND run's request to the model carry that prior context —
+// so a follow-up like "what's the issue?" is answerable. Uses the REAL working
+// memory and inspects the captured request body.
+func TestLoopSessionHistoryReachesModel(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: proseResp(t, "Done — I renamed the tabs.")},                    // run 1: answers, no tool call
+		llmtest.Mock{Body: proseResp(t, "The build failed because of a missing import.")}, // run 2
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
+	loop.Memory = NewWorkingMemory() // session history flows through working memory
+
+	rep1, err := loop.Run(context.Background(), "rework the tabs into Home/Apps/Profile")
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if len(rep1.Transcript) == 0 {
+		t.Fatal("run 1 report carried no transcript to seed the session")
+	}
+
+	// Seed the next run with run 1's transcript (the runner's job) and ask a follow-up.
+	loop.SessionHistory = rep1.Transcript
+	if _, err := loop.Run(context.Background(), "what's the issue?"); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	// The SECOND request must include run 1's task as carried context.
+	reqs := srv.Requests()
+	if len(reqs) < 2 {
+		t.Fatalf("expected ≥2 requests, got %d", len(reqs))
+	}
+	last := string(reqs[len(reqs)-1])
+	if !strings.Contains(last, "rework the tabs into Home/Apps/Profile") {
+		t.Errorf("second run's request did not carry prior-session context:\n%s", last)
+	}
+	if !strings.Contains(last, "what's the issue?") {
+		t.Errorf("second run's request is missing the current task")
 	}
 }
 
