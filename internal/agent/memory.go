@@ -75,9 +75,13 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	vp, hasVerify := verifyPin(in.LastVerify)
 	fp, hasFile := filePin(in.EditPath, in.FreshFile)
 
-	// Recent tail: the transcript after the task, minus any stale read-dump of
-	// the file currently under edit (it is re-read fresh into the file pin).
-	allTail := recentTail(in.Convo, in.EditPath)
+	// Recent tail: prior-session turns (oldest) followed by this run's transcript
+	// after the task, minus any stale read-dump of the file currently under edit
+	// (it is re-read fresh into the file pin). Seeding History as the oldest tail
+	// means a follow-up has the prior run's context, and it's the first thing the
+	// compactor folds into the summary under window pressure — while the current
+	// task (in.Task) stays pinned regardless.
+	allTail := append(append([]llm.Message{}, in.History...), recentTail(in.Convo, in.EditPath)...)
 
 	// Pin tokens (everything pinned besides the task) — they share the hot budget
 	// with the tail.

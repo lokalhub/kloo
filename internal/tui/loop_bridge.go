@@ -9,6 +9,7 @@ import (
 
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/edit"
+	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -27,6 +28,11 @@ type LoopRunner struct {
 	baseSystem string // the loop's system prompt without any pinned files
 	maxTokens  int
 	send       func(tea.Msg)
+	// session is the conversation carried ACROSS submissions in one TUI session:
+	// each run's transcript plus a compact outcome note, fed back as the loop's
+	// SessionHistory so follow-ups ("what's the issue?", "now the other file") have
+	// context. Working memory compacts it under the window each turn.
+	session []llm.Message
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
@@ -84,8 +90,54 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 		r.loop.OnBeforeEdit = nil
 	}
 
+	// Carry context across submissions: seed this run with the session so far, then
+	// fold this run's transcript + a compact outcome note back in for the next one.
+	r.loop.SessionHistory = r.session
 	rep, _ := r.loop.Run(ctx, task)
+	if rep != nil {
+		r.session = append(r.session, rep.Transcript...)
+		r.session = append(r.session, sessionOutcome(rep))
+		r.session = capSession(r.session)
+	}
 	r.send(reportFor(rep, r.maxTokens))
+}
+
+// maxSessionMessages bounds the carried session so a very long interactive session
+// can't grow the in-memory transcript (re-assembled each turn) without limit.
+// Working memory already summarises old turns under the window; this just caps the
+// raw backlog, dropping the oldest beyond the limit.
+const maxSessionMessages = 300
+
+func capSession(s []llm.Message) []llm.Message {
+	if len(s) <= maxSessionMessages {
+		return s
+	}
+	return append([]llm.Message{}, s[len(s)-maxSessionMessages:]...)
+}
+
+// sessionOutcome is the compact note appended after a run so the NEXT submission
+// knows how this one ended — the key to answering follow-ups like "what's the
+// issue?". It carries the stop reason, any error, and the last verify (with its
+// failing output), which is exactly what a user asking about a failed run needs.
+func sessionOutcome(rep *agent.Report) llm.Message {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Previous run ended: %s after %d step(s).", rep.Reason, rep.Steps)
+	if rep.Err != nil {
+		fmt.Fprintf(&b, " Error: %s.", rep.Err.Error())
+	}
+	if rep.FinalVerify.Command != "" {
+		fmt.Fprintf(&b, " Last verify: %s (exit %d, passed=%t).", rep.FinalVerify.Command, rep.FinalVerify.ExitCode, rep.FinalVerify.Passed)
+		if !rep.FinalVerify.Passed {
+			if out := strings.TrimSpace(rep.FinalVerify.Stdout + "\n" + rep.FinalVerify.Stderr); out != "" {
+				fmt.Fprintf(&b, "\n%s", out)
+			}
+		}
+	}
+	if rep.RolledBack {
+		b.WriteString(" The workspace was rolled back to the pre-run checkpoint.")
+	}
+	b.WriteString("]")
+	return llm.Message{Role: llm.RoleAssistant, Content: b.String()}
 }
 
 // confirmGate sends a confirm request for an approve-each edit and waits for the
