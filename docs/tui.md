@@ -11,13 +11,18 @@ them. Launch the TUI by running `kloo` with no task argument.
 ## At a glance
 
 ```
-┌ kloo  qwen2.5-coder · medium     step 18/500 · 14.4k tok · auto ┐
-└─────────────────────────────────────────────────────────────────┘
+┌ kloo v0.2.0  qwen2.5-coder · medium     step 18/500 · 14.4k tok · auto ┐
+└────────────────────────────────────────────────────────────────────────┘
 
   … transcript (scroll: wheel / PgUp · PgDn) — assistant prose, tool cards, diffs …
 
   ⠹ Moonwalking…  editing src/app/app.ts · 12s · 14.4k tok · esc to interrupt
 ```
+
+The header leads with the build version (`kloo v0.2.0`), so you can always see
+which kloo you're running. A plain `go build` / `make binary` shows `kloo dev`;
+release binaries are stamped with their semver by goreleaser. (`kloo --version`
+prints the full `version (commit, date)` line.)
 
 ## 1. Live token counter
 

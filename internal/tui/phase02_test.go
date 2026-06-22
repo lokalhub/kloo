@@ -40,8 +40,8 @@ func TestPhaseComposedTranscript(t *testing.T) {
 	requireGolden(t, "phase-composed.golden", v)
 
 	for _, want := range []string{
-		"kloo  test-model · medium",  // reframed header lead
-		"● assistant", "• edit tab1", // markdown assistant
+		"kloo dev  test-model · medium", // reframed header lead (version "dev" for a local build)
+		"● assistant", "• edit tab1",    // markdown assistant
 		"✎ src/app/tabs/tabs.routes.ts", // diff card header
 		"⌘ run_command", "exit 0 ✓",     // pass run card
 		"ctrl+o to expand",    // truncated fail card

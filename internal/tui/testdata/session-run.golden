@@ -1,5 +1,5 @@
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ kloo  test-model                                        step 2/40 · 1.2k/8k tok · auto │
+│ kloo dev  test-model                                    step 2/40 · 1.2k/8k tok · auto │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ▸ you: make the three tabs Home/Apps/Profile, each name centered                        
                                                                                         

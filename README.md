@@ -104,8 +104,8 @@ The **full reference** — every flag, env var, the effort table, and the
 
 ## Interactive TUI
 
-The TUI shows a live header (model · effort · running token total · step ·
-mode), an animated thinking line, and a transcript of colour-coded tool cards,
+The TUI shows a live header (version · model · effort · running token total ·
+step · mode), an animated thinking line, and a transcript of colour-coded tool cards,
 diffs, command output, and assistant prose. Slash commands while running:
 `/add`, `/model`, `/mode`, `/stop`, `/diff`; `Esc`/`Ctrl-C` interrupts;
 `Ctrl-O` expands truncated command output. **Scroll** the transcript with the
