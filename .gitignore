@@ -40,7 +40,10 @@ go.work.sum
 # committed — regenerate with `ionic start … tabs --type=angular` (see the README).
 benchmark/fixture/
 benchmark/reference/
-benchmark/artifacts/
+# Generated run output / evidence snapshots (reproducible via the harness; stale
+# the moment code changes). Covers benchmark/artifacts AND benchmark/*/artifacts
+# (e.g. benchmark/memory/artifacts). The harness scripts + READMEs stay tracked.
+benchmark/**/artifacts/
 
 # ── Local env / secrets ─────────────────────────────────────────
 .env

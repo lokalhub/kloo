@@ -11,7 +11,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // State is a loop state. The machine cycles Act→Apply→Verify→Decide until Decide
@@ -126,6 +129,60 @@ type ChurnDetector interface {
 	Artifact() string // the repeated artifact, for the report
 }
 
+// WorkingMemory is kloo-core in-process working memory: it assembles the
+// per-request transcript messages (the system prompt is built separately by the
+// loop) so the pin-hot set + running summary + recent tail fit under the model's
+// context window, compacting cold turns into the summary when projected tokens
+// cross the trigger. It is a deterministic, in-process seam (same style as
+// Budget / ChurnDetector / Checkpointer) — NOT the BYO recall port — because the
+// working-set/compaction logic is the loop's brain and must stay fast and
+// deterministic (overview §2). P00 does NO LLM call: the fold is structural.
+type WorkingMemory interface {
+	// Assemble returns the per-request messages (history only; the loop prepends
+	// the system message), fitting the pin-hot set + running summary + recent
+	// tail under budget. Pure given its inputs.
+	//
+	// It returns ErrWindowTooSmall when the window is below the irreducible floor
+	// (the already-built system prompt + the task message convo[0]) — the one
+	// case where the hard ceiling cannot be honored without dropping the task.
+	// The loop turns this into a ReasonError stop, never an over-ceiling prompt
+	// and never a dropped goal (overview §2.4).
+	Assemble(in MemoryInput) ([]llm.Message, error)
+	// Stats exposes the last assembly for the report / UI / DoD tests.
+	Stats() MemoryStats
+}
+
+// ErrWindowTooSmall is returned by WorkingMemory.Assemble when WindowTokens is
+// smaller than the irreducible prompt floor (the assembled system prompt + the
+// task message). The loop surfaces it as a ReasonError config failure (raise
+// maxContextTokens), never an over-ceiling prompt or a silently dropped task.
+var ErrWindowTooSmall = errors.New("agent: maxContextTokens below the irreducible prompt floor (system prompt + task)")
+
+// MemoryInput is everything WorkingMemory.Assemble needs for one turn. The loop
+// fills it from its live state; the assembler is pure given these inputs.
+type MemoryInput struct {
+	Task         string        // convo[0], the goal — always pinned, never dropped
+	Convo        []llm.Message // full running transcript (Convo[0] is the task)
+	LastVerify   VerifyResult  // pinned: the last real verify signal
+	EditPath     string        // file currently under edit ("" if none)
+	FreshFile    string        // EditPath re-read from disk this turn (bounded)
+	WindowTokens int           // = cfg.MaxContextTokens (the hard ceiling)
+	SystemTokens int           // ApproxTokens(system prompt incl. repo map) already spent
+	MapBudget    int           // the repo-map token budget the loop used this turn (for Stats/observability)
+}
+
+// MemoryStats is the last assembly's accounting (for the report / UI / DoD).
+type MemoryStats struct {
+	PromptTokens  int  // projected tokens for the assembled request (system + history)
+	WindowTokens  int  // the hard ceiling this turn
+	Compactions   int  // cumulative this run
+	SummaryTokens int  // tokens in the running-summary slot
+	DroppedTurns  int  // cold turns folded into the summary this run
+	TrimmedTail   bool // tail shortened to fit after compaction
+	MapBudget     int  // repo-map budget the loop used (echoed from MemoryInput)
+	HotBudget     int  // pin-hot+tail token cap (hotBudgetFrac × window)
+}
+
 // Snapshot identifies a checkpointed working-tree state.
 type Snapshot struct {
 	Head     string // HEAD commit sha at checkpoint
@@ -165,6 +222,10 @@ type Report struct {
 	RolledBack  bool
 	TokensUsed  int
 	Elapsed     time.Duration
+	// Compactions is how many times working memory folded cold turns into the
+	// running summary this run (0 when memory is off or never triggered). The
+	// report/UI print it only when > 0, so the no-compaction output is unchanged.
+	Compactions int
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
 }

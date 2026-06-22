@@ -25,6 +25,13 @@ type Loop struct {
 	Churn      ChurnDetector
 	Checkpoint Checkpointer
 
+	// Memory is the in-process working-memory assembler. nil ⇒ the legacy
+	// boundedHistory path (byte-identical to pre-P00: the repo-map budget stays
+	// the full ContextTokens and the history is the bounded transcript). When
+	// set, act() caps the repo map at mapBudgetTokens(ContextTokens) and routes
+	// history assembly + whole-prompt compaction through it.
+	Memory WorkingMemory
+
 	// Context assembly.
 	Root          string // workspace root for the repo map (empty ⇒ skip map)
 	ContextTokens int    // per-step repo-map token budget
@@ -111,17 +118,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
-		snap       Snapshot
-		triedCkpt  bool
-		lastVerify VerifyResult
-		ignoredAll []string
-		step       int
+		snap        Snapshot
+		triedCkpt   bool
+		lastVerify  VerifyResult
+		curEditPath string // file last targeted by an edit ⇒ re-read fresh for the pin
+		ignoredAll  []string
+		step        int
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
 		l.onState(StateStop)
 		st := l.Budget.Stats()
+		compactions := 0
+		if l.Memory != nil {
+			compactions = l.Memory.Stats().Compactions
+		}
 		rep := &Report{
 			Reason:      reason,
 			Steps:       step,
@@ -131,6 +143,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Err:         runErr,
 			TokensUsed:  st.Tokens,
 			Elapsed:     st.Elapsed,
+			Compactions: compactions,
 			Ignored:     ignoredAll,
 		}
 		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
@@ -161,7 +174,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 
 		// ── ACT ─────────────────────────────────────────────────────────────
 		l.onState(StateAct)
-		call, ignored, usage, msg, err := l.act(ctx, task, convo)
+		call, ignored, usage, msg, err := l.act(ctx, task, convo, lastVerify, curEditPath)
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish(ReasonInterrupted, nil, nil, nil)
@@ -172,6 +185,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		convo = append(convo, msg)
 		for _, ig := range ignored {
 			ignoredAll = append(ignoredAll, ig.Name)
+		}
+
+		// Track the file under edit so next turn re-reads it fresh for the pin
+		// (working memory) instead of trusting the stale transcript copy.
+		if isEditTool(call.Name) {
+			curEditPath = str(call.Args["path"])
 		}
 
 		// Lazy checkpoint before the first edit (read-only runs take none).
@@ -230,9 +249,40 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 // act runs one model turn: assemble per-step context, call the model, and reduce
 // to a single tool call (recording any extras as ignored). A malformed/no-call
 // reply gets exactly one corrective re-prompt before surfacing an error.
-func (l *Loop) act(ctx context.Context, task string, convo []llm.Message) (tools.Call, []tools.Call, llm.Usage, llm.Message, error) {
-	sys := llm.Message{Role: llm.RoleSystem, Content: l.systemWithContext(task)}
-	msgs := append([]llm.Message{sys}, boundedHistory(convo, l.maxConv())...)
+func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVerify VerifyResult, curEditPath string) (tools.Call, []tools.Call, llm.Usage, llm.Message, error) {
+	// Repo-map budget: the legacy path keeps the full window (byte-identical to
+	// pre-P00); the memory path caps it at mapBudgetTokens so the map can no
+	// longer eat the whole window (the Lead-1 fix — gated behind Memory != nil).
+	mapBudget := l.ContextTokens
+	if l.Memory != nil {
+		mapBudget = mapBudgetTokens(l.ContextTokens)
+	}
+	sys := llm.Message{Role: llm.RoleSystem, Content: l.systemWithContext(task, mapBudget)}
+
+	// History: working memory when set (pin-hot + summary + compaction under the
+	// window), else the legacy bounded transcript (reused, not forked).
+	var hist []llm.Message
+	if l.Memory != nil {
+		h, merr := l.Memory.Assemble(MemoryInput{
+			Task:         task,
+			Convo:        convo,
+			LastVerify:   lastVerify,
+			EditPath:     curEditPath,
+			FreshFile:    l.reread(curEditPath),
+			WindowTokens: l.ContextTokens,
+			SystemTokens: repomap.ApproxTokens(sys.Content),
+			MapBudget:    mapBudget,
+		})
+		if merr != nil {
+			// ErrWindowTooSmall ⇒ a config error surfaced as a ReasonError stop.
+			return tools.Call{}, nil, llm.Usage{}, llm.Message{}, merr
+		}
+		hist = h
+	} else {
+		hist = boundedHistory(convo, l.maxConv())
+	}
+
+	msgs := append([]llm.Message{sys}, hist...)
 	req := l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,
 		Messages:    msgs,
@@ -292,17 +342,19 @@ func estimateUsage(u llm.Usage, msgs []llm.Message, msg llm.Message) llm.Usage {
 
 // systemWithContext builds the per-step system prompt with a freshly curated
 // repo map (so context is re-curated each turn, not accumulated unbounded).
-func (l *Loop) systemWithContext(task string) string {
-	ctxStr := l.assembleContext(task)
+// mapBudget is the repo-map token budget for this turn (the full window on the
+// legacy path; mapBudgetTokens(window) when working memory is engaged).
+func (l *Loop) systemWithContext(task string, mapBudget int) string {
+	ctxStr := l.assembleContext(task, mapBudget)
 	if ctxStr == "" {
 		return l.System
 	}
 	return l.System + "\n\nRepository map (most relevant first):\n" + ctxStr
 }
 
-// assembleContext runs the Phase-03 pipeline for the task, bounded by
-// ContextTokens. Any failure degrades to empty context (the loop still runs).
-func (l *Loop) assembleContext(task string) string {
+// assembleContext runs the Phase-03 pipeline for the task, bounded by mapBudget.
+// Any failure degrades to empty context (the loop still runs).
+func (l *Loop) assembleContext(task string, mapBudget int) string {
 	if l.Root == "" {
 		return ""
 	}
@@ -321,12 +373,36 @@ func (l *Loop) assembleContext(task string) string {
 		byFile[s.File] = append(byFile[s.File], s)
 	}
 	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task})
-	budget := l.ContextTokens
+	budget := mapBudget
 	if budget <= 0 {
 		budget = 2000
 	}
 	ctxStr, _ := repomap.Assemble(ranked, budget, repomap.ApproxTokens)
 	return ctxStr
+}
+
+// reread returns the current content of path, freshly read through the jailed
+// workspace (overview §3: re-read code from disk, never trust the stale
+// transcript copy). It is bounded so a huge file can't blow the hot budget;
+// the assembler truncates further under window pressure. Any failure (no path,
+// no root, jail escape, missing file) degrades to "" — the file pin is simply
+// omitted, never a panic.
+func (l *Loop) reread(path string) string {
+	if path == "" || l.Root == "" {
+		return ""
+	}
+	ws, err := tools.NewWorkspace(l.Root)
+	if err != nil {
+		return ""
+	}
+	content, err := tools.ReadFile(ws, path)
+	if err != nil {
+		return ""
+	}
+	if max := maxKeepItemTokens * 4; len(content) > max {
+		content = content[:max] + "\n…[truncated; re-read on demand]\n"
+	}
+	return content
 }
 
 // budgetEvidence renders the tripped budget's limit vs observed for the report.
