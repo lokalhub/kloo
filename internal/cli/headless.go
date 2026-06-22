@@ -50,11 +50,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System: "You are kloo, an autonomous coding assistant. Each turn, make exactly one " +
-			"tool call to read, edit, or run a command, working toward the user's task until " +
-			"the verify command passes. Use SEARCH/REPLACE edits; never rewrite whole files.",
-		Model:       cfg.Model,
-		Temperature: cfg.Temperature,
+		System:        defaultSystemPrompt,
+		StallRounds:   cfg.ChurnRounds,
+		Model:         cfg.Model,
+		Temperature:   cfg.Temperature,
 	}
 
 	// Stream progress/tools to out. Deltas are buffered and flushed on the next

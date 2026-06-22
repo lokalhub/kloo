@@ -164,8 +164,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "go test ./...", "verify command the loop runs each step (the real success signal)")
 	f.BoolVar(&flagHeadless, "headless", false, "run the autonomous loop non-interactively (no TTY), streaming progress to stdout; requires a task arg")
-	f.BoolVar(&flagNewSess, "new", false, "start a fresh session instead of resuming this workspace's saved one")
-	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (see {workspace}/.kloo/sessions)")
+	f.BoolVar(&flagNewSess, "new", false, "start a fresh session (the default; sessions are no longer auto-resumed)")
+	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (printed on exit; see {workspace}/.kloo/sessions)")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +55,15 @@ type Loop struct {
 	// ContextTokens). 0 ⇒ DefaultMaxConversation.
 	MaxConversation int
 
+	// StallRounds is the stall backstop threshold: after this many CONSECUTIVE
+	// no-progress turns (no edit landed, the file tree unchanged, AND the verify
+	// result unchanged) the loop stops as ReasonAnswered — the model is spinning on
+	// redundant read-only/no-op commands without calling finish. This is a
+	// no-progress counter (it resets to 0 on any progress), ORTHOGONAL to MaxSteps:
+	// it fires at a small N (≈ ChurnRounds), hundreds of steps before the budget
+	// ceiling, so the two never overlap. 0 ⇒ DefaultStallRounds.
+	StallRounds int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -84,9 +95,22 @@ func (l *Loop) onState(s State) {
 // token budget (budget.go) is the separate run-level ceiling.
 const DefaultMaxConversation = 30
 
+// DefaultStallRounds is the stall backstop used when StallRounds is unset. Kept
+// small (a handful of turns) so a spinning model is caught quickly, yet large
+// enough to let the model read a few files before its first edit without tripping.
+const DefaultStallRounds = 3
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
+}
+
+// stallLimit is the effective stall backstop threshold.
+func (l *Loop) stallLimit() int {
+	if l.StallRounds > 0 {
+		return l.StallRounds
+	}
+	return DefaultStallRounds
 }
 
 // maxConv returns the effective per-request transcript bound.
@@ -137,6 +161,13 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		curEditPath string // file last targeted by an edit ⇒ re-read fresh for the pin
 		ignoredAll  []string
 		step        int
+		edited      bool // has the agent applied an edit this run? gates ReasonSuccess
+
+		// Stall backstop state: a no-progress counter (resets on any progress) that
+		// catches a model spinning on read-only/no-op commands without calling finish.
+		stall       int
+		stallSeeded bool
+		prevFp      string // workspace tree fingerprint from the previous turn
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -207,6 +238,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			ignoredAll = append(ignoredAll, ig.Name)
 		}
 
+		// ── FINISH (explicit terminator) ─────────────────────────────────────
+		// The model declared it is done. Honour it as a calm terminal stop — this
+		// is how a no-edit / question task ends cleanly without spinning, which a
+		// small model rarely manages via a tool-free turn (ReasonAnswered). The
+		// label still hinges on verify, not self-report (kloo trusts only verify):
+		// run one final verify — Success when it passes, else Answered (the model's
+		// summary stands, but nothing was verified).
+		if call.Name == tools.NameFinish {
+			convo = append(convo, observation(call, tools.Result{Output: str(call.Args["summary"])}, nil))
+			lastVerify = l.Verifier.Verify(ctx)
+			if lastVerify.Err == nil && lastVerify.Passed {
+				return finish(ReasonSuccess, nil, nil, nil)
+			}
+			return finish(ReasonAnswered, nil, nil, nil)
+		}
+
 		// Track the file under edit so next turn re-reads it fresh for the pin
 		// (working memory) instead of trusting the stale transcript copy.
 		if isEditTool(call.Name) {
@@ -237,6 +284,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
 		}
+		if isEditTool(call.Name) && derr == nil {
+			edited = true // a real change landed this run
+		}
 		convo = append(convo, observation(call, result, derr))
 
 		// ── VERIFY ──────────────────────────────────────────────────────────
@@ -251,19 +301,76 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			return finish(ReasonError, fmt.Errorf("verify: %w", lastVerify.Err), nil, nil)
 		}
 
-		// Feed churn: the failing verify output (empty when passed) + the edit.
+		// Feed churn: the failing verify output (empty when passed), the edit, and
+		// whether the turn took a non-edit side-effecting action. A run_command that
+		// launched (derr == nil) can mutate the tree (rm/mv/sed -i) yet leaves no edit
+		// signature — without flagging it, shell-driven work is invisible to the churn
+		// rail and a stuck run loops to the budget ceiling (see types.Turn.Acted).
 		l.Churn.Observe(Turn{
 			VerifyOutput: failingOutput(lastVerify),
 			Edit:         editSignature(call),
+			Acted:        call.Name == tools.NameRunCommand && derr == nil,
 		})
 
 		// ── DECIDE ──────────────────────────────────────────────────────────
 		l.onState(StateDecide)
-		if lastVerify.Passed {
+		// Success means the agent's CHANGE verifies — not that an unrelated verify
+		// happens to pass. A read-only run (e.g. list_dir/read to answer a question)
+		// must NOT be declared COMPLETE just because `go test` trivially passes; that
+		// cut the model off before it could answer. Require an edit this run; an
+		// already-passing, no-edit run instead continues until the model answers
+		// (ReasonAnswered) or a budget/churn rail fires.
+		if lastVerify.Passed && edited {
 			return finish(ReasonSuccess, nil, nil, nil)
+		}
+
+		// Stall backstop: a no-progress counter, ORTHOGONAL to MaxSteps. It engages
+		// ONLY when verify is PASSING — a green check with no edit and no tree change
+		// for stallLimit consecutive turns means the model is spinning on redundant
+		// read-only commands (re-confirming a done state with echo/ls) instead of
+		// calling finish. A FAILING verify is deliberately left to churn + budget, so
+		// a legitimate read-heavy run toward a fix (read many files, THEN edit) is
+		// never cut off. Resets to 0 on any progress, so it fires at a small N far
+		// below the step budget — the two ceilings never overlap.
+		editedThisTurn := isEditTool(call.Name) && derr == nil
+		fp := l.treeFingerprint()
+		switch {
+		case !stallSeeded:
+			stallSeeded = true // first turn establishes the baseline; nothing to compare yet
+		case !lastVerify.Passed:
+			stall = 0 // red verify ⇒ churn/budget own this; never stall honest exploration
+		case editedThisTurn || fp != prevFp:
+			stall = 0 // real progress (an edit, or a run_command that changed the tree)
+		default:
+			stall++ // green verify, nothing changed ⇒ a confirming-spin
+		}
+		prevFp = fp
+		if stall >= l.stallLimit() {
+			return finish(ReasonAnswered, nil, nil, nil)
 		}
 		// otherwise loop; budget/churn re-checked at the top of the next turn
 	}
+}
+
+// treeFingerprint is a cheap signature of the workspace's files (sorted
+// path:size), so a run_command that mutates the tree (rm/mv/touch) registers as
+// progress for the stall backstop even though it leaves no edit_file signature.
+// Reuses the repo-map walker (which already runs each turn) and degrades to "" on
+// any error — an empty, stable fingerprint simply makes the tree a no-op signal,
+// leaving the verify-change and edit signals to drive the backstop.
+func (l *Loop) treeFingerprint() string {
+	if l.Root == "" {
+		return ""
+	}
+	nodes, err := repomap.Walk(l.Root)
+	if err != nil {
+		return ""
+	}
+	h := fnv.New64a()
+	for _, n := range repomap.Files(nodes) {
+		fmt.Fprintf(h, "%s:%d\n", n.Path, n.Size)
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // act runs one model turn: assemble per-step context, call the model, and reduce

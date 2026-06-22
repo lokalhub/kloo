@@ -37,9 +37,9 @@ running summary. **[docs/memory.md](docs/memory.md)** has the diagrams.
 
 kloo also remembers the conversation **across runs and restarts**, per workspace,
 so follow-ups ("what's the issue?", "continue") resume with context. Sessions live
-in `{workspace}/.kloo/sessions/` (git-ignored automatically); plain `kloo`
-auto-resumes a workspace's session (`--new` / `--resume <id>` to override). See
-**[docs/sessions.md](docs/sessions.md)**.
+in `{workspace}/.kloo/sessions/` (git-ignored automatically). Each `kloo` launch
+starts a **fresh** session; on exit it prints the session id so you can reopen it
+with `--resume <id>`. See **[docs/sessions.md](docs/sessions.md)**.
 
 ## Quick start
 

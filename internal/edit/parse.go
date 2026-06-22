@@ -107,6 +107,80 @@ func Parse(s string) ([]Block, error) {
 	return blocks, nil
 }
 
+// ParseFlexible parses SEARCH/REPLACE blocks accepting BOTH the fenced form
+// (Parse) and bare, unfenced markers (parseBare). Small local models routinely
+// omit the ``` fence; strict Parse then finds nothing and a caller that knows the
+// target file (the edit_file tool) would otherwise silently no-op — the model
+// thinks it edited, the file is untouched, and the run loops. A diff that opens a
+// real but broken block still surfaces ErrMalformedBlock; only genuinely
+// block-shaped input is accepted.
+func ParseFlexible(s string) ([]Block, error) {
+	blocks, err := Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(blocks) > 0 {
+		return blocks, nil
+	}
+	return parseBare(s)
+}
+
+// parseBare parses unfenced SEARCH/REPLACE blocks: the bare marker sequence with
+// no surrounding ``` fence and no filename line (the caller supplies the path, so
+// each Block's File is left empty for the tool to retarget). Malformed input that
+// opens a SEARCH still errors — it is never silently dropped.
+func parseBare(s string) ([]Block, error) {
+	lines := strings.Split(s, "\n")
+	var blocks []Block
+
+	i := 0
+	for i < len(lines) {
+		if trim(lines[i]) != markerSearch {
+			i++
+			continue
+		}
+		searchIdx := i
+
+		dividerIdx := -1
+		for j := searchIdx + 1; j < len(lines); j++ {
+			t := trim(lines[j])
+			if t == markerDivider {
+				dividerIdx = j
+				break
+			}
+			if t == markerReplace || t == markerSearch {
+				break
+			}
+		}
+		if dividerIdx == -1 {
+			return nil, fmt.Errorf("edit: SEARCH without a %q divider: %w", markerDivider, ErrMalformedBlock)
+		}
+
+		replaceIdx := -1
+		for j := dividerIdx + 1; j < len(lines); j++ {
+			t := trim(lines[j])
+			if t == markerReplace {
+				replaceIdx = j
+				break
+			}
+			if t == markerSearch || t == markerDivider {
+				break
+			}
+		}
+		if replaceIdx == -1 {
+			return nil, fmt.Errorf("edit: block without a %q terminator: %w", markerReplace, ErrMalformedBlock)
+		}
+
+		blocks = append(blocks, Block{
+			Search:  body(lines[searchIdx+1 : dividerIdx]),
+			Replace: body(lines[dividerIdx+1 : replaceIdx]),
+		})
+		i = replaceIdx + 1
+	}
+
+	return blocks, nil
+}
+
 func trim(s string) string { return strings.TrimSpace(s) }
 
 // body reconstructs a SEARCH/REPLACE section body from its content lines,

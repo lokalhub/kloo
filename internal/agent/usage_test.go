@@ -47,7 +47,7 @@ func TestEstimateUsageFillsZero(t *testing.T) {
 // TestLoopEstimatesWhenServerOmitsUsage: a run whose model response reports zero
 // usage still produces a non-zero TokensUsed via the estimate fallback.
 func TestLoopEstimatesWhenServerOmitsUsage(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 0, tcSpec{"read_file", map[string]any{"path": "a.go"}})})
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 0, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	rep, err := loop.Run(context.Background(), "do it")
@@ -62,7 +62,7 @@ func TestLoopEstimatesWhenServerOmitsUsage(t *testing.T) {
 // TestLoopUsesServerUsage: when the server reports usage, the run's TokensUsed is
 // exactly that value — the estimate is not applied.
 func TestLoopUsesServerUsage(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1410, tcSpec{"read_file", map[string]any{"path": "a.go"}})})
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1410, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	rep, err := loop.Run(context.Background(), "do it")
@@ -77,7 +77,7 @@ func TestLoopUsesServerUsage(t *testing.T) {
 // TestLoopTokensMonotonic: across a multi-turn run whose server omits usage, the
 // per-turn progress token total is monotonically non-decreasing and ends > 0.
 func TestLoopTokensMonotonic(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 0, tcSpec{"read_file", map[string]any{"path": "a.go"}})})
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 0, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
 	// fail, fail, pass → three turns of token accrual.
 	loop, _ := newLoop(t, srv,
 		&stubVerifier{results: []VerifyResult{failResult(), failResult(), passResult()}},

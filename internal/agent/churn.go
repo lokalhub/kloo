@@ -22,7 +22,7 @@ type churnDetector struct {
 	lastEdit  string
 	editCount int
 
-	everEdited bool // has the agent attempted ANY edit this run?
+	everActed bool // has the agent taken ANY side-effecting action this run (edit OR run_command)?
 
 	artifact string // the repeated artifact, for the report
 }
@@ -40,9 +40,16 @@ func (c *churnDetector) Observe(t Turn) {
 	// Edit signal first: a DISTINCT edit is forward progress (the agent changed
 	// the code), so it both resets the repeated-edit run and — below — clears the
 	// repeated-failure run. The same edit repeated still climbs editCount.
+	// A side-effecting run_command (no Edit string, but Acted) also lifts the agent
+	// off the read-only baseline so the failure rail can engage — without resetting
+	// the repeated-edit run, since it changed no edit_file/write_file.
+	if t.Acted {
+		c.everActed = true
+	}
+
 	distinctEdit := false
 	if t.Edit != "" {
-		c.everEdited = true
+		c.everActed = true
 		ne := normalizeChurn(t.Edit)
 		if ne == c.lastEdit {
 			c.editCount++
@@ -60,16 +67,19 @@ func (c *churnDetector) Observe(t Turn) {
 	// rail (repeated edit, or repeated failure with no edits) without strangling
 	// honest multi-file refactors.
 	//
-	// Crucially, a repeated failure only counts once the agent has attempted at
-	// least one edit. Before any edit, a failing verify is the project's BASELINE
-	// (e.g. the default `go test` failing on a non-Go app while the agent just
-	// reads/explores, or a conversational "hello" that triggers no real work) — not
-	// the agent stuck redoing a broken fix. Counting it churned read-only runs.
+	// Crucially, a repeated failure only counts once the agent has taken at least
+	// one side-effecting action (an edit OR a run_command). Before any action, a
+	// failing verify is the project's BASELINE (e.g. the default `go test` failing
+	// on a non-Go app while the agent just reads/explores with read_file/list_dir,
+	// or a conversational "hello" that triggers no real work) — not the agent stuck
+	// redoing a broken fix. Counting it churned read-only runs. A run_command counts
+	// as acting because it can mutate the tree (rm/mv/sed -i), so work done through
+	// the shell — invisible to the edit signal — no longer hides a stuck loop.
 	switch {
 	case t.VerifyOutput == "":
 		c.lastFail = ""
 		c.failCount = 0
-	case !c.everEdited:
+	case !c.everActed:
 		c.lastFail = normalizeChurn(t.VerifyOutput) // remember it, but don't count it as no-progress yet
 		c.failCount = 0
 	case distinctEdit:
@@ -108,7 +118,7 @@ func (c *churnDetector) Artifact() string { return c.artifact }
 func (c *churnDetector) Reset() {
 	c.lastFail, c.failCount = "", 0
 	c.lastEdit, c.editCount = "", 0
-	c.everEdited = false
+	c.everActed = false
 	c.artifact = ""
 }
 
