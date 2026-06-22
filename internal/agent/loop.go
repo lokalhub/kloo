@@ -116,6 +116,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		now = time.Now
 	}
 
+	// Per-run state must start clean: the TUI reuses ONE Loop across many task
+	// submissions, so without resetting, run N inherits run N-1's token/step totals
+	// and churn streak (which made a second "hello" churn at step 1).
+	l.Budget.Reset()
+	l.Churn.Reset()
+
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
 		snap        Snapshot

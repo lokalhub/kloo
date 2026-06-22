@@ -117,6 +117,11 @@ type Budget interface {
 	AddTokens(n int)
 	Check() (tripped bool, kind BudgetKind)
 	Stats() BudgetStats
+	// Reset clears the per-run counters (steps, tokens, wall-clock baseline) while
+	// keeping the configured ceilings, so a reused Loop (e.g. the TUI submits many
+	// tasks against one Loop) starts each run fresh instead of inheriting the prior
+	// run's totals.
+	Reset()
 }
 
 // Turn is what the churn detector observes each round: the (normalised) failing
@@ -131,6 +136,10 @@ type ChurnDetector interface {
 	Observe(t Turn)
 	Check() (churned bool, kind ChurnKind)
 	Artifact() string // the repeated artifact, for the report
+	// Reset clears the accumulated repeat counters so a reused Loop starts each run
+	// fresh — without this, a second task on the same Loop inherits the prior run's
+	// failure/edit streak and can churn at step 1.
+	Reset()
 }
 
 // WorkingMemory is kloo-core in-process working memory: it assembles the

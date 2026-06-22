@@ -48,6 +48,7 @@ func (b *stubBudget) Check() (bool, BudgetKind) {
 func (b *stubBudget) Stats() BudgetStats {
 	return BudgetStats{Steps: b.steps, MaxSteps: b.tripAt, Tokens: b.tokens, MaxTokens: 0}
 }
+func (b *stubBudget) Reset() { b.steps, b.tokens = 0, 0 }
 
 type stubChurn struct {
 	churnAfter int // churn once Observe has been called this many times (0 ⇒ never)
@@ -63,6 +64,7 @@ func (c *stubChurn) Check() (bool, ChurnKind) {
 	return false, ""
 }
 func (c *stubChurn) Artifact() string { return "repeated-artifact" }
+func (c *stubChurn) Reset()           { c.observes = 0 }
 
 // recordTool is a registry Tool that records the calls dispatched to it.
 type recordTool struct {
@@ -186,6 +188,33 @@ func TestLoopConversationalReplyAnswers(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Errorf("no tools should have been dispatched for a prose answer, got %v", *calls)
+	}
+}
+
+// TestLoopReadonlyRunDoesNotChurn is the end-to-end guard for the "hello churns"
+// bug: with the REAL churn detector and a verify that always fails (e.g. the
+// default `go test` on a non-Go app), a run that only reads/explores — never
+// edits — must NOT trip repeated-failure churn, no matter how many failing steps.
+// It runs until the model answers in prose (ReasonAnswered) instead.
+func TestLoopReadonlyRunDoesNotChurn(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 3, tcSpec{"read_file", map[string]any{"path": "a.go"}})},
+		llmtest.Mock{Body: toolResp(t, 3, tcSpec{"read_file", map[string]any{"path": "b.go"}})},
+		llmtest.Mock{Body: toolResp(t, 3, tcSpec{"read_file", map[string]any{"path": "c.go"}})},
+		llmtest.Mock{Body: toolResp(t, 3, tcSpec{"read_file", map[string]any{"path": "d.go"}})},
+		llmtest.Mock{Body: proseResp(t, "This is an Angular project — what would you like me to do?")},
+	)
+	// churn after 3 repeats; verify fails every step; budget never trips.
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, NewChurnDetector(3))
+	rep, err := loop.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason == ReasonChurn {
+		t.Fatalf("read-only run churned with no edits (the 'hello churns' bug); reason=%q", rep.Reason)
+	}
+	if rep.Reason != ReasonAnswered {
+		t.Errorf("reason = %q, want %q", rep.Reason, ReasonAnswered)
 	}
 }
 

@@ -22,6 +22,8 @@ type churnDetector struct {
 	lastEdit  string
 	editCount int
 
+	everEdited bool // has the agent attempted ANY edit this run?
+
 	artifact string // the repeated artifact, for the report
 }
 
@@ -40,6 +42,7 @@ func (c *churnDetector) Observe(t Turn) {
 	// repeated-failure run. The same edit repeated still climbs editCount.
 	distinctEdit := false
 	if t.Edit != "" {
+		c.everEdited = true
 		ne := normalizeChurn(t.Edit)
 		if ne == c.lastEdit {
 			c.editCount++
@@ -56,9 +59,18 @@ func (c *churnDetector) Observe(t Turn) {
 	// is only "no progress" when the agent also made no new edit. This keeps the
 	// rail (repeated edit, or repeated failure with no edits) without strangling
 	// honest multi-file refactors.
+	//
+	// Crucially, a repeated failure only counts once the agent has attempted at
+	// least one edit. Before any edit, a failing verify is the project's BASELINE
+	// (e.g. the default `go test` failing on a non-Go app while the agent just
+	// reads/explores, or a conversational "hello" that triggers no real work) — not
+	// the agent stuck redoing a broken fix. Counting it churned read-only runs.
 	switch {
 	case t.VerifyOutput == "":
 		c.lastFail = ""
+		c.failCount = 0
+	case !c.everEdited:
+		c.lastFail = normalizeChurn(t.VerifyOutput) // remember it, but don't count it as no-progress yet
 		c.failCount = 0
 	case distinctEdit:
 		c.lastFail = normalizeChurn(t.VerifyOutput)
@@ -89,6 +101,16 @@ func (c *churnDetector) Check() (bool, ChurnKind) {
 
 // Artifact returns the repeated failure output / edit that caused the churn.
 func (c *churnDetector) Artifact() string { return c.artifact }
+
+// Reset clears all accumulated state so a reused detector starts each run fresh
+// (n is configuration, so it's kept). Without this, a second task on the same
+// Loop inherits the prior run's failure/edit streak and churns prematurely.
+func (c *churnDetector) Reset() {
+	c.lastFail, c.failCount = "", 0
+	c.lastEdit, c.editCount = "", 0
+	c.everEdited = false
+	c.artifact = ""
+}
 
 // Normalisation regexes: strip volatile bits so two semantically-identical
 // failures/edits compare equal.
