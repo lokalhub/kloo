@@ -110,8 +110,11 @@ diffs, command output, and assistant prose. Slash commands while running:
 `/add`, `/model`, `/mode`, `/stop`, `/diff`; `Esc`/`Ctrl-C` interrupts;
 `Ctrl-O` expands truncated command output. **Scroll** the transcript with the
 mouse wheel or `PgUp`/`PgDn` — it sticks to the newest output unless you scroll
-up. When a run stops on an error, the report shows a plain-language reason
-(e.g. "Couldn't reach the model endpoint…"), not a bare `ERROR`.
+up. **Copy:** `Ctrl-Y` copies the last assistant reply to the clipboard (OSC 52,
+works over SSH); or **`Shift`+drag** for native terminal selection (the mouse-wheel
+scroll captures plain drag, so hold `Shift`). When a run stops on an error, the
+report shows a plain-language reason (e.g. "Couldn't reach the model endpoint…"),
+not a bare `ERROR`.
 
 See **[docs/tui.md](docs/tui.md)** for the full TUI experience — the live token
 counter, the semantic colour theme and `NO_COLOR` degrade, and the transcript

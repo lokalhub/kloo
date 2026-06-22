@@ -10,6 +10,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -74,6 +75,10 @@ type Model struct {
 
 	// pendingDiffs accumulates edit cards for the /diff command.
 	pendingDiffs []editCardItem
+
+	// pastes holds long/multi-line pastes collapsed to placeholders in the input
+	// (paste.go); expanded to full text when the task is submitted.
+	pastes []pastedText
 
 	// source is the v1 task source (keyboard); the seam admits a future stdin
 	// source (source.go).
@@ -154,6 +159,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProgress(msg)
 	case memoryMsg:
 		return m.handleMemory(msg)
+	case clipboardMsg:
+		return m.appendItem(infoItem{text: fmt.Sprintf("copied %d chars to clipboard", msg.chars)}), nil
 	case tickMsg:
 		return m.handleTick(msg)
 	case reportMsg:
@@ -211,6 +218,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmKey(msg)
 	}
 
+	// A long/multi-line bracketed paste collapses to a placeholder instead of
+	// flooding the input (paste.go). Short pastes fall through to the input.
+	if msg.Paste {
+		if nm, handled := m.handlePaste(string(msg.Runes)); handled {
+			return nm, nil
+		}
+	}
+
 	switch msg.Type {
 	case tea.KeyPgUp, tea.KeyPgDown:
 		// Page the transcript viewport for scrollback (the input never uses these,
@@ -218,6 +233,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
+	case tea.KeyCtrlY:
+		// Copy the last assistant reply to the system clipboard (OSC 52). No external
+		// tool, works over SSH. Shift+drag native selection is the fallback where the
+		// terminal doesn't support OSC 52.
+		text := m.lastAssistantText()
+		if text == "" {
+			return m.appendItem(infoItem{text: "nothing to copy yet"}), nil
+		}
+		return m, copyToClipboard(text)
 	case tea.KeyEnter:
 		return m.submit()
 	case tea.KeyCtrlO:
