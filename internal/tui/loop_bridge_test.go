@@ -251,11 +251,12 @@ func TestReadonlyToolEventIsCompact(t *testing.T) {
 	}
 }
 
-// TestSessionOutcomeCarriesError: the note appended after a run (fed to the next
-// submission) carries the stop reason, the error, and the failing verify output —
-// what a follow-up "what's the issue?" needs to be answerable.
-func TestSessionOutcomeCarriesError(t *testing.T) {
-	note := sessionOutcome(&agent.Report{
+// TestSessionRecapCarriesError: the recap fed to the next submission carries the
+// task, stop reason, error, and failing verify output. Crucially it is a USER-role
+// context message, not an assistant turn — a small model parrots a replayed
+// assistant note verbatim (the "kloo no longer works" regression).
+func TestSessionRecapCarriesError(t *testing.T) {
+	recap := sessionRecap("rework the tabs", &agent.Report{
 		Reason: agent.ReasonError,
 		Steps:  4,
 		Err:    errors.New("verify: command not runnable"),
@@ -263,18 +264,26 @@ func TestSessionOutcomeCarriesError(t *testing.T) {
 			Command: "go test ./...", ExitCode: 1, Passed: false, Stderr: "no Go files in /app",
 		},
 	})
-	for _, want := range []string{"error", "command not runnable", "go test ./...", "exit 1", "no Go files"} {
-		if !strings.Contains(note.Content, want) {
-			t.Errorf("outcome note missing %q:\n%s", want, note.Content)
+	if recap.Role != llm.RoleUser {
+		t.Errorf("recap role = %q, want user (assistant-role notes get parroted)", recap.Role)
+	}
+	for _, want := range []string{"rework the tabs", "error", "command not runnable", "go test ./...", "exit=1", "no Go files"} {
+		if !strings.Contains(recap.Content, want) {
+			t.Errorf("recap missing %q:\n%s", want, recap.Content)
 		}
 	}
 }
 
-func TestSessionOutcomeSuccessIsClean(t *testing.T) {
-	note := sessionOutcome(&agent.Report{Reason: agent.ReasonSuccess, Steps: 12,
-		FinalVerify: agent.VerifyResult{Command: "npm run build", ExitCode: 0, Passed: true}})
-	if !strings.Contains(note.Content, "success") || !strings.Contains(note.Content, "passed=true") {
-		t.Errorf("success outcome note = %q", note.Content)
+func TestSessionRecapIncludesReply(t *testing.T) {
+	recap := sessionRecap("what does it do?", &agent.Report{
+		Reason: agent.ReasonAnswered, Steps: 2,
+		Transcript: []llm.Message{
+			{Role: llm.RoleUser, Content: "what does it do?"},
+			{Role: llm.RoleAssistant, Content: "It formats numbers as currency."},
+		},
+	})
+	if !strings.Contains(recap.Content, "It formats numbers as currency.") {
+		t.Errorf("recap should fold in kloo's reply:\n%s", recap.Content)
 	}
 }
 

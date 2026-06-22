@@ -110,13 +110,15 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 	}
 
 	// Carry context across submissions: seed this run with the session so far, then
-	// fold this run's transcript + a compact outcome note back in for the next one.
+	// fold in ONE compact recap of this run for the next one. We deliberately do NOT
+	// replay the raw prior transcript (assistant turns + tool observations): a small
+	// model parrots a replayed assistant note and re-executes prior tool calls. A
+	// single user-role context recap (task + outcome + the reply) gives a follow-up
+	// what it needs without derailing the model.
 	r.loop.SessionHistory = r.session
 	rep, _ := r.loop.Run(ctx, task)
 	if rep != nil {
-		r.session = append(r.session, rep.Transcript...)
-		r.session = append(r.session, sessionOutcome(rep))
-		r.session = capSession(r.session)
+		r.session = capSession(append(r.session, sessionRecap(task, rep)))
 		r.persist(task)
 	}
 	r.send(reportFor(rep, r.maxTokens))
@@ -151,29 +153,59 @@ func capSession(s []llm.Message) []llm.Message {
 	return append([]llm.Message{}, s[len(s)-maxSessionMessages:]...)
 }
 
-// sessionOutcome is the compact note appended after a run so the NEXT submission
-// knows how this one ended — the key to answering follow-ups like "what's the
-// issue?". It carries the stop reason, any error, and the last verify (with its
-// failing output), which is exactly what a user asking about a failed run needs.
-func sessionOutcome(rep *agent.Report) llm.Message {
+// sessionRecap builds the single context message carried to the NEXT submission so
+// a follow-up ("what's the issue?", "continue", "why?") has what happened — the
+// task, how the run ended (reason, error, failing verify), and the reply kloo gave.
+//
+// It is a USER-role context message, NOT an assistant turn: a small model replays
+// an assistant note as its own output (parroting it verbatim). Framing it as
+// bracketed background context the user is providing keeps the model responding to
+// the current task instead of echoing or continuing the prior run.
+func sessionRecap(task string, rep *agent.Report) llm.Message {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[Previous run ended: %s after %d step(s).", rep.Reason, rep.Steps)
+	b.WriteString("(Background from earlier in this kloo session — context only, not a new request.)\n")
+	fmt.Fprintf(&b, "Task: %s\n", oneLine(task))
+	fmt.Fprintf(&b, "Outcome: %s after %d step(s).", rep.Reason, rep.Steps)
 	if rep.Err != nil {
 		fmt.Fprintf(&b, " Error: %s.", rep.Err.Error())
 	}
 	if rep.FinalVerify.Command != "" {
-		fmt.Fprintf(&b, " Last verify: %s (exit %d, passed=%t).", rep.FinalVerify.Command, rep.FinalVerify.ExitCode, rep.FinalVerify.Passed)
+		fmt.Fprintf(&b, " Verify: %s exit=%d passed=%t.", rep.FinalVerify.Command, rep.FinalVerify.ExitCode, rep.FinalVerify.Passed)
 		if !rep.FinalVerify.Passed {
 			if out := strings.TrimSpace(rep.FinalVerify.Stdout + "\n" + rep.FinalVerify.Stderr); out != "" {
-				fmt.Fprintf(&b, "\n%s", out)
+				fmt.Fprintf(&b, "\nVerify output:\n%s", out)
 			}
 		}
 	}
 	if rep.RolledBack {
 		b.WriteString(" The workspace was rolled back to the pre-run checkpoint.")
 	}
-	b.WriteString("]")
-	return llm.Message{Role: llm.RoleAssistant, Content: b.String()}
+	if ans := lastAssistantContent(rep.Transcript); ans != "" {
+		fmt.Fprintf(&b, "\nkloo's reply: %s", oneLine(ans))
+	}
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// lastAssistantContent returns the last assistant message's prose (the reply kloo
+// gave), or "" if none — used to fold the answer into the next run's recap.
+func lastAssistantContent(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleAssistant {
+			if c := strings.TrimSpace(msgs[i].Content); c != "" {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// oneLine collapses whitespace/newlines and bounds length for a compact recap.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 240 {
+		s = s[:237] + "…"
+	}
+	return s
 }
 
 // confirmGate sends a confirm request for an approve-each edit and waits for the
