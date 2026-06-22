@@ -42,7 +42,9 @@ type submitTaskMsg struct{ task string }
 // (streamDeltaMsg, toolEventMsg, progressMsg, reportMsg, confirmRequestMsg) and
 // sends them via the program. nil in unit tests that don't drive a real run.
 type Runner interface {
-	// Start runs task to completion under ctx, pumping messages into the program;
-	// it returns when the run ends (it sends a terminal reportMsg).
-	Start(ctx context.Context, task string, mode Mode, contextFiles []string)
+	// Start runs task to completion under ctx using model, pumping messages into
+	// the program; it returns when the run ends (it sends a terminal reportMsg).
+	// model is the current model (the TUI's, switchable via /model) — applied to
+	// this run so /model takes effect on the next task.
+	Start(ctx context.Context, task, model string, mode Mode, contextFiles []string)
 }

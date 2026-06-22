@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -19,9 +21,54 @@ type blockingRunner struct {
 	release chan struct{}
 }
 
-func (r *blockingRunner) Start(ctx context.Context, task string, mode Mode, files []string) {
+func (r *blockingRunner) Start(ctx context.Context, task, model string, mode Mode, files []string) {
 	r.starts++
 	<-r.release
+}
+
+// recordingRunner captures the model passed to Start (over a channel so the test
+// can read it without racing the run goroutine).
+type recordingRunner struct{ got chan string }
+
+func (r *recordingRunner) Start(ctx context.Context, task, model string, mode Mode, files []string) {
+	r.got <- model
+}
+
+// TestSlashModelAppliesToNextRun guards the fix: /model must change the model the
+// NEXT run actually uses, not just the header label. Previously the loop's model
+// was fixed at launch, so /model was cosmetic and the run still called the launch
+// model (which a multi-model endpoint like llama-swap rejects with "no router").
+func TestSlashModelAppliesToNextRun(t *testing.T) {
+	rec := &recordingRunner{got: make(chan string, 1)}
+	m := sized(New(Config{Model: "local", MaxSteps: 40, MaxTokens: 8000, Runner: rec}), tw, th)
+
+	m = typeAndEnter(m, "/model snappy")
+	if m.modelName != "snappy" {
+		t.Fatalf("/model snappy did not switch the model: %q", m.modelName)
+	}
+
+	tm, cmd := m.Update(submitTaskMsg{task: "go"})
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("submit produced no command")
+	}
+	// Execute the batched commands so the run goroutine (go runner.Start) launches.
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c != nil {
+				c()
+			}
+		}
+	}
+
+	select {
+	case got := <-rec.got:
+		if got != "snappy" {
+			t.Errorf("run used model %q, want %q (the /model choice)", got, "snappy")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.Start was not invoked")
+	}
 }
 
 // TestSubmitTaskRejectedWhileRunning: a non-slash submission while a run is
@@ -141,5 +188,22 @@ func TestConfirmGateReturnsUserDecision(t *testing.T) {
 
 // ensure the Runner interface stays satisfied by *LoopRunner (compile guard).
 var _ Runner = (*LoopRunner)(nil)
+
+// TestReportSurfacesError guards the fix: an errored run must carry the actual
+// failure into the report's Detail (rendered as the "reason:" line), not a bare
+// "ERROR". Previously reportFor dropped rep.Err, so the TUI showed only "ERROR".
+func TestReportSurfacesError(t *testing.T) {
+	msg := reportFor(&agent.Report{
+		Reason: agent.ReasonError,
+		Err:    errors.New("llm: dial tcp 127.0.0.1:8080: connect: connection refused"),
+	}, 8000)
+	if msg.Reason != "error" {
+		t.Fatalf("reason = %q, want error", msg.Reason)
+	}
+	if msg.Detail == "" || !contains(msg.Detail, "connection refused") {
+		t.Errorf("error not surfaced into Detail: %q", msg.Detail)
+	}
+}
+
 var _ sendSetter = (*LoopRunner)(nil)
 var _ tea.Msg = submitTaskMsg{}

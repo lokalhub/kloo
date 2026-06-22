@@ -25,17 +25,17 @@ type LoopRunner struct {
 	loop       *agent.Loop
 	ws         tools.Workspace
 	baseSystem string // the loop's system prompt without any pinned files
-	model      string
 	maxTokens  int
 	send       func(tea.Msg)
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
 // caller — internal/cli). ws is the workspace jail used to read /add-pinned
-// files into the loop's context; model is the display model name; maxTokens is
-// the token budget shown in the status line / stop-report.
-func NewLoopRunner(loop *agent.Loop, ws tools.Workspace, model string, maxTokens int) *LoopRunner {
-	return &LoopRunner{loop: loop, ws: ws, baseSystem: loop.System, model: model, maxTokens: maxTokens}
+// files into the loop's context; maxTokens is the token budget shown in the
+// status line / stop-report. The model is passed per-run to Start (so /model
+// can switch it between runs) — not fixed at construction.
+func NewLoopRunner(loop *agent.Loop, ws tools.Workspace, maxTokens int) *LoopRunner {
+	return &LoopRunner{loop: loop, ws: ws, baseSystem: loop.System, maxTokens: maxTokens}
 }
 
 // setSend connects the program's message sink (called by Run).
@@ -44,10 +44,16 @@ func (r *LoopRunner) setSend(send func(tea.Msg)) { r.send = send }
 // Start runs the loop for task and pumps its signals into the program. In
 // approve-each mode an edit is held via a confirmRequestMsg until the user
 // answers. It blocks until the run ends, then sends the terminal reportMsg.
-func (r *LoopRunner) Start(ctx context.Context, task string, mode Mode, contextFiles []string) {
+func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, contextFiles []string) {
 	if r.send == nil {
 		return
 	}
+
+	// Apply the current model to the loop so THIS run's requests use it. The model
+	// can change between runs via /model in the TUI; without this the loop kept the
+	// model fixed at launch and /model only relabeled the header (the request still
+	// went out under the launch model). Set per-run from the caller's current model.
+	r.loop.Model = model
 
 	// Wire /add-pinned files into the loop's per-run context: read each (jailed)
 	// and inject a bounded section into the system prompt so the model always
@@ -55,7 +61,7 @@ func (r *LoopRunner) Start(ctx context.Context, task string, mode Mode, contextF
 	r.loop.System = r.baseSystem + pinnedSection(r.ws, contextFiles)
 
 	r.loop.OnProgress = func(step, maxSteps, tokens, maxTokens int) {
-		r.send(progressMsg{Model: r.model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
+		r.send(progressMsg{Model: model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
 		// Forward the working-memory compaction count over the same plumbing
 		// (nil-safe: no message when memory is off, so the indicator stays hidden).
 		if r.loop.Memory != nil {
@@ -176,6 +182,10 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 		RolledBack: rep.RolledBack,
 	}
 	switch {
+	case rep.Err != nil:
+		// Surface the actual failure (e.g. "connection refused", "no router for
+		// requested model", a tool-call parse error) instead of a bare "ERROR".
+		msg.Detail = rep.Err.Error()
 	case rep.Budget != nil:
 		msg.Detail = string(rep.Budget.Kind) + " (" + rep.Budget.Observed + "/" + rep.Budget.Limit + ")"
 	case rep.Churn != nil:

@@ -47,7 +47,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string) error {
 		Temperature: cfg.Temperature,
 	}
 
-	runner := tui.NewLoopRunner(loop, ws, cfg.Model, cfg.MaxTokens)
+	runner := tui.NewLoopRunner(loop, ws, cfg.MaxTokens)
 	return tui.Run(tui.Config{
 		Effort:    cfg.Effort,
 		Model:     cfg.Model,
