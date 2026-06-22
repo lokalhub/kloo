@@ -94,8 +94,11 @@ Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
 `OPENAI_API_KEY`); `NO_COLOR` disables all TUI colour (see below).
 
-Effort tiers seed the loop budgets in one switch (the model is independent):
-`fast` (20 steps/80k tok), `medium` (40/200k — the default), `heavy` (80/500k).
+Effort tiers seed the loop budgets in one switch (the model is independent).
+**Churn detection is the primary "stop when stuck" guard**; tokens are unbounded
+and steps/wall-clock are generous so long small-model runs aren't cut off:
+`fast` (50 steps), `medium` (500 — the default), `heavy` (1000). Set `maxTokens`
+in the profile for a hard cost cap.
 The **full reference** — every flag, env var, the effort table, and the
 `profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 
@@ -105,7 +108,10 @@ The TUI shows a live header (model · effort · running token total · step ·
 mode), an animated thinking line, and a transcript of colour-coded tool cards,
 diffs, command output, and assistant prose. Slash commands while running:
 `/add`, `/model`, `/mode`, `/stop`, `/diff`; `Esc`/`Ctrl-C` interrupts;
-`Ctrl-O` expands truncated command output.
+`Ctrl-O` expands truncated command output. **Scroll** the transcript with the
+mouse wheel or `PgUp`/`PgDn` — it sticks to the newest output unless you scroll
+up. When a run stops on an error, the report shows a plain-language reason
+(e.g. "Couldn't reach the model endpoint…"), not a bare `ERROR`.
 
 See **[docs/tui.md](docs/tui.md)** for the full TUI experience — the live token
 counter, the semantic colour theme and `NO_COLOR` degrade, and the transcript

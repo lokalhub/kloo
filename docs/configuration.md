@@ -23,8 +23,8 @@ Each layer overrides the one before it — the rightmost source that sets a fiel
 
 The **effort tier** is resolved first and seeds the loop budgets (steps/tokens/
 churn/wall-clock). The **model is a separate axis** — flags/env/profile set it
-independently of the tier. An unset effort is `medium`, which equals kloo's
-historical flat defaults, so it changes nothing for an existing setup.
+independently of the tier. An unset effort is `medium` (generous budgets, with
+churn detection as the primary guard).
 
 ## Flags
 
@@ -54,28 +54,35 @@ historical flat defaults, so it changes nothing for an existing setup.
 
 ## Effort tiers
 
-Selecting a tier seeds the loop budgets in one switch. A tier does **not** set the
-model — that's a separate axis (`--model` / `KLOO_MODEL` / profile), so the same
-tier means the same intensity on a local 8B or a frontier model. Any field is
-overridable per tier via the `efforts` section of the profile file.
+Selecting a tier seeds the loop budgets in one switch. **Churn detection (no
+progress) is the primary "stop when stuck" signal**; the other budgets are loose
+backstops — **tokens are unbounded** and steps/wall-clock are generous so a slow
+local model isn't cut off mid-progress. A tier does **not** set the model — that's
+a separate axis (`--model` / `KLOO_MODEL` / profile). Any field is overridable per
+tier via the `efforts` section of the profile file.
 
 | Tier | Max steps | Churn rounds | Max tokens | Wall-clock |
 |---|---|---|---|---|
-| `fast` | 20 | 2 | 80 000 | 300 s |
-| `medium` _(default)_ | 40 | 3 | 200 000 | 600 s |
-| `heavy` | 80 | 10 | 500 000 | 1800 s |
+| `fast` | 50 | 2 | 0 (unbounded) | 900 s |
+| `medium` _(default)_ | 500 | 3 | 0 (unbounded) | 3600 s |
+| `heavy` | 1000 | 10 | 0 (unbounded) | 7200 s |
 
-- **fast** — quick & decisive; bail early if stuck.
-- **medium** — the balanced default (equals the legacy flat defaults).
+- **fast** — quick & decisive; low churn patience, bail early if stuck.
+- **medium** — the balanced default; generous budgets.
 - **heavy** — patient & thorough; for hard multi-file work.
+
+Tokens default to **unbounded** because cost is the endpoint/service's domain (like
+other CLI agents) and the working-memory feature is built to let small models run
+long, many-step tasks — a token cap would cut those short. Set `maxTokens` in the
+profile if you want a hard kloo-side cost cap.
 
 ## Budgets and context
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `maxContextTokens` | `8000` | Per-step context **window** (the hard ceiling for the whole assembled prompt). Also the working-memory compaction trigger — see below. Conservative for small local models. |
-| `maxTokens` | `200000` | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded. |
-| `maxWallClockSeconds` | `600` | Wall-clock ceiling per run. `0` ⇒ unbounded. |
+| `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
+| `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
 
 `maxTokens`, `maxWallClockSeconds`, and `churnRounds` are seeded by the effort tier;

@@ -11,10 +11,10 @@ them. Launch the TUI by running `kloo` with no task argument.
 ## At a glance
 
 ```
-┌ kloo  qwen2.5-coder · medium     step 18/80 · 14.4k/200k tok · auto ┐
-└────────────────────────────────────────────────────────────────────┘
+┌ kloo  qwen2.5-coder · medium     step 18/500 · 14.4k tok · auto ┐
+└─────────────────────────────────────────────────────────────────┘
 
-  … transcript: assistant prose, tool cards, diffs, command output …
+  … transcript (scroll: wheel / PgUp · PgDn) — assistant prose, tool cards, diffs …
 
   ⠹ Moonwalking…  editing src/app/app.ts · 12s · 14.4k tok · esc to interrupt
 ```
@@ -102,6 +102,12 @@ green `exit 0 ✓` on success, red `exit N ✗` on failure (with a red border ti
 On failure a few dim stderr lines follow, **truncated** after 4 lines with a
 `… +K more lines  ctrl+o to expand` hint. Press **`Ctrl-O`** to toggle the full
 output.
+
+### Scrolling the transcript
+The transcript is a scrollable viewport: **mouse wheel** or **`PgUp`/`PgDn`** move
+through history. Auto-scroll is **sticky-bottom** — new output follows the tail
+only while you're already at the bottom; scroll up to read earlier turns and kloo
+won't yank you back down.
 
 ### Assistant prose (light markdown)
 Assistant text is run through a hand-rolled *light* markdown styler (not
