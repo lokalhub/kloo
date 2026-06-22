@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,6 +222,31 @@ func TestHumanizeError(t *testing.T) {
 		if got := humanizeError(errors.New(c.in)); !contains(got, c.want) {
 			t.Errorf("%s: humanizeError(%q) = %q, want it to contain %q", c.name, c.in, got, c.want)
 		}
+	}
+}
+
+// TestReadonlyToolEventIsCompact: read_file/list_dir cards must summarise by path
+// + a count, never dump the whole file/listing into the transcript.
+func TestReadonlyToolEventIsCompact(t *testing.T) {
+	bigFile := strings.Repeat("some file line\n", 50)
+	rf := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "src/app.ts"}}, tools.Result{Output: bigFile})
+	if rf.Summary != "src/app.ts  · 50 lines" {
+		t.Errorf("read_file summary = %q, want path + count", rf.Summary)
+	}
+	if contains(rf.Summary, "some file line") {
+		t.Errorf("read_file summary dumped the file contents: %q", rf.Summary)
+	}
+
+	listing := ".angular/\nsrc/\npackage.json\n"
+	ld := toolEvent(tools.Call{Name: "list_dir", Args: map[string]any{"path": "."}}, tools.Result{Output: listing})
+	if ld.Summary != ".  · 3 entries" {
+		t.Errorf("list_dir summary = %q, want path + entry count", ld.Summary)
+	}
+
+	// Single result uses the singular unit.
+	one := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "x"}}, tools.Result{Output: "only line"})
+	if one.Summary != "x  · 1 line" {
+		t.Errorf("single-line summary = %q, want singular", one.Summary)
 	}
 }
 
