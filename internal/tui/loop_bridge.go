@@ -199,6 +199,8 @@ func humanizeError(err error) string {
 	case strings.Contains(low, "below the irreducible prompt floor"),
 		strings.Contains(low, "window too small"):
 		return "The context window is too small for the task + system prompt — raise maxContextTokens."
+	case strings.Contains(low, "no usable tool call"), strings.Contains(low, "no tool call"):
+		return "The model replied without a tool call kloo could use (it may have answered in prose or used an unsupported format). kloo runs actions, not chat — give it a concrete task."
 	default:
 		return raw
 	}

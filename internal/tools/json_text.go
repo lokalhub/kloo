@@ -20,16 +20,52 @@ func extractJSONToolCalls(content string) []Call {
 		if end < 0 {
 			break // unbalanced from here on
 		}
-		var raw struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-		}
-		if err := json.Unmarshal(b[i:end+1], &raw); err == nil && raw.Name != "" {
-			out = append(out, Call{Name: raw.Name, Args: decodeArgs(raw.Arguments)})
+		var obj map[string]any
+		if err := json.Unmarshal(b[i:end+1], &obj); err == nil {
+			if c, ok := callFromObject(obj); ok {
+				out = append(out, c)
+			}
 		}
 		i = end // skip past this object regardless (don't rescan its interior)
 	}
 	return out
+}
+
+// callFromObject recognizes the tool-call JSON shapes small local models emit —
+// all keyed off a tool-name field, with flexible arguments:
+//
+//	{"name"|"tool": "<tool>", "arguments"|"args": { … }}   nested object
+//	{"name"|"tool": "<tool>", "arguments"|"args": "{…}"}   args as a JSON string
+//	{"tool": "<tool>", "<arg>": …, … }                     args as SIBLING keys (flat)
+//
+// Returns ok=false when there's no recognizable tool name. Being permissive here is
+// the difference between dispatching the call and a "no tool call → re-prompt → error".
+func callFromObject(obj map[string]any) (Call, bool) {
+	name, _ := obj["name"].(string)
+	if name == "" {
+		name, _ = obj["tool"].(string)
+	}
+	if name == "" {
+		return Call{}, false
+	}
+	// Explicit args under "arguments" or "args" — an object, or a serialized JSON string.
+	for _, k := range []string{"arguments", "args"} {
+		switch v := obj[k].(type) {
+		case map[string]any:
+			return Call{Name: name, Args: v}, true
+		case string:
+			return Call{Name: name, Args: decodeArgs(json.RawMessage(v))}, true
+		}
+	}
+	// Flat form: the siblings of the name/tool key ARE the arguments.
+	args := map[string]any{}
+	for k, v := range obj {
+		if k == "name" || k == "tool" {
+			continue
+		}
+		args[k] = v
+	}
+	return Call{Name: name, Args: args}, true
 }
 
 // matchBrace returns the index of the '}' that closes the '{' at start, honoring
