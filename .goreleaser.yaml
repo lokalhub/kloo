@@ -55,10 +55,12 @@ archives:
       - README.md
       - LICENSE*
 
-# v1 is snapshot/build-only — no GitHub release is published (and the workspace has no
-# git remote). Disabling release keeps `goreleaser check` + `--snapshot` self-contained.
+# Publishes the cross-OS binaries + checksums + changelog to GitHub Releases.
+# The homebrew_casks/scoops below keep skip_upload: true (their tap/bucket repos
+# don't exist yet), so a release ships the binaries + `go install <module>@vX`
+# (the git tag), not a brew/scoop formula. Wire those up when the taps exist.
 release:
-  disable: true
+  disable: false
 
 checksum:
   name_template: "checksums.txt"
