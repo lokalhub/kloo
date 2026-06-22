@@ -69,7 +69,11 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 	loop.OnDelta = func(content string) { streamed.WriteString(content) }
 	loop.OnProgress = func(step, maxSteps, tokens, maxTokens int) {
 		flush()
-		fmt.Fprintf(out, "── step %d/%d  tokens %d/%d\n", step, maxSteps, tokens, maxTokens)
+		if maxTokens > 0 {
+			fmt.Fprintf(out, "── step %d/%d  tokens %d/%d\n", step, maxSteps, tokens, maxTokens)
+		} else { // maxTokens 0 ⇒ unbounded: plain counter
+			fmt.Fprintf(out, "── step %d/%d  tokens %d\n", step, maxSteps, tokens)
+		}
 	}
 	loop.OnTool = func(call tools.Call, res tools.Result, err error) {
 		flush()

@@ -102,7 +102,11 @@ func (ri reportItem) render(width int) string {
 	if r.Detail != "" {
 		fmt.Fprintf(&b, "reason:  %s\n", r.Detail)
 	}
-	fmt.Fprintf(&b, "steps:   %d · tokens: %s/%s · elapsed: %s\n", r.Steps, human(r.Tokens), human(r.MaxTokens), r.Elapsed)
+	tokens := human(r.Tokens) // maxTokens 0 ⇒ unbounded: plain counter, not "N/0"
+	if r.MaxTokens > 0 {
+		tokens = human(r.Tokens) + "/" + human(r.MaxTokens)
+	}
+	fmt.Fprintf(&b, "steps:   %d · tokens: %s · elapsed: %s\n", r.Steps, tokens, r.Elapsed)
 	if r.VerifyCmd != "" {
 		// Colour the verify outcome green pass / red fail (task 05), consistent
 		// with the run-command exit result.
