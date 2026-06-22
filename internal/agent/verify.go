@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // CommandVerifier is the loop's verify step: it runs the CONFIGURED verify

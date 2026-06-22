@@ -10,7 +10,7 @@ import (
 // TestDialDefaultIsAuto: the locked default (design doc §2 / master plan §5) on
 // initial model state AND the idle status line.
 func TestDialDefaultIsAuto(t *testing.T) {
-	m := New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000})
+	m := New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000})
 	if m.mode != ModeAuto {
 		t.Fatalf("default dial = %q, want auto", m.mode)
 	}

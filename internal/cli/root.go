@@ -13,8 +13,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/spf13/cobra"
 )
 
@@ -80,10 +80,10 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kloo [task]",
 		Short: "Autonomous coding CLI for small local LLMs",
-		Long: "kloo drives a local llama-swap OpenAI-compatible endpoint to edit and " +
-			"verify code autonomously.\n\n" +
+		Long: "kloo drives any OpenAI-compatible endpoint (llama.cpp, Ollama, vLLM, " +
+			"OpenAI, OpenRouter, …) to edit and verify code autonomously.\n\n" +
 			"Launch with no task for the interactive TUI session:  kloo\n" +
-			"Or pass a one-shot task to stream a reply non-interactively:  kloo --model snappy \"say hi\"",
+			"Or pass a one-shot task to stream a reply non-interactively:  kloo \"say hi\"",
 		Args:          cobra.MaximumNArgs(1),
 		Version:       versionString(), // enables `kloo --version`; stamped by goreleaser ldflags
 		SilenceErrors: true,            // Execute() prints errors; avoids double-printing
@@ -144,8 +144,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&flagEffort, "effort", config.DefaultEffort, "effort tier (fast|medium|heavy) — seeds model + step/token budgets + churn patience")
-	f.StringVar(&flagModel, "model", config.DefaultModel, "model name (e.g. snappy, smart); overrides the tier's model")
+	f.StringVar(&flagEffort, "effort", config.DefaultEffort, "effort tier (fast|medium|heavy) — seeds step/token budgets + churn patience")
+	f.StringVar(&flagModel, "model", config.DefaultModel, "model your endpoint serves (e.g. qwen2.5-coder, gpt-4o); llama.cpp single-model servers ignore it")
 	f.StringVar(&flagEndpoint, "endpoint", config.DefaultEndpoint, "OpenAI-compatible base URL")
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")

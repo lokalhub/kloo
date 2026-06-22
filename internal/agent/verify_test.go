@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 func verifyWS(t *testing.T) tools.Workspace {

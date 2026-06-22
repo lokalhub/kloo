@@ -1,0 +1,24 @@
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ kloo  test-model                                           step 0/40 · 0/8k tok · auto │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+▸ you: a task that keeps repeating the same edit                                        
+                                                                                        
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ ■ run stopped — NO PROGRESS (churn)                                                  │
+│ reason:  repeated-failure (same failure ×3)                                          │
+│ steps:   6 · tokens: 2.1k/8k · elapsed: 31s                                          │
+│ last verify: npm run build → exit 1 ✗                                                │
+│ workspace rolled back to checkpoint. Refine the task and retry.                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+                                                                                        
+                                                                                        
+                                                                                        
+                                                                                        
+                                                                                        
+                                                                                        
+                                                                                        
+
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│> type a task…                                           /add /model /mode /stop /diff  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

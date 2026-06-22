@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 func TestApplyConstraintJSONSchema(t *testing.T) {
 	ws, _ := wsAt(t)
 	reg := DefaultRegistry(ws)
-	req := ApplyConstraint(llm.ChatRequest{Model: "snappy"}, reg, EndpointCaps{SupportsJSONSchema: true})
+	req := ApplyConstraint(llm.ChatRequest{Model: "test-model"}, reg, EndpointCaps{SupportsJSONSchema: true})
 
 	if req.ResponseFormat == nil {
 		t.Fatal("expected a response_format to be set")
@@ -34,7 +34,7 @@ func TestApplyConstraintJSONSchema(t *testing.T) {
 func TestApplyConstraintGrammar(t *testing.T) {
 	ws, _ := wsAt(t)
 	reg := DefaultRegistry(ws)
-	req := ApplyConstraint(llm.ChatRequest{Model: "snappy"}, reg, EndpointCaps{SupportsGrammar: true})
+	req := ApplyConstraint(llm.ChatRequest{Model: "test-model"}, reg, EndpointCaps{SupportsGrammar: true})
 
 	if req.Grammar == "" {
 		t.Fatal("expected a GBNF grammar to be set")
@@ -53,7 +53,7 @@ func TestApplyConstraintGrammar(t *testing.T) {
 func TestApplyConstraintNoOp(t *testing.T) {
 	ws, _ := wsAt(t)
 	reg := DefaultRegistry(ws)
-	base := llm.ChatRequest{Model: "snappy", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}}}
+	base := llm.ChatRequest{Model: "test-model", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}}}
 
 	got := ApplyConstraint(base, reg, EndpointCaps{}) // no grammar, no json_schema
 

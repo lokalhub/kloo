@@ -6,7 +6,7 @@ import "testing"
 // partial text; the final frame drops the "streaming…" marker and equals the
 // accumulated content.
 func TestStreamingTokenByToken(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
 
 	// First delta starts the streaming block.
 	m = apply(m, streamDeltaMsg{Content: "I'll "})

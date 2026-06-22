@@ -37,7 +37,7 @@ type EndpointCaps struct {
 //  3. "yaml" or any unknown value → ErrUnsupportedToolFormat (YAML never
 //     selects an adapter).
 //
-// "trained" maps onto native FC for v1 (the trained snappy/smart formats run
+// "trained" maps onto native FC for v1 (a model's trained tool-call format runs
 // through the native function-calling path); recorded in decisions.md.
 //
 // Note: the prompt named this parameter config.Profile; config exposes no such

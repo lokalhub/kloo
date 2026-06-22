@@ -3,11 +3,11 @@ package tui
 import (
 	"testing"
 
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 func newSized() Model {
-	return sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	return sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
 }
 
 // editFileDiff is a real edit_file `diff` arg (a bare fenced SEARCH/REPLACE

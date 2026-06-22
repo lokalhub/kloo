@@ -3,7 +3,7 @@ package agent
 import (
 	"time"
 
-	"github.com/lokal/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/config"
 )
 
 // runBudget bounds a run by three independent ceilings — steps, cumulative

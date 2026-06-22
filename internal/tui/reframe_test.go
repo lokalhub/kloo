@@ -15,11 +15,11 @@ func headerLine(m Model) string {
 // `kloo • model • effort` + the live token total; step is present but demoted
 // (appears after the lead), and the header never leads with step.
 func TestHeaderReframeLeadsModelEffort(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, th)
-	m = apply(m, progressMsg{Model: "snappy", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
+	m := sized(New(Config{Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m = apply(m, progressMsg{Model: "test-model", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
 	h := headerLine(m)
 
-	if !contains(h, "kloo  snappy · medium") {
+	if !contains(h, "kloo  test-model · medium") {
 		t.Errorf("header should lead with kloo • model • effort:\n%s", h)
 	}
 	if !contains(h, "14.4k/200k tok") || contains(h, "0/200k tok") {
@@ -37,7 +37,7 @@ func TestHeaderReframeLeadsModelEffort(t *testing.T) {
 // TestThinkingLineActivity (task 06): the thinking line carries the tool-derived
 // activity phrase alongside the live token count.
 func TestThinkingLineActivity(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 80, MaxTokens: 200000}), tw, th)
 	m = apply(m,
 		progressMsg{Tokens: 14400, MaxTokens: 200000},
 		toolEventMsg{Name: "run_command", Command: "npm run build", ExitCode: 0},
@@ -78,7 +78,7 @@ func TestActivityPhraseFromTools(t *testing.T) {
 // The frozen state (fixed verb/spinFrame, runStart 12s in the past → elapsed=12s)
 // makes the golden stable the same way the static mock is.
 func TestThinkingLineFrame(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 80, MaxTokens: 200000}), tw, th)
 	m = apply(m,
 		progressMsg{Tokens: 14400, MaxTokens: 200000},
 		toolEventMsg{Name: "edit_file", Path: "src/app/app.ts", Search: "x", Replace: "y"},

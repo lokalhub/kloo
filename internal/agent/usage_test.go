@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/llm/llmtest"
-	"github.com/lokal/kloo/internal/repomap"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/repomap"
 )
 
 // TestEstimateUsageFillsZero: when a turn reports zero usage, estimateUsage

@@ -7,9 +7,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/lokal/kloo/internal/agent"
-	"github.com/lokal/kloo/internal/edit"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/agent"
+	"github.com/lokalhub/kloo/internal/edit"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // maxPinnedFileChars bounds how much of each /add-pinned file is injected into

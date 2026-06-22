@@ -31,7 +31,7 @@ func TestCompleteSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	resp, err := client.Complete(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "say hi"}},
 	})
@@ -56,12 +56,12 @@ func TestCompleteDefaultsModel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	if _, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}); err != nil {
 		t.Fatalf("Complete error: %v", err)
 	}
-	if gotModel != "snappy" {
-		t.Errorf("want default model snappy on the wire, got %q", gotModel)
+	if gotModel != "test-model" {
+		t.Errorf("want model test-model on the wire, got %q", gotModel)
 	}
 }
 
@@ -72,7 +72,7 @@ func TestCompleteNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
 	if err == nil {
 		t.Fatal("want error for 500, got nil")
@@ -98,7 +98,7 @@ func TestCompleteContextCancel(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -123,7 +123,7 @@ func TestCompleteTimeout(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	client := New(srv.URL+"/v1", "snappy", WithTimeout(30*time.Millisecond))
+	client := New(srv.URL+"/v1", "test-model", WithTimeout(30*time.Millisecond))
 	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
 	if err == nil {
 		t.Fatal("want timeout error, got nil")

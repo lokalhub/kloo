@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 func xmlMsg(content string) llm.Message {

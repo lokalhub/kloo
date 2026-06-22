@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
 )
 
 // TestDoDMalformedThenRepromptThenDispatch is the Phase-02 DoD "one retry then

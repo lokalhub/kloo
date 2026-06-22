@@ -24,14 +24,14 @@ func TestTranscriptAirySpacing(t *testing.T) {
 // header, markdown assistant, diff card, pass + truncated-fail run cards, and a
 // stop-report with a coloured verify line — renders coherently in one frame.
 func TestPhaseComposedTranscript(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, 60)
+	m := sized(New(Config{Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, 60)
 	m = apply(m,
 		submitTaskMsg{task: "rename the three tabs"},
-		progressMsg{Model: "snappy", Step: 1, MaxSteps: 80, Tokens: 400, MaxTokens: 200000},
+		progressMsg{Model: "test-model", Step: 1, MaxSteps: 80, Tokens: 400, MaxTokens: 200000},
 		streamDeltaMsg{Content: "# Plan\nI'll rename the **three** tabs using `edit_file`.\n- edit tab1\n- run build"},
 		streamDoneMsg{},
 		toolEventMsg{Name: "edit_file", Path: "src/app/tabs/tabs.routes.ts", Search: "{ path: 'tab1' }", Replace: "{ path: 'home' }"},
-		progressMsg{Model: "snappy", Step: 2, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000},
+		progressMsg{Model: "test-model", Step: 2, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000},
 		toolEventMsg{Name: "run_command", Command: "npm test", ExitCode: 0},
 		longFailCard(),
 		reportMsg{Reason: "error", Steps: 3, Tokens: 14400, MaxTokens: 200000, Elapsed: "31s", VerifyCmd: "npm run build", VerifyExit: 1},
@@ -40,7 +40,7 @@ func TestPhaseComposedTranscript(t *testing.T) {
 	requireGolden(t, "phase-composed.golden", v)
 
 	for _, want := range []string{
-		"kloo  snappy · medium",      // reframed header lead
+		"kloo  test-model · medium",  // reframed header lead
 		"● assistant", "• edit tab1", // markdown assistant
 		"✎ src/app/tabs/tabs.routes.ts", // diff card header
 		"⌘ run_command", "exit 0 ✓",     // pass run card
@@ -58,7 +58,7 @@ func TestPhaseComposedTranscript(t *testing.T) {
 // real program via teatest and toggle ctrl+o on the long fail card.
 func TestPhaseComposedViaProgram(t *testing.T) {
 	tm := teatest.NewTestModel(t,
-		New(Config{Model: "snappy", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}),
+		New(Config{Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}),
 		teatest.WithInitialTermSize(tw, 60))
 	for _, msg := range []tea.Msg{
 		streamDeltaMsg{Content: "# Plan\nrun the build"},

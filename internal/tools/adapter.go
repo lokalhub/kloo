@@ -1,6 +1,6 @@
 package tools
 
-import "github.com/lokal/kloo/internal/llm"
+import "github.com/lokalhub/kloo/internal/llm"
 
 // ToolAdapter is the model-agnostic seam between the loop and however a given
 // model expresses tool calls. Both the native function-calling adapter and the

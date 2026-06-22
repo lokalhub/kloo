@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // NativeFCAdapter is the primary tool-call path: it serialises the registry into
 // the OpenAI tools param and parses a native tool_calls reply. This is the path
-// snappy/smart use when run with --jinja (design doc §2). It implements
-// ToolAdapter so the loop is adapter-agnostic.
+// models with native function-calling use (e.g. served with --jinja on llama.cpp;
+// design doc §2). It implements ToolAdapter so the loop is adapter-agnostic.
 type NativeFCAdapter struct{}
 
 // BuildRequest attaches the registry's tools (as OpenAI function specs) and asks

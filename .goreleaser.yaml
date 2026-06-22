@@ -35,9 +35,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/lokal/kloo/internal/cli.version={{.Version}}
-      - -X github.com/lokal/kloo/internal/cli.commit={{.Commit}}
-      - -X github.com/lokal/kloo/internal/cli.date={{.Date}}
+      - -X github.com/lokalhub/kloo/internal/cli.version={{.Version}}
+      - -X github.com/lokalhub/kloo/internal/cli.commit={{.Commit}}
+      - -X github.com/lokalhub/kloo/internal/cli.date={{.Date}}
 
 archives:
   - id: kloo
@@ -83,7 +83,7 @@ homebrew_casks:
     repository:
       owner: lokal
       name: homebrew-tap # PLACEHOLDER — tap repo not yet created/published
-    homepage: "https://github.com/lokal/kloo"
+    homepage: "https://github.com/lokalhub/kloo"
     description: "Autonomous coding CLI for small local LLMs"
     skip_upload: true # v1: do not push to a tap; snapshot/build only
 
@@ -95,7 +95,7 @@ scoops:
     repository:
       owner: lokal
       name: scoop-bucket # PLACEHOLDER — bucket repo not yet created/published
-    homepage: "https://github.com/lokal/kloo"
+    homepage: "https://github.com/lokalhub/kloo"
     description: "Autonomous coding CLI for small local LLMs"
     license: "MIT"
     skip_upload: true # v1: do not push to a bucket; snapshot/build only

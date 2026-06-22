@@ -52,10 +52,10 @@ func TestResolve(t *testing.T) {
 		},
 		{
 			name: "env-overrides-default",
-			env:  map[string]string{EnvEndpoint: "http://10.0.0.5:9000/v1", EnvModel: "smart"},
+			env:  map[string]string{EnvEndpoint: "http://10.0.0.5:9000/v1", EnvModel: "my-model"},
 			want: Config{
 				Endpoint:            "http://10.0.0.5:9000/v1",
-				Model:               "smart",
+				Model:               "my-model",
 				Temperature:         DefaultTemperature,
 				MaxSteps:            DefaultMaxSteps,
 				Mode:                DefaultMode,
@@ -87,15 +87,15 @@ func TestResolve(t *testing.T) {
 		},
 		{
 			name:        "profile-value-used-when-no-flag-or-env",
-			profileBody: `{"snappy":{"toolFormat":"xml","temperature":0.7,"fewShotPath":"/fs/snappy.txt"}}`,
+			profileBody: `{"local":{"toolFormat":"xml","temperature":0.7,"fewShotPath":"/fs/model.txt"}}`,
 			want: Config{
 				Endpoint:            DefaultEndpoint,
-				Model:               DefaultModel, // snappy
+				Model:               DefaultModel, // "local"
 				Temperature:         0.7,          // from profile
 				MaxSteps:            DefaultMaxSteps,
 				Mode:                DefaultMode,
-				ToolFormat:          "xml",            // from profile
-				FewShotPath:         "/fs/snappy.txt", // from profile
+				ToolFormat:          "xml",           // from profile
+				FewShotPath:         "/fs/model.txt", // from profile
 				Effort:              DefaultEffort,
 				MaxContextTokens:    DefaultMaxContextTokens,
 				MaxTokens:           DefaultMaxTokens,
@@ -106,7 +106,7 @@ func TestResolve(t *testing.T) {
 		{
 			name:        "flag-temperature-overrides-profile",
 			flags:       Flags{Temperature: fp(0.05)},
-			profileBody: `{"snappy":{"temperature":0.7}}`,
+			profileBody: `{"local":{"temperature":0.7}}`,
 			want: Config{
 				Endpoint:            DefaultEndpoint,
 				Model:               DefaultModel,
@@ -123,15 +123,15 @@ func TestResolve(t *testing.T) {
 		},
 		{
 			name:        "per-model-override-applied-for-selected-model",
-			env:         map[string]string{EnvModel: "smart"},
-			profileBody: `{"snappy":{"toolFormat":"xml"},"smart":{"toolFormat":"native","temperature":0.3}}`,
+			env:         map[string]string{EnvModel: "model-b"},
+			profileBody: `{"model-a":{"toolFormat":"xml"},"model-b":{"toolFormat":"native","temperature":0.3}}`,
 			want: Config{
 				Endpoint:            DefaultEndpoint,
-				Model:               "smart",
-				Temperature:         0.3, // smart's profile entry, not snappy's
+				Model:               "model-b",
+				Temperature:         0.3, // model-b's profile entry, not model-a's
 				MaxSteps:            DefaultMaxSteps,
 				Mode:                DefaultMode,
-				ToolFormat:          "native", // smart's, not snappy's "xml"
+				ToolFormat:          "native", // model-b's, not model-a's "xml"
 				Effort:              DefaultEffort,
 				MaxContextTokens:    DefaultMaxContextTokens,
 				MaxTokens:           DefaultMaxTokens,
@@ -199,7 +199,7 @@ func TestResolveMaxContextTokens(t *testing.T) {
 		t.Errorf("default maxContextTokens = %d, want %d", def.MaxContextTokens, DefaultMaxContextTokens)
 	}
 
-	prof := writeProfile(t, `{"snappy":{"maxContextTokens":2048}}`)
+	prof := writeProfile(t, `{"local":{"maxContextTokens":2048}}`)
 	got, err := Resolve(Flags{}, envFunc(nil), prof)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +212,7 @@ func TestResolveMaxContextTokens(t *testing.T) {
 // TestResolveMalformedProfileErrors: an existing-but-invalid profile JSON is a
 // clear wrapped error (ErrProfileParse), not a silent fallback.
 func TestResolveMalformedProfileErrors(t *testing.T) {
-	bad := writeProfile(t, `{"snappy": {bad json}`)
+	bad := writeProfile(t, `{"local": {bad json}`)
 	_, err := Resolve(Flags{}, envFunc(nil), bad)
 	if err == nil {
 		t.Fatal("expected error for malformed profile JSON, got nil")
@@ -226,37 +226,37 @@ func TestResolveEffort(t *testing.T) {
 	noEnv := func(string) string { return "" }
 	missing := filepath.Join(t.TempDir(), "none.json")
 
-	// fast tier seeds the small-model, low budgets.
+	// fast tier seeds low budgets; the model is independent (stays the default).
 	got, err := Resolve(Flags{Effort: strp("fast")}, noEnv, missing)
 	if err != nil {
 		t.Fatalf("fast: %v", err)
 	}
-	if got.Effort != "fast" || got.Model != "snappy" || got.MaxSteps != 20 || got.ChurnRounds != 2 || got.MaxTokens != 80000 {
+	if got.Effort != "fast" || got.Model != DefaultModel || got.MaxSteps != 20 || got.ChurnRounds != 2 || got.MaxTokens != 80000 {
 		t.Errorf("fast tier = %+v", got)
 	}
 
-	// heavy tier switches to the strong model with patient budgets.
+	// heavy tier seeds patient budgets; the model is NOT changed by the tier.
 	got, err = Resolve(Flags{Effort: strp("heavy")}, noEnv, missing)
 	if err != nil {
 		t.Fatalf("heavy: %v", err)
 	}
-	if got.Effort != "heavy" || got.Model != "smart" || got.MaxSteps != 80 || got.ChurnRounds != 10 {
+	if got.Effort != "heavy" || got.Model != DefaultModel || got.MaxSteps != 80 || got.ChurnRounds != 10 {
 		t.Errorf("heavy tier = %+v", got)
 	}
 
-	// explicit --model wins over the tier's model (but budgets stay the tier's).
-	got, _ = Resolve(Flags{Effort: strp("heavy"), Model: strp("snappy")}, noEnv, missing)
-	if got.Model != "snappy" || got.MaxSteps != 80 {
-		t.Errorf("model flag over tier = %+v", got)
+	// --model sets the model independently of the tier; the tier's budgets apply.
+	got, _ = Resolve(Flags{Effort: strp("heavy"), Model: strp("my-model")}, noEnv, missing)
+	if got.Model != "my-model" || got.MaxSteps != 80 {
+		t.Errorf("model flag with tier = %+v", got)
 	}
 
-	// config "efforts" section overrides a tier's knobs.
+	// config "efforts" section overrides a tier's budgets (no model field).
 	prof := writeProfile(t, `{"efforts":{"heavy":{"churnRounds":25,"maxTokens":900000}}}`)
 	got, err = Resolve(Flags{Effort: strp("heavy")}, noEnv, prof)
 	if err != nil {
 		t.Fatalf("override: %v", err)
 	}
-	if got.ChurnRounds != 25 || got.MaxTokens != 900000 || got.Model != "smart" {
+	if got.ChurnRounds != 25 || got.MaxTokens != 900000 || got.Model != DefaultModel {
 		t.Errorf("efforts override = %+v", got)
 	}
 }

@@ -13,22 +13,24 @@ func typeAndEnter(m Model, line string) Model {
 }
 
 func TestSlashModelTakesEffect(t *testing.T) {
-	m := typeAndEnter(newSized(), "/model smart")
-	if m.modelName != "smart" || m.status.model != "smart" {
-		t.Errorf("/model smart did not switch state: model=%q status=%q", m.modelName, m.status.model)
+	m := typeAndEnter(newSized(), "/model alt-model")
+	if m.modelName != "alt-model" || m.status.model != "alt-model" {
+		t.Errorf("/model alt-model did not switch state: model=%q status=%q", m.modelName, m.status.model)
 	}
-	if !contains(m.View(), "smart") {
-		t.Errorf("status line should show smart:\n%s", m.View())
+	if !contains(m.View(), "alt-model") {
+		t.Errorf("status line should show alt-model:\n%s", m.View())
 	}
 }
 
-func TestSlashModelUnknown(t *testing.T) {
-	m := typeAndEnter(newSized(), "/model bogus")
-	if m.modelName != "snappy" {
-		t.Errorf("unknown model should not switch, got %q", m.modelName)
+// kloo is BYO-endpoint: /model accepts any name the server understands, with no
+// allowlist (the endpoint, not kloo, decides what's valid).
+func TestSlashModelAcceptsAnyName(t *testing.T) {
+	m := typeAndEnter(newSized(), "/model deepseek/deepseek-v4-flash")
+	if m.modelName != "deepseek/deepseek-v4-flash" || m.status.model != "deepseek/deepseek-v4-flash" {
+		t.Errorf("/model should accept any name: model=%q status=%q", m.modelName, m.status.model)
 	}
-	if !contains(m.View(), "unknown model: bogus") {
-		t.Errorf("expected a clear unknown-model message:\n%s", m.View())
+	if !contains(m.View(), "model: deepseek/deepseek-v4-flash") {
+		t.Errorf("expected confirmation of the model switch:\n%s", m.View())
 	}
 }
 

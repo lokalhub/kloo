@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // XMLAdapter is the generic XML-tag fallback for untuned models that can't emit

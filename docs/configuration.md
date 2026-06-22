@@ -9,18 +9,29 @@ Every knob kloo reads, where it comes from, and what it does. Source of truth:
 flags  >  env (KLOO_*)  >  profile file  >  built-in defaults
 ```
 
-One subtlety worth knowing: the **effort tier** is resolved first and seeds the
-baseline (model + loop budgets + churn). Then the normal chain layers on top — so
-`--model`, env, and the profile file still override what the tier picked. An unset
-effort is `medium`, which equals kloo's historical flat defaults, so it changes
-nothing for an existing setup.
+```mermaid
+flowchart LR
+    D[built-in<br/>defaults] --> P["profile file<br/>~/.config/kloo/profiles.json"]
+    P --> E["env<br/>KLOO_*"]
+    E --> F[CLI flags]
+    F --> R([effective config])
+    style F fill:#d4edda,stroke:#28a745
+    style R fill:#cce5ff,stroke:#004085
+```
+
+Each layer overrides the one before it — the rightmost source that sets a field wins.
+
+The **effort tier** is resolved first and seeds the loop budgets (steps/tokens/
+churn/wall-clock). The **model is a separate axis** — flags/env/profile set it
+independently of the tier. An unset effort is `medium`, which equals kloo's
+historical flat defaults, so it changes nothing for an existing setup.
 
 ## Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds model + step/token budgets + churn patience (see table below). |
-| `--model` | `snappy` | Model name; overrides the tier's model. |
+| `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds step/token budgets + churn patience (see table below). |
+| `--model` | `local` | Model your endpoint serves. `local` is a neutral placeholder — a single-model llama.cpp server ignores it; set a real name for Ollama/OpenAI/OpenRouter. |
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `40` | Max autonomous steps. |
@@ -36,25 +47,27 @@ nothing for an existing setup.
 | `KLOO_ENDPOINT` | OpenAI-compatible base URL (same as `--endpoint`). |
 | `KLOO_MODEL` | Model name (same as `--model`). |
 | `KLOO_EFFORT` | Effort tier (same as `--effort`). |
-| `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); ignored by a local llama-swap, which has no auth. |
+| `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); not needed for a local llama.cpp / Ollama server, which has no auth. |
 | `OPENAI_API_KEY` | Fallback bearer token used only when `KLOO_API_KEY` is unset. |
 | `XDG_CONFIG_HOME` | If set, the profile file lives at `$XDG_CONFIG_HOME/kloo/profiles.json`. |
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
 
 ## Effort tiers
 
-Selecting a tier seeds the model + all four loop budgets at once. Any field is
+Selecting a tier seeds the loop budgets in one switch. A tier does **not** set the
+model — that's a separate axis (`--model` / `KLOO_MODEL` / profile), so the same
+tier means the same intensity on a local 8B or a frontier model. Any field is
 overridable per tier via the `efforts` section of the profile file.
 
-| Tier | Model | Max steps | Churn rounds | Max tokens | Wall-clock |
-|---|---|---|---|---|---|
-| `fast` | `snappy` | 20 | 2 | 80 000 | 300 s |
-| `medium` _(default)_ | `snappy` | 40 | 3 | 200 000 | 600 s |
-| `heavy` | `smart` | 80 | 10 | 500 000 | 1800 s |
+| Tier | Max steps | Churn rounds | Max tokens | Wall-clock |
+|---|---|---|---|---|
+| `fast` | 20 | 2 | 80 000 | 300 s |
+| `medium` _(default)_ | 40 | 3 | 200 000 | 600 s |
+| `heavy` | 80 | 10 | 500 000 | 1800 s |
 
-- **fast** — quick & decisive on the small model; bail early if stuck.
+- **fast** — quick & decisive; bail early if stuck.
 - **medium** — the balanced default (equals the legacy flat defaults).
-- **heavy** — patient & thorough on the stronger model; for hard multi-file work.
+- **heavy** — patient & thorough; for hard multi-file work.
 
 ## Budgets and context
 
@@ -65,8 +78,8 @@ overridable per tier via the `efforts` section of the profile file.
 | `maxWallClockSeconds` | `600` | Wall-clock ceiling per run. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
 
-These are seeded by the effort tier (except `maxContextTokens`, which is a flat
-default) and can be overridden per-model in the profile file.
+`maxTokens`, `maxWallClockSeconds`, and `churnRounds` are seeded by the effort tier;
+`maxContextTokens` is a flat default. All are overridable per-model in the profile.
 
 ## Profile file
 
@@ -78,13 +91,13 @@ Two sections, both optional:
 
 - **Per-model entries** (keyed by model name) — overrides applied when that model
   is the resolved model.
-- **`efforts`** — per-tier overrides applied to the built-in tier before the
-  per-model/env/flag layers.
+- **`efforts`** — per-tier budget overrides applied to the built-in tier before the
+  env/flag layers.
 
 ```jsonc
 {
   // per-model overrides (key = model name as passed to --model / KLOO_MODEL)
-  "snappy": {
+  "qwen2.5-coder": {
     "toolFormat": "native",        // native | xml  (tool-call adapter)
     "temperature": 0.2,
     "fewShotPath": "/path/to/fewshot.txt",  // optional gold examples for the system prompt
@@ -98,10 +111,9 @@ Two sections, both optional:
     "temperature": 0.1
   },
 
-  // per-tier overrides (adjust a built-in effort tier)
+  // per-tier budget overrides (adjust a built-in effort tier)
   "efforts": {
     "heavy": {
-      "model": "smart",
       "maxSteps": 120,
       "churnRounds": 15,
       "maxTokens": 800000,
@@ -113,8 +125,8 @@ Two sections, both optional:
 
 Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
 `maxTokens`, `maxWallClockSeconds`, `churnRounds`.
-Per-tier (`efforts`) fields: `model`, `maxSteps`, `churnRounds`, `maxTokens`,
-`maxWallClockSeconds`.
+Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,
+`maxWallClockSeconds` (budgets only — no model).
 
 See **[setup.md](setup.md)** for prerequisites and the local/hosted endpoint
 recipes.

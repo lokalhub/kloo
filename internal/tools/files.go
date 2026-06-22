@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lokal/kloo/internal/edit"
+	"github.com/lokalhub/kloo/internal/edit"
 )
 
 // Tool name constants — the exact snake_case strings from naming.md that Phase

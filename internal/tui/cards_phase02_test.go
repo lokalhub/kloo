@@ -27,7 +27,7 @@ func hasHunkSeparator(frame string) bool {
 
 // tall returns a model sized tall enough that several cards fit the viewport.
 func tall() Model {
-	return sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, 44)
+	return sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, 44)
 }
 
 // TestToolCardsAccentGlyphChip (task 01): the four tool kinds each render a
@@ -142,7 +142,7 @@ func TestRunOutputExpanded(t *testing.T) {
 // TestCtrlOTogglesExpand (task 03): teatest drives ctrl+o and proves the frame
 // toggles truncated ↔ full in both directions.
 func TestCtrlOTogglesExpand(t *testing.T) {
-	tm := teatest.NewTestModel(t, New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}),
+	tm := teatest.NewTestModel(t, New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}),
 		teatest.WithInitialTermSize(tw, 44))
 	tm.Send(longFailCard())
 

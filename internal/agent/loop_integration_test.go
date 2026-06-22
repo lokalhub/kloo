@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/llm/llmtest"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // The seeded fixture repo is generated in-test (git init + one commit) rather
@@ -90,7 +90,7 @@ func buildLoop(t *testing.T, root string, srv *llmtest.Server, cfg config.Config
 		t.Fatal(err)
 	}
 	return &Loop{
-		Client:        llm.New(srv.URL+"/v1", "snappy"),
+		Client:        llm.New(srv.URL+"/v1", "test-model"),
 		Adapter:       tools.NativeFCAdapter{},
 		Registry:      tools.DefaultRegistry(ws),
 		Verifier:      NewCommandVerifier(ws, verifyCmd),

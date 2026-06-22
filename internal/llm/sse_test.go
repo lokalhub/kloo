@@ -31,7 +31,7 @@ func TestStreamSayHi(t *testing.T) {
 	srv := sseServer(t, "say-hi.stream")
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	var fragments []string
 	resp, err := client.Stream(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "say hi"}},
@@ -44,7 +44,7 @@ func TestStreamSayHi(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream error: %v", err)
 	}
-	// say-hi.stream is a transcript recorded from a real llama-swap snappy run
+	// say-hi.stream is a transcript recorded from a real llama.cpp run
 	// (task 07), so the expected reply is the exact recorded content.
 	const wantReply = "Hi there! 👋"
 	if got := resp.Choices[0].Message.Content; got != wantReply {
@@ -63,7 +63,7 @@ func TestStreamToolCall(t *testing.T) {
 	srv := sseServer(t, "tool-call.stream")
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	resp, err := client.Stream(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "read main.go"}},
 	}, nil)
@@ -144,7 +144,7 @@ func TestStreamContextCancel(t *testing.T) {
 	defer srv.Close()
 	defer close(hold)
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -167,7 +167,7 @@ func TestStreamOnDeltaError(t *testing.T) {
 	defer srv.Close()
 
 	sentinel := errors.New("caller abort")
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	_, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, func(d Delta) error {
 		return sentinel
 	})
@@ -183,7 +183,7 @@ func TestStreamNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	_, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil)
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {

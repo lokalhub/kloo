@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/repomap"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/repomap"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // Loop is the autonomous harness. Its dependencies are injected so the

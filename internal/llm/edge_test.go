@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lokal/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
 )
 
 // --- Harness exercised by one non-streaming and one streaming test ----------
@@ -19,7 +19,7 @@ import (
 // call and captures the request body.
 func TestHarnessNonStreaming(t *testing.T) {
 	srv := llmtest.JSON(t, `{"id":"h1","choices":[{"index":0,"message":{"role":"assistant","content":"pong"}}]}`)
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 
 	resp, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "ping"}}})
 	if err != nil {
@@ -38,7 +38,7 @@ func TestHarnessNonStreaming(t *testing.T) {
 func TestHarnessStreaming(t *testing.T) {
 	transcript := llmtest.ReadTranscript(t, "testdata", "sse", "say-hi.stream")
 	srv := llmtest.SSE(t, transcript)
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 
 	resp, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "say hi"}}}, nil)
 	if err != nil {
@@ -66,7 +66,7 @@ func TestCompleteEdgeErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := llmtest.Status(t, tc.status, tc.body)
-			client := New(srv.URL+"/v1", "snappy")
+			client := New(srv.URL+"/v1", "test-model")
 			_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) {
@@ -86,7 +86,7 @@ func TestCompleteEdgeErrors(t *testing.T) {
 // an APIError — the HTTP call succeeded, the payload is the problem).
 func TestCompleteMalformedJSON(t *testing.T) {
 	srv := llmtest.JSON(t, `{"choices": [ this is not json`)
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if err == nil {
 		t.Fatal("want decode error, got nil")
@@ -104,7 +104,7 @@ func TestCompleteMalformedJSON(t *testing.T) {
 // caller gets an empty Choices slice to handle.
 func TestCompleteEmptyChoices(t *testing.T) {
 	srv := llmtest.JSON(t, `{"id":"e","object":"chat.completion","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}`)
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	resp, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if err != nil {
 		t.Fatalf("empty choices should not error, got %v", err)
@@ -118,7 +118,7 @@ func TestCompleteEmptyChoices(t *testing.T) {
 // with DeadlineExceeded (via the shared harness Delay).
 func TestCompleteSlowServerTimeout(t *testing.T) {
 	srv := llmtest.NewServer(t, llmtest.Mock{Body: `{"choices":[]}`, Delay: 500 * time.Millisecond})
-	client := New(srv.URL+"/v1", "snappy", WithTimeout(40*time.Millisecond))
+	client := New(srv.URL+"/v1", "test-model", WithTimeout(40*time.Millisecond))
 	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("want DeadlineExceeded, got %v", err)
@@ -128,7 +128,7 @@ func TestCompleteSlowServerTimeout(t *testing.T) {
 // TestConnectionRefused: dialing a dead endpoint yields a clear error (not panic).
 func TestConnectionRefused(t *testing.T) {
 	dead := llmtest.DeadURL(t)
-	client := New(dead+"/v1", "snappy", WithTimeout(2*time.Second))
+	client := New(dead+"/v1", "test-model", WithTimeout(2*time.Second))
 
 	_, cErr := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if cErr == nil || !strings.Contains(cErr.Error(), "llm: request") {
@@ -179,7 +179,7 @@ func TestResponseBodiesClosed(t *testing.T) {
 			header: "application/json",
 			closed: &closed,
 		}}
-		client := New("http://example/v1", "snappy", WithHTTPClient(hc))
+		client := New("http://example/v1", "test-model", WithHTTPClient(hc))
 		if _, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}}); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -195,7 +195,7 @@ func TestResponseBodiesClosed(t *testing.T) {
 			header: "text/event-stream",
 			closed: &closed,
 		}}
-		client := New("http://example/v1", "snappy", WithHTTPClient(hc))
+		client := New("http://example/v1", "test-model", WithHTTPClient(hc))
 		if _, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}}, nil); err != nil {
 			t.Fatalf("Stream: %v", err)
 		}

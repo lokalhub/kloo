@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/lokal/kloo/internal/edit"
+	"github.com/lokalhub/kloo/internal/edit"
 )
 
 // wsAt builds a Workspace at a fresh temp root and returns it + the canonical root.

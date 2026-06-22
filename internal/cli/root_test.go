@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // fakeClient is an offline llm.LLMClient that records what it was asked to do
@@ -63,7 +63,7 @@ func TestFlagsMapToConfig(t *testing.T) {
 	}
 
 	out, _, err := runCmd(t, deps,
-		"--model", "smart",
+		"--model", "alt-model",
 		"--endpoint", "http://host:9000/v1",
 		"--mode", "manual",
 		"--max-steps", "9",
@@ -74,8 +74,8 @@ func TestFlagsMapToConfig(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if gotCfg.Model != "smart" {
-		t.Errorf("model = %q, want smart", gotCfg.Model)
+	if gotCfg.Model != "alt-model" {
+		t.Errorf("model = %q, want alt-model", gotCfg.Model)
 	}
 	if gotCfg.Endpoint != "http://host:9000/v1" {
 		t.Errorf("endpoint = %q", gotCfg.Endpoint)

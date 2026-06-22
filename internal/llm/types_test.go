@@ -37,7 +37,7 @@ func TestRequestRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(fixture, &req); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
-	if req.Model != "snappy" || len(req.Messages) != 2 || req.Temperature != 0.1 {
+	if req.Model != "test-model" || len(req.Messages) != 2 || req.Temperature != 0.1 {
 		t.Fatalf("unexpected request parse: %+v", req)
 	}
 	if req.Messages[1].Role != RoleUser || req.Messages[1].Content != "say hi" {

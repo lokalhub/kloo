@@ -9,7 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // blockingRunner records that Start was called and how many times; it blocks
@@ -31,7 +31,7 @@ func TestSubmitTaskRejectedWhileRunning(t *testing.T) {
 	runner := &blockingRunner{release: make(chan struct{})}
 	defer close(runner.release)
 
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000, Runner: runner}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: runner}), tw, th)
 
 	// First submission starts a run (m.running becomes true).
 	tm, cmd := m.Update(submitTaskMsg{task: "first task"})

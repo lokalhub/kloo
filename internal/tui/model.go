@@ -103,7 +103,7 @@ func New(cfg Config) Model {
 
 	modelName := cfg.Model
 	if modelName == "" {
-		modelName = "snappy"
+		modelName = "local"
 	}
 
 	m := Model{

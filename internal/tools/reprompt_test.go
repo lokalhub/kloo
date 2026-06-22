@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
 )
 
 // Canned native-FC responses for the scripted harness.
@@ -17,11 +17,11 @@ const (
 )
 
 func clientFor(srv *llmtest.Server) llm.LLMClient {
-	return llm.New(srv.URL+"/v1", "snappy")
+	return llm.New(srv.URL+"/v1", "test-model")
 }
 
 func baseReq() llm.ChatRequest {
-	return llm.ChatRequest{Model: "snappy", Messages: []llm.Message{{Role: llm.RoleUser, Content: "read x"}}}
+	return llm.ChatRequest{Model: "test-model", Messages: []llm.Message{{Role: llm.RoleUser, Content: "read x"}}}
 }
 
 func TestParseWithRetryGoodFirst(t *testing.T) {

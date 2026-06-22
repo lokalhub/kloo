@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
 )
 
 // nativeToolCallBody renders a ChatResponse carrying one native tool_call (built

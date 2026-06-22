@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // ApplyConstraint is the OPTIONAL, best-effort constrained-decoding layer. When

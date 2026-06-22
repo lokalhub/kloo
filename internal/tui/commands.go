@@ -8,9 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// knownModels is the set /model accepts (status line reflects the choice).
-var knownModels = map[string]bool{"snappy": true, "smart": true}
-
 // isSlash reports whether a submitted line is a slash command.
 func isSlash(line string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "/")
@@ -53,11 +50,9 @@ func (m Model) slashAdd(path string) Model {
 func (m Model) slashModel(name string) Model {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return m.appendItem(infoItem{text: "/model needs a name (snappy, smart)"})
+		return m.appendItem(infoItem{text: "/model needs a model name"})
 	}
-	if !knownModels[name] {
-		return m.appendItem(infoItem{text: "unknown model: " + name + " (try snappy, smart)"})
-	}
+	// kloo is BYO-endpoint: accept any model name the configured endpoint serves.
 	m.modelName = name
 	m.status.model = name
 	return m.appendItem(infoItem{text: "model: " + name})

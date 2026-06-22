@@ -53,7 +53,7 @@ func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.timeout = d }
 }
 
-// WithAPIKey sets a bearer token (unused against local llama-swap, needed for
+// WithAPIKey sets a bearer token (unused against a local llama.cpp/Ollama server, needed for
 // hosted OpenAI-compatible endpoints).
 func WithAPIKey(key string) Option {
 	return func(c *Client) { c.apiKey = key }

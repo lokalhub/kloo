@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/llm/llmtest"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // ─── test seam stubs ────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDet
 	reg := tools.NewRegistry()
 	reg.Register(recordTool{name: "read_file", calls: &calls})
 	return &Loop{
-		Client:   llm.New(srv.URL+"/v1", "snappy"),
+		Client:   llm.New(srv.URL+"/v1", "test-model"),
 		Adapter:  tools.NativeFCAdapter{},
 		Registry: reg,
 		Verifier: v,

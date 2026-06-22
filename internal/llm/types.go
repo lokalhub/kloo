@@ -1,7 +1,7 @@
 // Package llm is the hand-rolled OpenAI-compatible LLM client: request/response
 // types, a non-streaming Complete, and an SSE Stream over the stdlib (no SSE
 // dependency). The JSON tags mirror the OpenAI /v1/chat/completions wire schema
-// (snake_case) so requests/responses interoperate with llama-swap and any other
+// (snake_case) so requests/responses interoperate with llama.cpp and any other
 // OpenAI-compatible endpoint.
 package llm
 
@@ -34,7 +34,7 @@ type ChatRequest struct {
 	// otherwise so unconstrained endpoints behave identically.
 	ResponseFormat any `json:"response_format,omitempty"`
 	// Grammar carries an optional llama.cpp GBNF grammar (a non-standard field
-	// llama-swap/llama.cpp accept). Also set only by the constrained-decoding
+	// llama.cpp accepts). Also set only by the constrained-decoding
 	// layer when supported; omitted otherwise.
 	Grammar string `json:"grammar,omitempty"`
 }

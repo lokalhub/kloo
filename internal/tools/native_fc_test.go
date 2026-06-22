@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // toolCallMsg builds an assistant message carrying native tool_calls.
@@ -27,7 +27,7 @@ func fnCall(t *testing.T, id, name string, args map[string]any) llm.ToolCall {
 func TestNativeBuildRequest(t *testing.T) {
 	ws, _ := wsAt(t)
 	reg := DefaultRegistry(ws)
-	req := NativeFCAdapter{}.BuildRequest(llm.ChatRequest{Model: "snappy"}, reg)
+	req := NativeFCAdapter{}.BuildRequest(llm.ChatRequest{Model: "test-model"}, reg)
 
 	if len(req.Tools) != 5 {
 		t.Fatalf("want 5 tools attached, got %d", len(req.Tools))

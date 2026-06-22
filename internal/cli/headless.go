@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lokal/kloo/internal/agent"
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/agent"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // headlessVerifyTimeout is the per-verify timeout for the headless loop. The

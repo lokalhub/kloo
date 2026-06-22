@@ -13,7 +13,7 @@ func TestSelectAdapter(t *testing.T) {
 		want       string // "native" | "xml"
 		wantErr    bool
 	}{
-		{name: "snappy default (native) + tools-capable → native", toolFormat: "native", caps: EndpointCaps{SupportsTools: true}, want: "native"},
+		{name: "native default + tools-capable → native", toolFormat: "native", caps: EndpointCaps{SupportsTools: true}, want: "native"},
 		{name: "auto + tools-capable → native", toolFormat: "", caps: EndpointCaps{SupportsTools: true}, want: "native"},
 		{name: "auto + no tool support → xml", toolFormat: "", caps: EndpointCaps{SupportsTools: false}, want: "xml"},
 		{name: "xml override forces xml even when tools-capable", toolFormat: "xml", caps: EndpointCaps{SupportsTools: true}, want: "xml"},

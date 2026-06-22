@@ -1,4 +1,4 @@
-module github.com/lokal/kloo
+module github.com/lokalhub/kloo
 
 go 1.22
 

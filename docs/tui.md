@@ -11,7 +11,7 @@ them. Launch the TUI by running `kloo` with no task argument.
 ## At a glance
 
 ```
-┌ kloo  snappy · medium            step 18/80 · 14.4k/200k tok · auto ┐
+┌ kloo  qwen2.5-coder · medium     step 18/80 · 14.4k/200k tok · auto ┐
 └────────────────────────────────────────────────────────────────────┘
 
   … transcript: assistant prose, tool cards, diffs, command output …
@@ -136,6 +136,6 @@ The line self-terminates when a run ends.
   parsing and request-body opt-in, the agent estimate fallback, and TUI golden
   frames (`Model.View()` under the ascii profile) plus `teatest` for the
   `Ctrl-O` expand toggle and `NO_COLOR` degrade.
-- Live smoke: run `kloo --model snappy "<small task>"` against a local
-  llama-swap and watch the header/thinking token count start non-zero and
+- Live smoke: run `kloo "<small task>"` against a local OpenAI-compatible server
+  (e.g. llama.cpp) and watch the header/thinking token count start non-zero and
   increase over the run.

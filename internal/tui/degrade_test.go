@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 	"github.com/muesli/termenv"
 )
 
@@ -37,7 +37,7 @@ func TestWantsNoColor(t *testing.T) {
 func populatedFrame(m Model) string {
 	m = apply(m,
 		submitTaskMsg{task: "build the thing"},
-		progressMsg{Model: "snappy", Step: 1, MaxSteps: 40, Tokens: 400, MaxTokens: 8000},
+		progressMsg{Model: "test-model", Step: 1, MaxSteps: 40, Tokens: 400, MaxTokens: 8000},
 		streamDeltaMsg{Content: "working on it"},
 		streamDoneMsg{},
 		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 1, Stderr: "boom"}),
@@ -50,7 +50,7 @@ func populatedFrame(m Model) string {
 // does), a populated frame contains no ANSI escape bytes — layout/glyphs/labels
 // intact, no colour. TestMain already pins termenv.Ascii, mirroring the degrade.
 func TestDegradeNoANSIEscapes(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, 40)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, 40)
 	frame := populatedFrame(m)
 	if strings.Contains(frame, "\x1b[") {
 		t.Errorf("degraded frame must contain no ANSI escapes, got:\n%q", frame)
@@ -73,7 +73,7 @@ func TestDegradeNoANSIEscapes(t *testing.T) {
 func TestDegradeActuallyStripsColour(t *testing.T) {
 	defer lipgloss.SetColorProfile(termenv.Ascii) // restore the suite default
 
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, 40)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, 40)
 
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	if !strings.Contains(populatedFrame(m), "\x1b[") {

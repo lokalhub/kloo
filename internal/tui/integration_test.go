@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/lokal/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // scriptRunner is a deterministic fake loop: on Start it plays a fixed sequence
@@ -31,15 +31,15 @@ func (r *scriptRunner) Start(ctx context.Context, task string, mode Mode, files 
 // run_command card → done) renders the integrated transcript + advanced status.
 func TestIntegrationFullRunFrame(t *testing.T) {
 	// A taller terminal so the whole session fits in the viewport for the golden.
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, 44)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, 44)
 	m = apply(m,
 		submitTaskMsg{task: "make the three tabs Home/Apps/Profile, each name centered"},
-		progressMsg{Model: "snappy", Step: 1, MaxSteps: 40, Tokens: 400, MaxTokens: 8000},
+		progressMsg{Model: "test-model", Step: 1, MaxSteps: 40, Tokens: 400, MaxTokens: 8000},
 		streamDeltaMsg{Content: "I'll update the tab routes first."},
 		streamDoneMsg{},
 		// The edit card goes through the REAL bridge parse (a fenced diff arg).
 		toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{"path": "src/app/tabs/tabs.routes.ts", "diff": editFileDiff}}, tools.Result{}),
-		progressMsg{Model: "snappy", Step: 2, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000},
+		progressMsg{Model: "test-model", Step: 2, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000},
 		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 0}),
 		reportMsg{Reason: "success", Steps: 2, Tokens: 1200, MaxTokens: 8000, Elapsed: "12s", VerifyCmd: "npm run build", VerifyExit: 0},
 	)
@@ -55,7 +55,7 @@ func TestIntegrationFullRunFrame(t *testing.T) {
 // TestIntegrationStopReportBudgetDistinct: an autonomous budget stop renders the
 // terminal banner, visibly DISTINCT from the Esc-interrupt line.
 func TestIntegrationStopReportBudgetDistinct(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
 	m = apply(m,
 		submitTaskMsg{task: "a task that never converges"},
 		reportMsg{
@@ -85,7 +85,7 @@ func TestIntegrationStopReportBudgetDistinct(t *testing.T) {
 // PROGRESS (churn)", reason "same failure ×3") so both banner variants have a
 // frame for the Product lens.
 func TestIntegrationStopReportChurnVariant(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
 	m = apply(m,
 		submitTaskMsg{task: "a task that keeps repeating the same edit"},
 		reportMsg{
@@ -109,7 +109,7 @@ func TestIntegrationStopReportChurnVariant(t *testing.T) {
 // TestIntegrationDialDefaultAndApproveEachEndToEnd: default auto end-to-end, and
 // approve-each holds an edit until confirmed.
 func TestIntegrationDialDefaultAndApproveEachEndToEnd(t *testing.T) {
-	m := New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000})
+	m := New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000})
 	if m.mode != ModeAuto {
 		t.Fatalf("default dial must be auto end-to-end, got %q", m.mode)
 	}
@@ -135,7 +135,7 @@ func TestIntegrationFakeRunnerDrivesViaProgram(t *testing.T) {
 		toolEventMsg{Name: "run_command", Command: "npm run build", ExitCode: 0},
 		reportMsg{Reason: "success", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 0},
 	}}
-	tm := teatest.NewTestModel(t, New(Config{Model: "snappy", MaxSteps: 40, MaxTokens: 8000, Runner: runner}),
+	tm := teatest.NewTestModel(t, New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: runner}),
 		teatest.WithInitialTermSize(tw, th))
 	runner.setSend(tm.GetProgram().Send)
 

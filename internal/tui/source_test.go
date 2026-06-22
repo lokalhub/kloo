@@ -17,7 +17,7 @@ func (f fakeTaskSource) Name() string { return "fake" }
 
 // TestKeyboardIsTheV1Source: by default the model uses the keyboard source.
 func TestKeyboardIsTheV1Source(t *testing.T) {
-	m := New(Config{Model: "snappy"})
+	m := New(Config{Model: "test-model"})
 	if _, ok := m.source.(keyboardSource); !ok {
 		t.Errorf("default TaskSource = %T, want keyboardSource", m.source)
 	}
@@ -30,7 +30,7 @@ func TestKeyboardIsTheV1Source(t *testing.T) {
 // WITHOUT keyboard input and WITHOUT changing the model/Update/View — exactly
 // what a future StdinTaskSource would do.
 func TestSeamAdmitsNonKeyboardSource(t *testing.T) {
-	m := sized(New(Config{Model: "snappy", Source: fakeTaskSource{task: "build the tabs"}}), tw, th)
+	m := sized(New(Config{Model: "test-model", Source: fakeTaskSource{task: "build the tabs"}}), tw, th)
 
 	// The source's Attach command yields the submit message (no keys involved).
 	attach := m.source.Attach()

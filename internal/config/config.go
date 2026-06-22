@@ -18,8 +18,12 @@ import (
 
 // Default values, used when nothing higher in the precedence chain sets a field.
 const (
-	DefaultEndpoint    = "http://127.0.0.1:8080/v1"
-	DefaultModel       = "snappy"
+	DefaultEndpoint = "http://127.0.0.1:8080/v1"
+	// DefaultModel is a neutral placeholder, not a real model. A single-model
+	// llama.cpp server ignores the model field (serves whatever's loaded), so
+	// this runs out-of-the-box there; for Ollama / vLLM / OpenAI / OpenRouter,
+	// set your actual model via --model or KLOO_MODEL.
+	DefaultModel       = "local"
 	DefaultTemperature = 0.1
 	DefaultMaxSteps    = 40
 	DefaultMode        = "auto"
@@ -39,8 +43,8 @@ const (
 	EnvEndpoint = "KLOO_ENDPOINT"
 	EnvModel    = "KLOO_MODEL"
 	// EnvAPIKey is the bearer token for the endpoint (needed for hosted providers
-	// like OpenRouter; ignored by a local llama-swap, which has no auth). Falls
-	// back to the conventional OPENAI_API_KEY when KLOO_API_KEY is unset.
+	// like OpenRouter; not needed for a local llama.cpp/Ollama server, which has no
+	// auth). Falls back to the conventional OPENAI_API_KEY when KLOO_API_KEY is unset.
 	EnvAPIKey       = "KLOO_API_KEY"
 	EnvAPIKeyOpenAI = "OPENAI_API_KEY"
 )
@@ -59,7 +63,7 @@ type Config struct {
 	Mode        string
 	ToolFormat  string
 	// Effort is the resolved intensity tier (fast|medium|heavy) that seeded the
-	// model + budgets + churn below.
+	// budgets + churn below (the model is a separate axis).
 	Effort string
 	// FewShotPath is an optional per-model few-shot prompt file (from the
 	// profile); empty when none is configured.
@@ -87,7 +91,7 @@ type Flags struct {
 
 // profileEntry is the per-model override shape in the profile JSON file:
 //
-//	{ "snappy": {"toolFormat": "native", "temperature": 0.2, "fewShotPath": "..."} }
+//	{ "qwen2.5-coder": {"toolFormat": "native", "temperature": 0.2, "fewShotPath": "..."} }
 type profileEntry struct {
 	ToolFormat          *string  `json:"toolFormat,omitempty"`
 	Temperature         *float64 `json:"temperature,omitempty"`
@@ -124,11 +128,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		ChurnRounds:         DefaultChurnRounds,
 	}
 
-	// Effort tier (flag > env > default): seeds Model + budgets + churn from a
-	// named intensity level, replacing the flat defaults. A per-tier "efforts"
-	// override in the profile file adjusts the tier; env/flags/per-model profile
-	// still win on top (below). medium == the legacy defaults, so an unset effort
-	// changes nothing.
+	// Effort tier (flag > env > default): seeds the loop budgets + churn from a
+	// named intensity level, replacing the flat defaults. It does NOT set the
+	// model — that's a separate axis (--model / KLOO_MODEL / profile). A per-tier
+	// "efforts" override in the profile file adjusts the tier; env/flags/per-model
+	// profile still win on top (below). medium == the legacy defaults, so an unset
+	// effort changes nothing.
 	effort := DefaultEffort
 	if v := getenv(EnvEffort); IsEffort(v) {
 		effort = v
@@ -143,7 +148,6 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		applyEffortOverride(&tier, ov)
 	}
 	cfg.Effort = effort
-	cfg.Model = tier.Model
 	cfg.MaxSteps = tier.MaxSteps
 	cfg.ChurnRounds = tier.ChurnRounds
 	cfg.MaxTokens = tier.MaxTokens

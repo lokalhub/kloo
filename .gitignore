@@ -7,6 +7,10 @@
 # ── Go compiled artifacts ───────────────────────────────────────
 # Go builds straight to binaries (no separate build dir), so ignore loose
 # compiled output, platform libraries, test binaries, and profiling output.
+# NOTE: testdata/ is intentionally NOT ignored — in Go it holds committed test
+# fixtures (the *.golden snapshots + request/response JSON the tests assert on,
+# and the repomap node_modules fixture). Ignoring it makes `go test ./...` fail
+# on a fresh clone / in CI.
 *.exe
 *.exe~
 *.dll
@@ -30,6 +34,14 @@ go.work.sum
 .aider*
 .johnnyone/
 
+# ── Benchmark (Ionic acceptance harness) ────────────────────────
+# The Ionic app is kloo's regenerable acceptance TARGET, not part of kloo. We
+# commit only the harness (benchmark/assert.sh + README); the app trees are NOT
+# committed — regenerate with `ionic start … tabs --type=angular` (see the README).
+benchmark/fixture/
+benchmark/reference/
+benchmark/artifacts/
+
 # ── Local env / secrets ─────────────────────────────────────────
 .env
 .env.*
@@ -42,8 +54,3 @@ go.work.sum
 *.swo
 .DS_Store
 Thumbs.db
-benchmark/artifacts/*
-benchmark/fixture/*
-benchmark/reference/*
-internal/llm/testdata/*
-internal/tui/testdata/*

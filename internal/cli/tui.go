@@ -3,11 +3,11 @@ package cli
 import (
 	"os"
 
-	"github.com/lokal/kloo/internal/agent"
-	"github.com/lokal/kloo/internal/config"
-	"github.com/lokal/kloo/internal/llm"
-	"github.com/lokal/kloo/internal/tools"
-	"github.com/lokal/kloo/internal/tui"
+	"github.com/lokalhub/kloo/internal/agent"
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/tools"
+	"github.com/lokalhub/kloo/internal/tui"
 )
 
 // defaultLaunchTUI composes the full stack — P00 client, P01/P02 tools + jail,

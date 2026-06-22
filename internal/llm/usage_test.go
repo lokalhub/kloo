@@ -54,7 +54,7 @@ func streamOptions(t *testing.T, body []byte) (present bool, includeUsage bool) 
 // stream_options.include_usage == true (task 01).
 func TestStreamRequestsIncludeUsage(t *testing.T) {
 	srv, body := captureBody(t, true, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	if _, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestStreamRequestsIncludeUsage(t *testing.T) {
 // identically to before — no stream_options key at all (task 01).
 func TestCompleteOmitsStreamOptions(t *testing.T) {
 	srv, body := captureBody(t, false, string(readFixture(t, "response.json")))
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	if _, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestStreamParsesUsage(t *testing.T) {
 	srv := sseServer(t, "usage.stream")
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	resp, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
@@ -110,7 +110,7 @@ func TestStreamAbsentUsageZero(t *testing.T) {
 	srv := sseServer(t, "say-hi.stream")
 	defer srv.Close()
 
-	client := New(srv.URL+"/v1", "snappy")
+	client := New(srv.URL+"/v1", "test-model")
 	resp, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)

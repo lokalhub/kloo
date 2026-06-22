@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lokal/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/config"
 )
 
 // fakeClock returns a controllable clock.

@@ -1,23 +1,46 @@
 # kloo
 
-Autonomous coding CLI for small **local** LLMs. kloo drives a local
-[llama-swap](https://github.com/mostlygeek/llama-swap) (or any OpenAI-compatible)
-endpoint to edit and verify code on its own, in an interactive
+Autonomous coding CLI for small **local** LLMs. kloo drives any OpenAI-compatible
+endpoint (llama.cpp, Ollama, vLLM, OpenAI, OpenRouter…) to edit and verify code on
+its own, in an interactive
 [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI that aims for a
-Claude-Code-style feel.
+Claude-Code-style feel. (We test against [llama.cpp](https://github.com/ggml-org/llama.cpp)
+with Qwen-Coder models.)
 
 Single static Go binary, `CGO_ENABLED=0`, no runtime dependencies.
+
+## How it works
+
+The intelligence lives in the **harness**, not the model: kloo runs the loop and
+verifies every step, while the model does one bounded thing per turn.
+
+```mermaid
+flowchart TD
+    Task([your task]) --> Plan[plan one step]
+    Plan --> Tool["one tool call<br/>read · edit · ls · run_command"]
+    Tool --> Apply[apply edit / capture output]
+    Apply --> Verify{{"verify<br/>your --verify command"}}
+    Verify -- passes --> Done([done ✓])
+    Verify -- fails --> Rails{budget or churn<br/>exceeded?}
+    Rails -- no --> Plan
+    Rails -- yes --> Stop[stop &amp; report<br/>· optional git rollback]
+    Tool <-->|OpenAI-compatible| Model[("your model<br/>llama.cpp · Ollama · OpenAI · OpenRouter")]
+```
+
+The `--verify` command is the **only** success signal kloo trusts — not the
+model's self-report. See [docs/setup.md](docs/setup.md#the-verify-command-is-the-spec).
 
 ## Quick start
 
 ```sh
 make binary          # build ./bin/kloo
 ./bin/kloo           # interactive TUI session
-./bin/kloo --model snappy "say hi"   # one-shot, streamed to stdout
+./bin/kloo "say hi"  # one-shot, streamed to stdout
 ```
 
 kloo talks to an OpenAI-compatible endpoint (default
-`http://127.0.0.1:8080/v1`, model `snappy`). Point it at your own with
+`http://127.0.0.1:8080/v1`, model `local` — a placeholder a single-model llama.cpp
+server ignores). Point it at your own with
 `--endpoint` / `--model` or the `KLOO_*` env vars. For a **hosted** provider
 (OpenRouter, OpenAI, …) also set a bearer token:
 
@@ -43,8 +66,8 @@ verify command) and the local/hosted recipes.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds model + step/token budgets + churn patience. |
-| `--model` | `snappy` | Model name; overrides the tier's model. |
+| `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds step/token budgets + churn patience. |
+| `--model` | `local` | Model your endpoint serves (placeholder `local` for single-model llama.cpp). |
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `40` | Max autonomous steps. |
@@ -58,8 +81,8 @@ Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
 `OPENAI_API_KEY`); `NO_COLOR` disables all TUI colour (see below).
 
-Effort tiers seed the model + loop budgets in one switch: `fast` (snappy, 20
-steps/80k tok), `medium` (snappy, 40/200k — the default), `heavy` (smart, 80/500k).
+Effort tiers seed the loop budgets in one switch (the model is independent):
+`fast` (20 steps/80k tok), `medium` (40/200k — the default), `heavy` (80/500k).
 The **full reference** — every flag, env var, the effort table, and the
 `profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 
@@ -80,7 +103,7 @@ card/diff/output/markdown surfaces.
 ```sh
 make check    # build + vet + gofmt check + test (mirrors CI)
 make test
-make run ARGS='--model snappy "say hi"'
+make run ARGS='"say hi"'
 ```
 
 All automated gates are zero-lag: `go build ./...`, `go test ./...`,

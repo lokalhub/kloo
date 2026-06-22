@@ -50,7 +50,7 @@ func (m Model) handleProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 // `kloo • model • effort` + the live token total, demoting `step N/max` to a
 // dim/secondary field (header.html):
 //
-//	┌ kloo  snappy · medium            step 18/80 · 14.4k/200k tok · auto ┐
+//	┌ kloo  qwen2.5-coder · medium     step 18/80 · 14.4k/200k tok · auto ┐
 //
 // The token total is the live, non-zero value from Phase 00's OnProgress.
 func (m Model) renderHeader() string {

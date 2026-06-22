@@ -4,7 +4,7 @@
 // internal/cli) and executes it. All behaviour lives under internal/**.
 package main
 
-import "github.com/lokal/kloo/internal/cli"
+import "github.com/lokalhub/kloo/internal/cli"
 
 func main() {
 	cli.Execute()

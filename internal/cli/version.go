@@ -3,7 +3,7 @@ package cli
 import "fmt"
 
 // Build-stamp variables. Overridden at release time by goreleaser via ldflags
-// (-X github.com/lokal/kloo/internal/cli.version=… etc.); the defaults below are
+// (-X github.com/lokalhub/kloo/internal/cli.version=… etc.); the defaults below are
 // what a plain `go build` / `go install` produces.
 var (
 	version = "dev"

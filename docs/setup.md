@@ -7,27 +7,31 @@ What you need to run kloo, and the two ways to point it at a model.
 | Requirement | Why | Notes |
 |---|---|---|
 | The `kloo` binary | — | `make binary` (needs Go, `CGO_ENABLED=0`) or a release binary. Single static binary, no runtime deps. |
-| An OpenAI-compatible endpoint | kloo is BYO-inference; it speaks `/v1/chat/completions` with SSE streaming. | Local (llama-swap) or hosted (OpenRouter, OpenAI, …). See below. |
+| An OpenAI-compatible endpoint | kloo is BYO-inference; it speaks `/v1/chat/completions` with SSE streaming. | Local (llama.cpp, Ollama, vLLM, LM Studio…) or hosted (OpenRouter, OpenAI…). See below. |
 | A git repo in the working dir | Checkpoint + rollback snapshot the tree with `git stash create` before edits and restore on abort. | **Strongly recommended.** Without a repo, checkpoint/rollback is disabled (`ErrNotGitRepo`) — the loop still runs, but a bad run can't be auto-reverted. |
 | A meaningful `--verify` command | It is the loop's only success signal. | See [The verify command is the spec](#the-verify-command-is-the-spec). |
 
-## Option A — local model (llama-swap)
+## Option A — local model
 
-The default. kloo ships pointed at `http://127.0.0.1:8080/v1` with model `snappy`.
+The default. kloo ships pointed at `http://127.0.0.1:8080/v1` (the llama.cpp
+server's default), with the placeholder model `local`.
 
-1. Run [llama-swap](https://github.com/mostlygeek/llama-swap) serving the coder
-   models (e.g. `snappy` = Qwen3-Coder-30B-A3B, `smart` = Qwen2.5-Coder-32B),
-   launched with `--jinja` so native tool-calling is available.
-2. Smoke test:
+1. Serve a coder model on any OpenAI-compatible local runtime —
+   [llama.cpp's server](https://github.com/ggml-org/llama.cpp) (the one we test
+   with), Ollama, vLLM, or LM Studio. For native tool-calling on llama.cpp, launch
+   with `--jinja`. A good local choice is a Qwen2.5-Coder / Qwen3-Coder model.
+2. Point kloo at it. A single-model llama.cpp server ignores the model name, so the
+   `local` default just works; for Ollama/vLLM, pass the served name:
    ```sh
-   kloo --model snappy "say hi"     # one-shot, streams a reply
+   kloo "say hi"                          # llama.cpp single-model — uses what's loaded
+   kloo --model qwen2.5-coder "say hi"    # Ollama/vLLM — name the served model
    ```
 3. Run a task in the TUI:
    ```sh
    kloo --verify 'npm run build && bash benchmark/assert.sh src'
    ```
 
-No API key is needed — local llama-swap has no auth.
+No API key is needed — a local server has no auth.
 
 ## Option B — hosted provider (OpenRouter, OpenAI, …)
 
