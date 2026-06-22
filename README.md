@@ -18,7 +18,18 @@ make binary          # build ./bin/kloo
 
 kloo talks to an OpenAI-compatible endpoint (default
 `http://127.0.0.1:8080/v1`, model `snappy`). Point it at your own with
-`--endpoint` / `--model` or the `KLOO_*` env vars.
+`--endpoint` / `--model` or the `KLOO_*` env vars. For a **hosted** provider
+(OpenRouter, OpenAI, …) also set a bearer token:
+
+```sh
+export KLOO_API_KEY="$OPENROUTER_API_KEY"   # falls back to OPENAI_API_KEY
+kloo --effort heavy --endpoint https://openrouter.ai/api/v1 \
+     --model deepseek/deepseek-v4-flash \
+     --verify 'npm run build && bash benchmark/assert.sh src'
+```
+
+See **[docs/setup.md](docs/setup.md)** for prerequisites (endpoint, git, the
+verify command) and the local/hosted recipes.
 
 ## Usage
 
@@ -40,10 +51,17 @@ kloo talks to an OpenAI-compatible endpoint (default
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | `go test ./...` | Verify command the loop runs each step (the real success signal). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
+| `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.config/kloo/profiles.json`). |
 
 Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
-Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, and `KLOO_EFFORT`;
-`NO_COLOR` disables all TUI colour (see below).
+Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and
+`KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
+`OPENAI_API_KEY`); `NO_COLOR` disables all TUI colour (see below).
+
+Effort tiers seed the model + loop budgets in one switch: `fast` (snappy, 20
+steps/80k tok), `medium` (snappy, 40/200k — the default), `heavy` (smart, 80/500k).
+The **full reference** — every flag, env var, the effort table, and the
+`profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 
 ## Interactive TUI
 

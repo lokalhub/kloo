@@ -1,0 +1,287 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/lokal/kloo/internal/config"
+	"github.com/lokal/kloo/internal/llm"
+	"github.com/lokal/kloo/internal/llm/llmtest"
+	"github.com/lokal/kloo/internal/tools"
+)
+
+// ─── test seam stubs ────────────────────────────────────────────────────────
+
+type stubVerifier struct {
+	results  []VerifyResult
+	i        int
+	onVerify func()
+}
+
+func (v *stubVerifier) Verify(ctx context.Context) VerifyResult {
+	if v.onVerify != nil {
+		v.onVerify()
+	}
+	r := v.results[min(v.i, len(v.results)-1)]
+	v.i++
+	return r
+}
+
+type stubBudget struct {
+	tripAt int // steps at which Check trips (0 ⇒ never)
+	kind   BudgetKind
+	steps  int
+	tokens int
+}
+
+func (b *stubBudget) Observe(s int)   { b.steps = s }
+func (b *stubBudget) AddTokens(n int) { b.tokens += n }
+func (b *stubBudget) Check() (bool, BudgetKind) {
+	if b.tripAt > 0 && b.steps >= b.tripAt {
+		return true, b.kind
+	}
+	return false, ""
+}
+func (b *stubBudget) Stats() BudgetStats {
+	return BudgetStats{Steps: b.steps, MaxSteps: b.tripAt, Tokens: b.tokens, MaxTokens: 0}
+}
+
+type stubChurn struct {
+	churnAfter int // churn once Observe has been called this many times (0 ⇒ never)
+	observes   int
+	kind       ChurnKind
+}
+
+func (c *stubChurn) Observe(t Turn) { c.observes++ }
+func (c *stubChurn) Check() (bool, ChurnKind) {
+	if c.churnAfter > 0 && c.observes >= c.churnAfter {
+		return true, c.kind
+	}
+	return false, ""
+}
+func (c *stubChurn) Artifact() string { return "repeated-artifact" }
+
+// recordTool is a registry Tool that records the calls dispatched to it.
+type recordTool struct {
+	name  string
+	calls *[]tools.Call
+}
+
+func (t recordTool) Name() string        { return t.name }
+func (t recordTool) Description() string { return "record" }
+func (t recordTool) Schema() tools.ParamSchema {
+	return tools.ParamSchema{Properties: map[string]tools.Property{"path": {Type: "string"}}, Required: []string{"path"}}
+}
+func (t recordTool) Invoke(ctx context.Context, c tools.Call) (tools.Result, error) {
+	*t.calls = append(*t.calls, c)
+	return tools.Result{Output: "ok"}, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+type tcSpec struct {
+	name string
+	args map[string]any
+}
+
+// toolResp renders a ChatResponse carrying the given native tool calls + usage.
+func toolResp(t *testing.T, totalTokens int, calls ...tcSpec) string {
+	t.Helper()
+	var tcs []llm.ToolCall
+	for i, c := range calls {
+		ab, _ := json.Marshal(c.args)
+		tcs = append(tcs, llm.ToolCall{ID: fmt.Sprintf("c%d", i), Type: "function", Function: llm.FunctionCall{Name: c.name, Arguments: string(ab)}})
+	}
+	resp := llm.ChatResponse{
+		Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: tcs}}},
+		Usage:   llm.Usage{TotalTokens: totalTokens},
+	}
+	b, _ := json.Marshal(resp)
+	return string(b)
+}
+
+// newLoop builds a loop wired to the mocked server and a registry with a
+// recording read_file tool. Returns the loop + the recorded calls slice.
+func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDetector) (*Loop, *[]tools.Call) {
+	t.Helper()
+	var calls []tools.Call
+	reg := tools.NewRegistry()
+	reg.Register(recordTool{name: "read_file", calls: &calls})
+	return &Loop{
+		Client:   llm.New(srv.URL+"/v1", "snappy"),
+		Adapter:  tools.NativeFCAdapter{},
+		Registry: reg,
+		Verifier: v,
+		Budget:   b,
+		Churn:    c,
+		System:   "you are kloo",
+	}, &calls
+}
+
+func passResult() VerifyResult { return VerifyResult{Command: "test", ExitCode: 0, Passed: true} }
+func failResult() VerifyResult {
+	return VerifyResult{Command: "test", ExitCode: 1, Passed: false, Stdout: "FAIL"}
+}
+
+// ─── tests ──────────────────────────────────────────────────────────────────
+
+func TestLoopTransitionsInOrder(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 10, tcSpec{"read_file", map[string]any{"path": "a.go"}})})
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
+
+	var seq []State
+	loop.OnState = func(s State) { seq = append(seq, s) }
+
+	rep, err := loop.Run(context.Background(), "do it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Errorf("reason = %q, want success", rep.Reason)
+	}
+	want := []State{StateAct, StateApply, StateVerify, StateDecide, StateStop}
+	if fmt.Sprint(seq) != fmt.Sprint(want) {
+		t.Errorf("state sequence = %v, want %v", seq, want)
+	}
+}
+
+func TestLoopOneToolPerTurn(t *testing.T) {
+	body := toolResp(t, 5,
+		tcSpec{"read_file", map[string]any{"path": "first.go"}},
+		tcSpec{"read_file", map[string]any{"path": "second.go"}},
+	)
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: body})
+	loop, calls := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "do it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(*calls) != 1 || (*calls)[0].Args["path"] != "first.go" {
+		t.Errorf("expected only the first tool dispatched, got %+v", *calls)
+	}
+	if len(rep.Ignored) != 1 || rep.Ignored[0] != "read_file" {
+		t.Errorf("expected the second call recorded as ignored, got %v", rep.Ignored)
+	}
+}
+
+func TestLoopStopsOnVerifySuccess(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// First verify fails, second passes → loop runs two turns then stops success.
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult(), passResult()}}, &stubBudget{}, &stubChurn{})
+
+	rep, _ := loop.Run(context.Background(), "fix it")
+	if rep.Reason != ReasonSuccess {
+		t.Errorf("reason = %q, want success", rep.Reason)
+	}
+	if rep.Steps != 2 {
+		t.Errorf("steps = %d, want 2", rep.Steps)
+	}
+	if !rep.FinalVerify.Passed {
+		t.Errorf("final verify should be the green one")
+	}
+}
+
+func TestLoopStopsOnBudgetSeam(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// Budget trips at step 1 → loop stops before acting at all.
+	loop, calls := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{tripAt: 1, kind: BudgetSteps}, &stubChurn{})
+
+	rep, _ := loop.Run(context.Background(), "x")
+	if rep.Reason != ReasonBudgetExceeded {
+		t.Fatalf("reason = %q, want budget-exceeded", rep.Reason)
+	}
+	if rep.Budget == nil || rep.Budget.Kind != BudgetSteps {
+		t.Errorf("budget evidence missing/wrong: %+v", rep.Budget)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("no tool should dispatch when budget trips first")
+	}
+}
+
+func TestLoopStopsOnChurnSeam(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// Churn after one observation; verify always fails so the loop continues to
+	// turn 2 where churn.Check trips.
+	loop, _ := newLoop(t, srv,
+		&stubVerifier{results: []VerifyResult{failResult()}},
+		&stubBudget{},
+		&stubChurn{churnAfter: 1, kind: ChurnRepeatedFailure},
+	)
+	rep, _ := loop.Run(context.Background(), "x")
+	if rep.Reason != ReasonChurn {
+		t.Fatalf("reason = %q, want churn", rep.Reason)
+	}
+	if rep.Churn == nil || rep.Churn.Kind != ChurnRepeatedFailure {
+		t.Errorf("churn evidence missing/wrong: %+v", rep.Churn)
+	}
+}
+
+// TestLoopBoundsConversationHistory proves the per-request prompt stays bounded
+// across a long run: each request carries at most MaxConversation history
+// messages (plus the system prompt), even though the transcript keeps growing.
+func TestLoopBoundsConversationHistory(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// A real budget that stops after 12 steps; verify never passes; churn never fires.
+	loop, _ := newLoop(t, srv,
+		&stubVerifier{results: []VerifyResult{failResult()}},
+		NewBudget(config.Config{MaxSteps: 12}, time.Now),
+		&stubChurn{},
+	)
+	const maxConv = 6
+	loop.MaxConversation = maxConv
+
+	rep, _ := loop.Run(context.Background(), "look around for a long time")
+	if rep.Reason != ReasonBudgetExceeded {
+		t.Fatalf("expected the long run to hit the step budget, got %q", rep.Reason)
+	}
+
+	reqs := srv.Requests()
+	if len(reqs) < 10 {
+		t.Fatalf("expected a long run (many requests) to exercise the bound, got %d", len(reqs))
+	}
+	maxSeen := 0
+	for i, raw := range reqs {
+		var body struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("request %d not JSON: %v", i, err)
+		}
+		if n := len(body.Messages); n > maxSeen {
+			maxSeen = n
+		}
+	}
+	// system prompt (1) + at most maxConv history messages.
+	if maxSeen > maxConv+1 {
+		t.Errorf("per-request message count = %d, want ≤ %d (transcript not bounded)", maxSeen, maxConv+1)
+	}
+	// Sanity: without bounding, a 12-step run would send ~23 history messages on
+	// the last turn — so the bound is doing real work.
+	if maxSeen >= 20 {
+		t.Errorf("transcript appears unbounded: max per-request messages = %d", maxSeen)
+	}
+}
+
+func TestLoopCtxCancelInterrupts(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the loop starts
+
+	rep, _ := loop.Run(ctx, "x")
+	if rep.Reason != ReasonInterrupted {
+		t.Errorf("reason = %q, want interrupted", rep.Reason)
+	}
+}

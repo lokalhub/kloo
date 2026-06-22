@@ -1,0 +1,101 @@
+# goreleaser config for kloo — cross-platform single static binary (CGO_ENABLED=0).
+# Schema: goreleaser v2 (validated with goreleaser v2.16.0). See task 06-05.
+#
+# v1 scope: this produces mac/linux/windows binaries + Homebrew/Scoop manifests.
+# The brew tap / scoop bucket repos below are PLACEHOLDERS — kloo is not yet
+# published to a real tap/bucket (private CLI; see lokal-cli-distribution). They are
+# schema-valid so `goreleaser check` passes and `--snapshot` builds locally; wiring
+# them to real repos + a release pipeline is post-v1.
+version: 2
+
+project_name: kloo
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kloo
+    main: .
+    binary: kloo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # no windows/arm64 build for v1 (not a target desktop arch we ship)
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/lokal/kloo/internal/cli.version={{.Version}}
+      - -X github.com/lokal/kloo/internal/cli.commit={{.Commit}}
+      - -X github.com/lokal/kloo/internal/cli.date={{.Date}}
+
+archives:
+  - id: kloo
+    ids:
+      - kloo
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE*
+
+# v1 is snapshot/build-only — no GitHub release is published (and the workspace has no
+# git remote). Disabling release keeps `goreleaser check` + `--snapshot` self-contained.
+release:
+  disable: true
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew tap manifest, as a cask (v2 replaced `brews` with `homebrew_casks`).
+# Design-level for v1; PLACEHOLDER tap — not yet published.
+homebrew_casks:
+  - name: kloo
+    ids:
+      - kloo
+    repository:
+      owner: lokal
+      name: homebrew-tap # PLACEHOLDER — tap repo not yet created/published
+    homepage: "https://github.com/lokal/kloo"
+    description: "Autonomous coding CLI for small local LLMs"
+    skip_upload: true # v1: do not push to a tap; snapshot/build only
+
+# Scoop bucket manifest (design-level for v1; PLACEHOLDER bucket — not yet published).
+scoops:
+  - name: kloo
+    ids:
+      - kloo
+    repository:
+      owner: lokal
+      name: scoop-bucket # PLACEHOLDER — bucket repo not yet created/published
+    homepage: "https://github.com/lokal/kloo"
+    description: "Autonomous coding CLI for small local LLMs"
+    license: "MIT"
+    skip_upload: true # v1: do not push to a bucket; snapshot/build only
