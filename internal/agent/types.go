@@ -129,6 +129,13 @@ type Budget interface {
 type Turn struct {
 	VerifyOutput string // empty when verify passed (progress)
 	Edit         string // empty when the turn made no edit
+	// Acted is true when the turn took a side-effecting action that is NOT an
+	// edit_file/write_file — i.e. a run_command (rm, mv, sed -i, mkdir…). Like an
+	// edit, it lifts the agent off the "still exploring baseline" footing, so a
+	// repeated-identical verify failure that follows can count as no-progress
+	// churn. Without this, work done through the shell is invisible to the churn
+	// rail and a stuck run loops to the budget ceiling. See [[kloo-churn-flail-gap]].
+	Acted bool
 }
 
 // ChurnDetector halts a no-progress loop. (Seam implemented in churn.go.)

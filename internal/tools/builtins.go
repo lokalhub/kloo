@@ -101,7 +101,7 @@ func (t editFileTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
 			"path": {Type: "string", Description: "Workspace-relative path to edit."},
-			"diff": {Type: "string", Description: "One fenced SEARCH/REPLACE block: ```\\n<<<<<<< SEARCH\\n…\\n=======\\n…\\n>>>>>>> REPLACE\\n```"},
+			"diff": {Type: "string", Description: "A SEARCH/REPLACE block (the ``` fence is optional):\\n<<<<<<< SEARCH\\n<exact lines to find>\\n=======\\n<replacement lines>\\n>>>>>>> REPLACE"},
 		},
 		Required: []string{"path", "diff"},
 	}
@@ -128,5 +128,6 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r.Register(writeFileTool{ws})
 	r.Register(listDirTool{ws})
 	r.Register(NewRunCommandTool(ws, opts...))
+	r.Register(finishTool{}) // explicit terminator; the loop intercepts it
 	return r
 }

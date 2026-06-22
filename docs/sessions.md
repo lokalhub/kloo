@@ -28,23 +28,24 @@ task), `model`, `verify`, run count, and timestamps.
 
 ## Launch behavior
 
-Running plain `kloo` in a workspace:
+Running plain `kloo` in a workspace **always starts a fresh session** — saved
+sessions are never auto-resumed (a bare `kloo` reloading a stale, possibly
+polluted transcript was surprising, and it re-primed the model). On exit, kloo
+prints the new session's id so you can pick the conversation back up:
 
-| Saved sessions | What happens |
-|---|---|
-| none | starts a fresh session |
-| exactly one | **auto-resumes** it (banner: *resumed session · ‹title› · N run(s) · last active …*) |
-| several | **prompts** you to pick one or start new |
+```
+session 20260622-173701 saved · resume it with:  kloo --resume 20260622-173701
+```
 
-Flags override the policy:
+Flags:
 
 | Flag | Effect |
 |---|---|
-| `--new` | always start a fresh session |
-| `--resume <id>` | resume a specific session (ids are the filenames under `.kloo/sessions/`) |
+| `--resume <id>` | resume a specific session (ids are the filenames under `.kloo/sessions/`, and the id printed on exit) |
+| `--new` | start a fresh session — the default, kept for explicitness |
 
 A new session isn't written until its first run completes, so launching and
-quitting without doing anything leaves no clutter.
+quitting without doing anything leaves no clutter (and prints no resume hint).
 
 ## What resuming gives the model
 

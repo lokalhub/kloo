@@ -100,9 +100,17 @@ func EditFile(ws Workspace, relPath, blockText string) error {
 	if err != nil {
 		return err
 	}
-	blocks, err := edit.Parse(blockText)
+	// ParseFlexible accepts both fenced and BARE (unfenced) blocks — small models
+	// often drop the ``` fence, and strict Parse would then find nothing.
+	blocks, err := edit.ParseFlexible(blockText)
 	if err != nil {
 		return fmt.Errorf("tools: edit_file %s: %w", relPath, err)
+	}
+	// Never silently succeed on a no-op: if no block parsed, the model's diff was
+	// not a SEARCH/REPLACE block. Returning success here let the model believe it
+	// edited while the file was untouched — the run then loops re-"editing" forever.
+	if len(blocks) == 0 {
+		return fmt.Errorf("tools: edit_file %s: no SEARCH/REPLACE block found in diff — wrap the change as <<<<<<< SEARCH / ======= / >>>>>>> REPLACE: %w", relPath, edit.ErrMalformedBlock)
 	}
 	// Single-file tool: retarget every parsed block to the resolved path.
 	for i := range blocks {

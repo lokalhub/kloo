@@ -120,6 +120,7 @@ func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDet
 	var calls []tools.Call
 	reg := tools.NewRegistry()
 	reg.Register(recordTool{name: "read_file", calls: &calls})
+	reg.Register(recordTool{name: "edit_file", calls: &calls}) // an edit ⇒ a verify-pass counts as success
 	return &Loop{
 		Client:   llm.New(srv.URL+"/v1", "test-model"),
 		Adapter:  tools.NativeFCAdapter{},
@@ -151,7 +152,9 @@ func proseResp(t *testing.T, text string) string {
 // ─── tests ──────────────────────────────────────────────────────────────────
 
 func TestLoopTransitionsInOrder(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 10, tcSpec{"read_file", map[string]any{"path": "a.go"}})})
+	// An edit_file so the passing verify counts as success (verify-pass is success
+	// only after a real change this run).
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 10, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	var seq []State
@@ -262,7 +265,7 @@ func TestLoopSessionHistoryReachesModel(t *testing.T) {
 
 func TestLoopOneToolPerTurn(t *testing.T) {
 	body := toolResp(t, 5,
-		tcSpec{"read_file", map[string]any{"path": "first.go"}},
+		tcSpec{"edit_file", map[string]any{"path": "first.go"}}, // edit ⇒ verify-pass = success this turn
 		tcSpec{"read_file", map[string]any{"path": "second.go"}},
 	)
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: body})
@@ -281,7 +284,9 @@ func TestLoopOneToolPerTurn(t *testing.T) {
 }
 
 func TestLoopStopsOnVerifySuccess(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// edit_file each turn so the passing verify counts as success (verify-pass is
+	// success only after a real change this run).
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"edit_file", map[string]any{"path": "a"}})})
 	// First verify fails, second passes → loop runs two turns then stops success.
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult(), passResult()}}, &stubBudget{}, &stubChurn{})
 
