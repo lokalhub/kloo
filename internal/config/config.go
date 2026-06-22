@@ -280,14 +280,29 @@ func loadEffortOverride(profilePath, effort string) (*effortOverride, error) {
 	return nil, nil
 }
 
-// defaultProfilePath is ~/.config/kloo/profiles.json, honouring XDG_CONFIG_HOME.
+// defaultProfilePath resolves profiles.json from kloo's global home. As of the
+// session feature that home is ~/.kloo (matching the {workspace}/.kloo scheme);
+// the older XDG / ~/.config/kloo path is kept as a fallback for back-compat so
+// existing installs keep working.
 func defaultProfilePath() (string, error) {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "kloo", "profiles.json"), nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "kloo", "profiles.json"), nil
+	// Preferred: ~/.kloo/profiles.json — use it when present.
+	preferred := filepath.Join(home, ".kloo", "profiles.json")
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred, nil
+	}
+	// Fallback: XDG, else legacy ~/.config/kloo (used only when it actually exists).
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "kloo", "profiles.json"), nil
+	}
+	legacy := filepath.Join(home, ".config", "kloo", "profiles.json")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, nil
+	}
+	// Neither exists: default to the preferred path (a missing profile is not an
+	// error upstream — Resolve treats absent profiles as "use defaults").
+	return preferred, nil
 }
