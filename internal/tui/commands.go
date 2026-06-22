@@ -101,10 +101,12 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	if m.running {
 		return m.appendItem(infoItem{text: "a run is already active — press Esc to interrupt it first"}), nil
 	}
-	m = m.appendItem(userItem{text: line})
+	m = m.appendItem(userItem{text: line}) // transcript shows the line as typed (paste placeholders kept short)
 	if m.runner == nil {
 		return m, nil
 	}
+	task := m.expandPastes(line) // the model receives the full pasted text
+	m.pastes = nil               // consumed by this submission
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.running = true
@@ -117,7 +119,7 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	runner := m.runner
 	return m, tea.Batch(
 		func() tea.Msg {
-			go runner.Start(ctx, line, model, mode, files)
+			go runner.Start(ctx, task, model, mode, files)
 			return nil
 		},
 		tickCmd(),

@@ -109,6 +109,14 @@ through history. Auto-scroll is **sticky-bottom** — new output follows the tai
 only while you're already at the bottom; scroll up to read earlier turns and kloo
 won't yank you back down.
 
+### Copying text
+**`Ctrl-Y`** copies the **last assistant reply** to the system clipboard via OSC 52
+(no external tool, works over SSH; needs a terminal that honours OSC 52 — kitty,
+iTerm2, WezTerm, Alacritty, recent VTE, tmux with `set-clipboard on`). For arbitrary
+selections, or where OSC 52 isn't supported, hold **`Shift`** while click-dragging:
+that bypasses kloo's mouse capture (which the wheel-scroll needs) and uses the
+terminal's native selection + copy.
+
 ### Assistant prose (light markdown)
 Assistant text is run through a hand-rolled *light* markdown styler (not
 glamour/CommonMark): `#`/`##`/`###` headers, `-`/`*` bullets, inline `**bold**`,
