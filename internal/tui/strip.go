@@ -27,20 +27,19 @@ func stripToolCallSyntax(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// toolMarkers are the opening signatures of an inline tool call across the formats
-// local models emit. Used to truncate a STILL-STREAMING partial call that
-// stripToolCallSyntax can't match yet (it has no closing brace/tag).
-var toolMarkers = []string{`{"name"`, `{ "name"`, `{"tool"`, `{ "tool"`, "<tool_call", "<function", "<|tool_call"}
+// reToolOpener matches the opening signature of an inline tool call across the
+// formats local models emit. It tolerates whitespace/newlines after `{` because
+// models often pretty-print the call (e.g. `…interested in.{⏎  "tool": "read"…}`),
+// which an exact-string marker would miss. Used to truncate a STILL-STREAMING
+// partial call that stripToolCallSyntax can't match yet (no closing brace/tag).
+var reToolOpener = regexp.MustCompile(`\{\s*"(name|tool)"|<tool_call|<function|<\|tool_call`)
 
 // firstToolMarker returns the index of the earliest tool-call opener in s, or -1.
 func firstToolMarker(s string) int {
-	best := -1
-	for _, m := range toolMarkers {
-		if i := strings.Index(s, m); i >= 0 && (best < 0 || i < best) {
-			best = i
-		}
+	if loc := reToolOpener.FindStringIndex(s); loc != nil {
+		return loc[0]
 	}
-	return best
+	return -1
 }
 
 // cleanAssistantText prepares streamed assistant content for display: complete

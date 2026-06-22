@@ -24,6 +24,8 @@ func TestCleanAssistantText(t *testing.T) {
 		{"partial-streaming-json", `I'll edit it. {"name": "edit_file", "arguments": {"diff": "incomplete`, "I'll edit it."},
 		{"complete-stripped", `Done {"name":"run_command","arguments":{"command":"ls"}}`, "Done"},
 		{"tool-args-variant", `I listed the dir. {"tool":"read","args":{"path":"README.md"}}`, "I listed the dir."},
+		// glued to the sentence end + pretty-printed (the real snappy case): "…in.{\n  \"tool\"…"
+		{"glued-multiline", "…interested in.{\n  \"tool\": \"read\",\n  \"args\": {\n    \"path\": \"README.md\"\n  }\n}", "…interested in."},
 		{"partial-xml", `Next: <function=run><parameter=command>go`, "Next:"},
 		{"plain-prose", "just prose", "just prose"},
 	}
