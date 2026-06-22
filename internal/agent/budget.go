@@ -37,6 +37,15 @@ func NewBudget(cfg config.Config, now func() time.Time) *runBudget {
 	}
 }
 
+// Reset clears the per-run counters and re-bases the wall-clock to now, keeping
+// the configured ceilings. Called at the start of each Run so a reused Loop does
+// not carry the previous run's step/token/elapsed totals into the next task.
+func (b *runBudget) Reset() {
+	b.steps = 0
+	b.tokens = 0
+	b.start = b.now()
+}
+
 // Observe records the current step number (the loop calls it each turn).
 func (b *runBudget) Observe(step int) { b.steps = step }
 

@@ -32,6 +32,31 @@ func TestBudgetStepsTrip(t *testing.T) {
 	}
 }
 
+// TestBudgetResetClearsCounters guards the cross-run leak: a reused budget (the
+// TUI runs many tasks against one Loop) must start each run fresh — counters zero
+// and the wall-clock re-based — while keeping the configured ceilings. Without
+// this, a second run inherited the first run's token/step totals.
+func TestBudgetResetClearsCounters(t *testing.T) {
+	clk := newClock()
+	b := NewBudget(config.Config{MaxSteps: 10, MaxTokens: 100, MaxWallClockSeconds: 60}, clk.now)
+	b.Observe(5)
+	b.AddTokens(80)
+	clk.advance(30 * time.Second)
+
+	b.Reset()
+	st := b.Stats()
+	if st.Steps != 0 || st.Tokens != 0 || st.Elapsed != 0 {
+		t.Errorf("Reset left counters dirty: steps=%d tokens=%d elapsed=%s", st.Steps, st.Tokens, st.Elapsed)
+	}
+	// Ceilings are configuration — they survive Reset.
+	if st.MaxSteps != 10 || st.MaxTokens != 100 {
+		t.Errorf("Reset clobbered ceilings: maxSteps=%d maxTokens=%d", st.MaxSteps, st.MaxTokens)
+	}
+	if tripped, _ := b.Check(); tripped {
+		t.Error("a freshly-reset budget should not be tripped")
+	}
+}
+
 func TestBudgetTokensTrip(t *testing.T) {
 	b := NewBudget(config.Config{MaxTokens: 100}, time.Now)
 	b.AddTokens(60)
