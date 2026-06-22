@@ -20,18 +20,32 @@ server's default), with the placeholder model `local`.
    [llama.cpp's server](https://github.com/ggml-org/llama.cpp) (the one we test
    with), Ollama, vLLM, or LM Studio. For native tool-calling on llama.cpp, launch
    with `--jinja`. A good local choice is a Qwen2.5-Coder / Qwen3-Coder model.
-2. Point kloo at it. A single-model llama.cpp server ignores the model name, so the
-   `local` default just works; for Ollama/vLLM, pass the served name:
+2. Point kloo at it — **and mind the model name** (see the box below):
    ```sh
-   kloo "say hi"                          # llama.cpp single-model — uses what's loaded
-   kloo --model qwen2.5-coder "say hi"    # Ollama/vLLM — name the served model
+   kloo "say hi"                          # single-model llama.cpp — uses what's loaded
+   kloo --model snappy "say hi"           # multi-model server (llama-swap/Ollama/vLLM) — name it
    ```
 3. Run a task in the TUI:
    ```sh
-   kloo --verify 'npm run build && bash benchmark/assert.sh src'
+   kloo --model <served-name> --verify 'npm run build && bash benchmark/assert.sh src'
    ```
 
 No API key is needed — a local server has no auth.
+
+> **Single-model vs multi-model servers — `--model` matters.**
+> The default `--model local` is a placeholder that works **only with a single-model
+> server** (a plain `llama-server -m model.gguf`), which *ignores* the model field and
+> serves whatever's loaded.
+>
+> **Multi-model servers route by the model name** and will reject an unknown one:
+> - **llama-swap** (serves `snappy`/`smart`, swaps on demand) → `local` returns
+>   `{"error":"no router for requested model"}`.
+> - **Ollama** → must match a pulled tag (e.g. `qwen2.5-coder:32b`).
+> - **vLLM / LM Studio** → must match the loaded model id.
+>
+> So on a multi-model endpoint, **always pass `--model <served-name>`** (or set
+> `KLOO_MODEL=<name>` / `/model <name>` in the TUI). Symptom if you forget: a 1-step
+> run that errors immediately with a routing / unknown-model error.
 
 ## Option B — hosted provider (OpenRouter, OpenAI, …)
 
