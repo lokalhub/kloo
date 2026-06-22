@@ -11,7 +11,9 @@ func TestExtractJSONToolCallsVariants(t *testing.T) {
 		name, content, wantTool, wantPath string
 	}{
 		{"openai-shape", `prose {"name":"read_file","arguments":{"path":"a.go"}}`, "read_file", "a.go"},
-		{"tool-args-variant", `Sure! {"tool":"read","args":{"path":"README.md"}}`, "read", "README.md"},
+		{"tool-args-nested", `Sure! {"tool":"read","args":{"path":"README.md"}}`, "read", "README.md"},
+		{"tool-flat-siblings", "…anything else.{\n  \"tool\": \"read\",\n  \"path\": \"README.md\"\n}", "read", "README.md"},
+		{"args-as-json-string", `{"name":"read","arguments":"{\"path\":\"x.md\"}"}`, "read", "x.md"},
 	}
 	for _, c := range cases {
 		calls := extractJSONToolCalls(c.content)
