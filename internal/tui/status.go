@@ -11,13 +11,14 @@ import (
 // statusData is the header status-line state: model, step N/max, tokens used/
 // budget, and the current permission mode. Updated from loop progress snapshots.
 type statusData struct {
-	effort    string
-	model     string
-	step      int
-	maxSteps  int
-	tokens    int
-	maxTokens int
-	mode      Mode
+	effort      string
+	model       string
+	step        int
+	maxSteps    int
+	tokens      int
+	maxTokens   int
+	compactions int // working-memory compactions this run (⟲ marker; 0 ⇒ hidden)
+	mode        Mode
 }
 
 // progressMsg is a loop-progress snapshot pumped into the program each step.
@@ -27,6 +28,20 @@ type progressMsg struct {
 	MaxSteps  int
 	Tokens    int
 	MaxTokens int
+}
+
+// memoryMsg carries the working-memory compaction count for the status line. It
+// rides the existing progress plumbing (loop_bridge) — nil-safe: when memory is
+// off no memoryMsg is sent, so the indicator stays hidden and the header renders
+// exactly as before.
+type memoryMsg struct {
+	Compactions int
+}
+
+// handleMemory updates the compaction indicator from a memoryMsg.
+func (m Model) handleMemory(msg memoryMsg) (tea.Model, tea.Cmd) {
+	m.status.compactions = msg.Compactions
+	return m, nil
 }
 
 // handleProgress stores the latest snapshot and refreshes the header.
@@ -66,9 +81,15 @@ func (m Model) renderHeader() string {
 		lead += " · " + s.effort
 	}
 
-	// Trailing cluster: step (dim/secondary) · live token total · mode.
+	// Trailing cluster: step (dim/secondary) · live token total · [⟲ compactions] · mode.
 	step := muted.Render(fmt.Sprintf("step %d/%d", s.step, s.maxSteps))
-	right := fmt.Sprintf("%s · %s/%s tok · %s", step, human(s.tokens), human(s.maxTokens), s.mode)
+	right := fmt.Sprintf("%s · %s/%s tok", step, human(s.tokens), human(s.maxTokens))
+	if s.compactions > 0 {
+		// Working memory folded the transcript this run — surfaced only when it
+		// actually happened, so a no-compaction run renders identically to before.
+		right += fmt.Sprintf(" · ⟲%d", s.compactions)
+	}
+	right += fmt.Sprintf(" · %s", s.mode)
 
 	inner := m.width - 2 - 2 // border + padding
 	gap := inner - lipgloss.Width(lead) - lipgloss.Width(right)

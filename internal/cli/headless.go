@@ -49,6 +49,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
+		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System: "You are kloo, an autonomous coding assistant. Each turn, make exactly one " +
 			"tool call to read, edit, or run a command, working toward the user's task until " +
 			"the verify command passes. Use SEARCH/REPLACE edits; never rewrite whole files.",
@@ -134,6 +135,11 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 	if rep.FinalVerify.Command != "" {
 		fmt.Fprintf(out, "  verify:  %q → exit %d (passed=%t)\n",
 			rep.FinalVerify.Command, rep.FinalVerify.ExitCode, rep.FinalVerify.Passed)
+	}
+	if rep.Compactions > 0 {
+		// Printed only when memory actually compacted, so a short run's report is
+		// byte-identical to pre-P00 (mirrors the optional budget/churn lines).
+		fmt.Fprintf(out, "  compactions: %d\n", rep.Compactions)
 	}
 	if rep.Budget != nil {
 		fmt.Fprintf(out, "  budget:  %s (%s/%s)\n", rep.Budget.Kind, rep.Budget.Observed, rep.Budget.Limit)

@@ -56,6 +56,11 @@ func (r *LoopRunner) Start(ctx context.Context, task string, mode Mode, contextF
 
 	r.loop.OnProgress = func(step, maxSteps, tokens, maxTokens int) {
 		r.send(progressMsg{Model: r.model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
+		// Forward the working-memory compaction count over the same plumbing
+		// (nil-safe: no message when memory is off, so the indicator stays hidden).
+		if r.loop.Memory != nil {
+			r.send(memoryMsg{Compactions: r.loop.Memory.Stats().Compactions})
+		}
 	}
 	r.loop.OnDelta = func(content string) {
 		r.send(streamDeltaMsg{Content: content})

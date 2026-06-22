@@ -149,3 +149,32 @@ func TestIntegrationFakeRunnerDrivesViaProgram(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC}) // idle quit
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 }
+
+// C3: a scripted run that emits a memoryMsg (a compaction occurred) drives the
+// real program to its terminal report without panic — the indicator plumbing is
+// exercised end-to-end alongside the existing surfaces.
+func TestIntegrationMemoryIndicatorEndToEnd(t *testing.T) {
+	runner := &scriptRunner{steps: []tea.Msg{
+		progressMsg{Model: "test-model", Step: 1, MaxSteps: 40, Tokens: 500, MaxTokens: 8000},
+		memoryMsg{Compactions: 1},
+		streamDeltaMsg{Content: "working"},
+		streamDoneMsg{},
+		toolEventMsg{Name: "run_command", Command: "go test", ExitCode: 0},
+		progressMsg{Model: "test-model", Step: 2, MaxSteps: 40, Tokens: 900, MaxTokens: 8000},
+		memoryMsg{Compactions: 2},
+		reportMsg{Reason: "success", Steps: 2, VerifyCmd: "go test", VerifyExit: 0},
+	}}
+	tm := teatest.NewTestModel(t, New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: runner}),
+		teatest.WithInitialTermSize(tw, th))
+	runner.setSend(tm.GetProgram().Send)
+
+	tm.Type("do the thing")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return contains(string(b), "COMPLETE") || contains(string(b), "run stopped")
+	}, teatest.WithDuration(3*time.Second))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC}) // idle quit
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+}

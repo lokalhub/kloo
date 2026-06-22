@@ -73,13 +73,36 @@ overridable per tier via the `efforts` section of the profile file.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `maxContextTokens` | `8000` | Per-step context window the repo-map curator must stay under. Conservative for small local models. |
+| `maxContextTokens` | `8000` | Per-step context **window** (the hard ceiling for the whole assembled prompt). Also the working-memory compaction trigger — see below. Conservative for small local models. |
 | `maxTokens` | `200000` | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded. |
 | `maxWallClockSeconds` | `600` | Wall-clock ceiling per run. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
 
 `maxTokens`, `maxWallClockSeconds`, and `churnRounds` are seeded by the effort tier;
 `maxContextTokens` is a flat default. All are overridable per-model in the profile.
+
+### `maxContextTokens` and working memory
+
+As of the working-memory feature (P00), `maxContextTokens` governs **whole-prompt
+compaction**, not just the repo map. Each turn kloo assembles a pin-hot set (the
+task, the last verify result, the file under edit re-read fresh from disk, and the
+recent turns) plus a running summary, and keeps the **entire** prompt under
+`maxContextTokens`:
+
+- When the projected prompt crosses **~70%** of the window, kloo folds the cold
+  middle of the transcript into a deterministic running summary (keeping applied
+  diffs and verify outcomes verbatim; stubbing raw file dumps — files are re-read
+  from disk on demand). No model call is involved.
+- The window is a **hard ceiling**: the repo map is capped at a fraction of it
+  (so it can no longer consume the whole window), and content is shed in a fixed
+  order to stay under it. The goal (the task) is never dropped.
+- Set `maxContextTokens` to your model's real context size (e.g. match
+  llama.cpp's `--ctx-size`). A larger window means later/less compaction; a small
+  one means aggressive, early compaction — the manager manufactures a bigger
+  effective window for small local models.
+
+A headless run prints `compactions: N` in its report only when memory compacted
+(`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
 
 ## Profile file
 

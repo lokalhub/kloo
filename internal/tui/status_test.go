@@ -42,3 +42,35 @@ func TestStatusNarrowElidesGracefully(t *testing.T) {
 		t.Errorf("narrow header overflows: %q", header)
 	}
 }
+
+// C2: the status line gains a working-memory compaction indicator that
+// increments on a memoryMsg; with no compaction it renders exactly as today
+// (the unchanged status-running.golden above is the regression for the 0 case).
+func TestStatusCompactionIndicator(t *testing.T) {
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m = apply(m, progressMsg{Model: "test-model", Step: 3, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000})
+
+	// No compaction yet ⇒ no ⟲ marker (the live token total is still shown).
+	if contains(m.View(), "⟲") {
+		t.Errorf("no compaction should render no ⟲ marker:\n%s", m.View())
+	}
+	if !contains(m.View(), "1.2k/8k") {
+		t.Errorf("the live token total must remain:\n%s", m.View())
+	}
+
+	// A compaction memoryMsg surfaces ⟲N and subsequent ones update it.
+	m = apply(m, memoryMsg{Compactions: 2})
+	if !contains(m.View(), "⟲2") {
+		t.Errorf("compaction indicator should show ⟲2:\n%s", m.View())
+	}
+	if !contains(m.View(), "1.2k/8k") {
+		t.Errorf("the token total must stay alongside the indicator:\n%s", m.View())
+	}
+	// Product-lens evidence: the delivered after-compaction status line (matches
+	// the ASCII mock in the plan §6, bottom).
+	requireGolden(t, "status-compaction.golden", m.View())
+	m = apply(m, memoryMsg{Compactions: 5})
+	if !contains(m.View(), "⟲5") {
+		t.Errorf("indicator should advance to ⟲5:\n%s", m.View())
+	}
+}

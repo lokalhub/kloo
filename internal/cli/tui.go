@@ -39,6 +39,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string) error {
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
+		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System: "You are kloo, an autonomous coding assistant. Each turn, make exactly one " +
 			"tool call to read, edit, or run a command, working toward the user's task until " +
 			"the verify command passes. Use SEARCH/REPLACE edits; never rewrite whole files.",

@@ -147,6 +147,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleToolEvent(msg)
 	case progressMsg:
 		return m.handleProgress(msg)
+	case memoryMsg:
+		return m.handleMemory(msg)
 	case tickMsg:
 		return m.handleTick(msg)
 	case reportMsg:
