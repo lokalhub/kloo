@@ -7,6 +7,10 @@ BIN       := bin/kloo
 
 .PHONY: build binary run test vet fmt fmtcheck lint tidy check clean bench-assert
 
+# Plain `make` builds the runnable binary (./bin/kloo) — the intuitive default.
+# `make build` remains the no-artifact compile gate; `make check` the full gate.
+.DEFAULT_GOAL := binary
+
 # Compile every package (no artifact). The zero-lag build gate.
 build:
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build ./...

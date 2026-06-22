@@ -114,7 +114,8 @@ card/diff/output/markdown surfaces.
 ## Development
 
 ```sh
-make check    # build + vet + gofmt check + test (mirrors CI)
+make          # build the binary → ./bin/kloo  (default target)
+make check    # compile + vet + gofmt + test (mirrors CI; produces no binary)
 make test
 make run ARGS='"say hi"'
 ```
