@@ -47,12 +47,24 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		}
 		calls = append(calls, Call{Name: tc.Function.Name, Args: args})
 	}
-	// Fallback for models without native function-calling in their template
-	// (e.g. Qwen2.5-Coder): they emit the call as JSON in the text content. Only
-	// consult the text when no native tool_calls were present, so well-behaved
-	// models are unaffected.
+	// Fallback for models without native function-calling in their template: they
+	// emit the call as text — either JSON (e.g. Qwen2.5-Coder) or the
+	// <function=…>/<parameter=…> dialect (e.g. Qwen3-Coder / Hermes via llama.cpp).
+	// Only consult the text when no native tool_calls were present, so well-behaved
+	// models are unaffected; try JSON first, then the function dialect.
 	if len(calls) == 0 && msg.Content != "" {
 		calls = append(calls, extractJSONToolCalls(msg.Content)...)
+		if len(calls) == 0 {
+			calls = append(calls, extractFunctionCalls(msg.Content)...)
+		}
+	}
+	// Strip any leaked tool-call markup from string args. The <function=…> dialect
+	// frequently batches calls or forgets to close a <parameter=…>, so the server's
+	// tool parser folds the NEXT call's markup into THIS call's content — which then
+	// corrupts the edit and leaks into the rendered card. Sanitise every call's
+	// args (structured and text-recovered alike) so one call can't pollute another.
+	for i := range calls {
+		calls[i].Args = sanitizeArgs(calls[i].Args)
 	}
 	return calls, nil
 }
