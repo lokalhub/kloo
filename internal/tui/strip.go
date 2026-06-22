@@ -30,7 +30,7 @@ func stripToolCallSyntax(s string) string {
 // toolMarkers are the opening signatures of an inline tool call across the formats
 // local models emit. Used to truncate a STILL-STREAMING partial call that
 // stripToolCallSyntax can't match yet (it has no closing brace/tag).
-var toolMarkers = []string{`{"name"`, `{ "name"`, "<tool_call", "<function", "<|tool_call"}
+var toolMarkers = []string{`{"name"`, `{ "name"`, `{"tool"`, `{ "tool"`, "<tool_call", "<function", "<|tool_call"}
 
 // firstToolMarker returns the index of the earliest tool-call opener in s, or -1.
 func firstToolMarker(s string) int {
@@ -68,8 +68,10 @@ func stripJSONToolObjects(s string) string {
 		if s[i] == '{' {
 			if end := matchBraceFrom(s, i); end > i {
 				cand := s[i : end+1]
-				if strings.Contains(cand, `"name"`) &&
-					(strings.Contains(cand, `"arguments"`) || strings.Contains(cand, `"parameters"`)) {
+				nameArgs := strings.Contains(cand, `"name"`) &&
+					(strings.Contains(cand, `"arguments"`) || strings.Contains(cand, `"parameters"`))
+				toolArgs := strings.Contains(cand, `"tool"`) && strings.Contains(cand, `"args"`)
+				if nameArgs || toolArgs {
 					i = end + 1 // drop the whole tool-call object
 					continue
 				}

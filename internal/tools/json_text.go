@@ -20,12 +20,27 @@ func extractJSONToolCalls(content string) []Call {
 		if end < 0 {
 			break // unbalanced from here on
 		}
+		// Accept both the OpenAI shape {"name","arguments"} and the common variant
+		// {"tool","args"} that some local models emit (e.g. snappy on a conversational
+		// turn). Without the variant the call parses as "no tool call" → re-prompt → error.
 		var raw struct {
 			Name      string          `json:"name"`
+			Tool      string          `json:"tool"`
 			Arguments json.RawMessage `json:"arguments"`
+			Args      json.RawMessage `json:"args"`
 		}
-		if err := json.Unmarshal(b[i:end+1], &raw); err == nil && raw.Name != "" {
-			out = append(out, Call{Name: raw.Name, Args: decodeArgs(raw.Arguments)})
+		if err := json.Unmarshal(b[i:end+1], &raw); err == nil {
+			name := raw.Name
+			if name == "" {
+				name = raw.Tool
+			}
+			argsRaw := raw.Arguments
+			if len(argsRaw) == 0 {
+				argsRaw = raw.Args
+			}
+			if name != "" {
+				out = append(out, Call{Name: name, Args: decodeArgs(argsRaw)})
+			}
 		}
 		i = end // skip past this object regardless (don't rescan its interior)
 	}

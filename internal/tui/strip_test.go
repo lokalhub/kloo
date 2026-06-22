@@ -8,6 +8,7 @@ func TestStripToolCallSyntax(t *testing.T) {
 		{"tool_call-wrapper", `<tool_call>{"name":"run_command","arguments":{"command":"ls"}}</tool_call>done`, "done"},
 		{"function-wrapper", `<function=run><parameter=command>go run main.go</parameter></function>`, ""},
 		{"params-key", `{"name":"x","parameters":{"a":1}}`, ""},
+		{"tool-args-variant", `Here you go: {"tool":"read","args":{"path":"README.md"}}`, "Here you go:"},
 		{"plain-prose", "just prose, no tools", "just prose, no tools"},
 		{"non-tool-json-kept", `keep {"foo": 1} non-tool json`, `keep {"foo": 1} non-tool json`},
 	}
@@ -22,6 +23,7 @@ func TestCleanAssistantText(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"partial-streaming-json", `I'll edit it. {"name": "edit_file", "arguments": {"diff": "incomplete`, "I'll edit it."},
 		{"complete-stripped", `Done {"name":"run_command","arguments":{"command":"ls"}}`, "Done"},
+		{"tool-args-variant", `I listed the dir. {"tool":"read","args":{"path":"README.md"}}`, "I listed the dir."},
 		{"partial-xml", `Next: <function=run><parameter=command>go`, "Next:"},
 		{"plain-prose", "just prose", "just prose"},
 	}

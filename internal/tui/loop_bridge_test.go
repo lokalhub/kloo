@@ -214,6 +214,7 @@ func TestHumanizeError(t *testing.T) {
 		{"timeout", "llm: context deadline exceeded", "timed out"},
 		{"tool-format", "llm: stream error chunk: output does not match the expected peg-native format", "tool call"},
 		{"auth", "llm: 401 unauthorized", "Authentication failed"},
+		{"no-tool-call", "agent: no usable tool call after re-prompt: no tool call in reply", "without a tool call"},
 		{"passthrough", "some weird unrecognized failure", "some weird unrecognized failure"},
 	}
 	for _, c := range cases {
