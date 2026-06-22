@@ -179,6 +179,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if ctx.Err() != nil {
 				return finish(ReasonInterrupted, nil, nil, nil)
 			}
+			if errors.Is(err, ErrNoToolCall) {
+				// Conversational reply (prose, no tool call): the answer is already
+				// streamed to the transcript — stop calmly rather than error/churn.
+				l.Budget.AddTokens(usage.TotalTokens)
+				return finish(ReasonAnswered, nil, nil, nil)
+			}
 			return finish(ReasonError, err, nil, nil)
 		}
 		l.Budget.AddTokens(usage.TotalTokens)
@@ -308,8 +314,16 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		msg2 := assistantMessage(resp2)
 		usage2 := estimateUsage(resp2.Usage, retryMsgs, msg2)
 		calls, perr = l.Adapter.ParseAll(msg2)
-		if perr != nil || len(calls) == 0 {
-			return tools.Call{}, nil, addUsage(usage, usage2), msg2, fmt.Errorf("agent: no usable tool call after re-prompt: %w", orNoCall(perr))
+		if perr != nil {
+			// A MALFORMED tool call after the nudge is a real error (the model tried to
+			// act but botched the format).
+			return tools.Call{}, nil, addUsage(usage, usage2), msg2, fmt.Errorf("agent: no usable tool call after re-prompt: %w", perr)
+		}
+		if len(calls) == 0 {
+			// NO tool call at all — the model answered in prose. That's a conversational
+			// reply, not a failure: surface it as a calm ReasonAnswered stop (the prose is
+			// already streamed) instead of erroring/churning. ErrNoToolCall signals this.
+			return tools.Call{}, nil, addUsage(usage, usage2), msg2, ErrNoToolCall
 		}
 		return calls[0], calls[1:], addUsage(usage, usage2), msg2, nil
 	}
@@ -464,6 +478,11 @@ func failingOutput(v VerifyResult) string {
 
 // errEditRejected marks an edit the approve-each dial rejected (skipped).
 var errEditRejected = errors.New("agent: edit rejected (approve-each)")
+
+// ErrNoToolCall signals that the model replied in prose with no tool call (after the
+// corrective re-prompt) — a conversational answer, not a failure. The loop turns it
+// into a calm ReasonAnswered stop instead of ReasonError.
+var ErrNoToolCall = errors.New("agent: model replied without a tool call (conversational)")
 
 // complete runs one model call, streaming (forwarding deltas to OnDelta) when a
 // delta hook is set, else non-streaming.

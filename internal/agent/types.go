@@ -55,6 +55,10 @@ const (
 	ReasonChurn          Reason = "churn"
 	ReasonError          Reason = "error"
 	ReasonInterrupted    Reason = "interrupted"
+	// ReasonAnswered: the model replied in prose with no tool call (a conversational
+	// answer) rather than acting — a calm stop, not an error. The reply is already
+	// shown; the loop just stops instead of churning/erroring on "no tool call".
+	ReasonAnswered Reason = "answered"
 )
 
 // BudgetKind names which budget tripped.

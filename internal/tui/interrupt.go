@@ -122,7 +122,9 @@ func (ri reportItem) render(width int) string {
 
 	border := lipgloss.NormalBorder()
 	style := cardStyle(width, border)
-	if r.Reason != "success" {
+	// success and answered are calm outcomes (no attention tint); the rest get the
+	// warning border. "answered" = the model replied conversationally, not a failure.
+	if r.Reason != "success" && r.Reason != "answered" {
 		style = style.BorderForeground(warningColor) // attention tint (theme.go)
 	}
 	return style.Render(strings.TrimRight(b.String(), "\n"))
@@ -138,6 +140,8 @@ func bannerTitle(reason string) string {
 		return "ERROR"
 	case "success":
 		return "COMPLETE"
+	case "answered":
+		return "ANSWERED"
 	default:
 		return strings.ToUpper(reason)
 	}
