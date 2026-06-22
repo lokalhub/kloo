@@ -98,8 +98,8 @@ verify command) and the local/hosted recipes.
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | `go test ./...` | Verify command the loop runs each step (the real success signal). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
-| `--new` | `false` | Start a fresh session instead of resuming this workspace's saved one. |
-| `--resume` | _(unset)_ | Resume a specific saved session by id (`{workspace}/.kloo/sessions`). |
+| `--new` | `false` | Start a fresh session (the default; saved sessions are no longer auto-resumed). |
+| `--resume` | _(unset)_ | Resume a specific saved session by id (printed on exit; see `{workspace}/.kloo/sessions`). |
 | `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.kloo/profiles.json`, falls back to `~/.config/kloo/`). |
 
 Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
