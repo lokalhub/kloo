@@ -6,7 +6,7 @@ What you need to run kloo, and the two ways to point it at a model.
 
 | Requirement | Why | Notes |
 |---|---|---|
-| The `kloo` binary | — | `make binary` (needs Go, `CGO_ENABLED=0`) or a release binary. Single static binary, no runtime deps. |
+| The `kloo` binary | — | Build from source with [Go 1.22+](https://go.dev/dl/) (`make binary` / `go install github.com/lokalhub/kloo@latest`; ensure `go` is on your `PATH`), **or** download a prebuilt [release binary](https://github.com/lokalhub/kloo/releases) (no Go needed). Single static binary, `CGO_ENABLED=0`, no runtime deps. |
 | An OpenAI-compatible endpoint | kloo is BYO-inference; it speaks `/v1/chat/completions` with SSE streaming. | Local (llama.cpp, Ollama, vLLM, LM Studio…) or hosted (OpenRouter, OpenAI…). See below. |
 | A git repo in the working dir | Checkpoint + rollback snapshot the tree with `git stash create` before edits and restore on abort. | **Strongly recommended.** Without a repo, checkpoint/rollback is disabled (`ErrNotGitRepo`) — the loop still runs, but a bad run can't be auto-reverted. |
 | A meaningful `--verify` command | It is the loop's only success signal. | See [The verify command is the spec](#the-verify-command-is-the-spec). |

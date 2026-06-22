@@ -32,8 +32,21 @@ model's self-report. See [docs/setup.md](docs/setup.md#the-verify-command-is-the
 
 ## Quick start
 
+**Requires [Go 1.22+](https://go.dev/dl/)** to build or `go install` from source —
+make sure it's on your `PATH` (`go version` should print a version). Don't have Go?
+Grab a prebuilt binary from [Releases](https://github.com/lokalhub/kloo/releases)
+instead — no Go needed.
+
+Install with Go:
+
 ```sh
-make binary          # build ./bin/kloo
+go install github.com/lokalhub/kloo@latest   # → $(go env GOPATH)/bin/kloo
+```
+
+Or build from a checkout:
+
+```sh
+make binary          # build ./bin/kloo  (needs Go 1.22+ on PATH)
 ./bin/kloo           # interactive TUI session
 ./bin/kloo "say hi"  # one-shot, streamed to stdout
 ```
