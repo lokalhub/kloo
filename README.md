@@ -30,6 +30,11 @@ flowchart TD
 The `--verify` command is the **only** success signal kloo trusts — not the
 model's self-report. See [docs/setup.md](docs/setup.md#the-verify-command-is-the-spec).
 
+To keep a small-context model (e.g. 8k) on-task while it auto-traverses the
+codebase, kloo rebuilds the prompt each turn — pinning the goal, the current file
+(re-read fresh), and the last verify result, while folding old exploration into a
+running summary. **[docs/memory.md](docs/memory.md)** has the diagrams.
+
 ## Quick start
 
 **Requires [Go 1.22+](https://go.dev/dl/)** to build or `go install` from source —
