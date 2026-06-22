@@ -49,6 +49,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string) error {
 
 	runner := tui.NewLoopRunner(loop, ws, cfg.MaxTokens)
 	return tui.Run(tui.Config{
+		Version:   Version(),
 		Effort:    cfg.Effort,
 		Model:     cfg.Model,
 		MaxSteps:  cfg.MaxSteps,

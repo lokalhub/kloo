@@ -15,3 +15,7 @@ var (
 func versionString() string {
 	return fmt.Sprintf("%s (%s, %s)", version, commit, date)
 }
+
+// Version returns the bare build version ("dev" for a plain go build, the
+// semver for a goreleaser build). Exported so the TUI can show it in the header.
+func Version() string { return version }

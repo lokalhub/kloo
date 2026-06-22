@@ -61,6 +61,19 @@ func (m Model) handleProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// displayVersion formats the build version for the header: "" or "dev" → "dev"
+// (a local build), a bare semver like "0.2.0" gets a "v" prefix ("v0.2.0"), and
+// anything already prefixed/odd is shown as-is.
+func displayVersion(v string) string {
+	if v == "" {
+		return "dev"
+	}
+	if len(v) > 0 && v[0] >= '0' && v[0] <= '9' {
+		return "v" + v
+	}
+	return v
+}
+
 // renderHeader renders the bordered status line, reframed (task 06) to LEAD with
 // `kloo • model • effort` + the live token total, demoting `step N/max` to a
 // dim/secondary field (header.html):
@@ -75,8 +88,8 @@ func (m Model) renderHeader() string {
 		s.model = m.modelName
 	}
 
-	// Lead cluster: kloo • model • effort.
-	lead := "kloo  " + s.model
+	// Lead cluster: kloo <version> • model • effort.
+	lead := "kloo " + displayVersion(m.version) + "  " + s.model
 	if s.effort != "" {
 		lead += " · " + s.effort
 	}

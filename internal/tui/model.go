@@ -69,6 +69,9 @@ type Model struct {
 	// approve-each confirm state (dial.go).
 	confirm *confirmState
 
+	// version is the build version shown in the header lead (set from Config).
+	version string
+
 	// model name + context files (slash commands).
 	modelName    string
 	contextFiles []string
@@ -91,6 +94,7 @@ type Model struct {
 
 // Config seeds the model's initial display state.
 type Config struct {
+	Version   string     // build version shown in the header ("dev" for a local build)
 	Effort    string     // effort tier for the status line (fast|medium|heavy)
 	Model     string     // model name for the status line
 	MaxSteps  int        // step budget (status line "step N/max")
@@ -115,6 +119,7 @@ func New(cfg Config) Model {
 		input:     in,
 		streamIdx: -1,
 		mode:      ModeAuto,
+		version:   cfg.Version,
 		modelName: modelName,
 		status: statusData{
 			effort:    cfg.Effort,

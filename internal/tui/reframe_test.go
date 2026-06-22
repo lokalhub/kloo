@@ -15,12 +15,12 @@ func headerLine(m Model) string {
 // `kloo • model • effort` + the live token total; step is present but demoted
 // (appears after the lead), and the header never leads with step.
 func TestHeaderReframeLeadsModelEffort(t *testing.T) {
-	m := sized(New(Config{Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m := sized(New(Config{Version: "0.2.0", Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, th)
 	m = apply(m, progressMsg{Model: "test-model", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
 	h := headerLine(m)
 
-	if !contains(h, "kloo  test-model · medium") {
-		t.Errorf("header should lead with kloo • model • effort:\n%s", h)
+	if !contains(h, "kloo v0.2.0  test-model · medium") {
+		t.Errorf("header should lead with kloo • version • model • effort:\n%s", h)
 	}
 	if !contains(h, "14.4k/200k tok") || contains(h, "0/200k tok") {
 		t.Errorf("header should show the live non-zero token total:\n%s", h)
