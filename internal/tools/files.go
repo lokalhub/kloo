@@ -21,6 +21,13 @@ const (
 // engine's 0644).
 const writeFilePerm = 0o644
 
+// maxReadFileBytes caps read_file: a file larger than this is refused (with a
+// helpful error) instead of read whole into memory, so the model can't OOM the
+// process by reading a multi-GB file (a binary, a model weight, a huge log). It is
+// generous for real source; for larger files the model should head/grep via
+// run_command.
+const maxReadFileBytes = 5 << 20 // 5 MiB
+
 // DirEntry is one entry returned by list_dir: its name and whether it is a
 // directory. No filtering is applied here (repo-map ignores are Phase 03).
 type DirEntry struct {
@@ -35,6 +42,9 @@ func ReadFile(ws Workspace, relPath string) (string, error) {
 	abs, err := ws.Resolve(relPath)
 	if err != nil {
 		return "", err
+	}
+	if info, err := os.Stat(abs); err == nil && info.Size() > maxReadFileBytes {
+		return "", fmt.Errorf("tools: read_file %s: file is %d bytes (cap %d) — too large to read whole; use run_command with head/sed/grep to inspect it", relPath, info.Size(), maxReadFileBytes)
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {

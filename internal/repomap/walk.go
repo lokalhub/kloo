@@ -24,6 +24,15 @@ var hardSkipDirs = map[string]bool{
 	"bin":          true,
 }
 
+// maxMappedFileBytes bounds the size of a file the repo map will consider. Source
+// files are small; anything larger (a checked-in binary, a model weight, a minified
+// bundle, a giant lockfile/dataset) has no useful symbols AND is read WHOLE into
+// memory by the extractor (ctags.go). A single multi-GB file under the walk root
+// (e.g. a .gguf) would otherwise balloon the process and get it OOM-killed. Such
+// files are simply skipped from the map; the model can still read_file/list_dir
+// them directly. 1 MiB is generous for real source.
+const maxMappedFileBytes = 1 << 20 // 1 MiB
+
 // Node is one entry of the walked tree: its workspace-relative path, whether it
 // is a directory, and its size in bytes (0 for dirs) so later tasks can budget
 // without re-statting.
@@ -101,6 +110,12 @@ func walkDir(root, dir string, ig *gitignore, out *[]Node) error {
 		info, err := e.Info()
 		if err != nil {
 			return err
+		}
+		// Skip files too large to map: they have no useful symbols and would be read
+		// whole into memory downstream (a multi-GB file OOMs the process). They stay
+		// reachable via the read_file/list_dir tools — just out of the repo map.
+		if info.Size() > maxMappedFileBytes {
+			continue
 		}
 		*out = append(*out, Node{Path: rel, IsDir: false, Size: info.Size()})
 	}
