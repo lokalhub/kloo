@@ -11,10 +11,11 @@ var ErrUnsupportedToolFormat = errors.New("tools: unsupported toolFormat")
 
 // Tool-format values accepted in a profile's toolFormat (naming.md config keys).
 const (
-	ToolFormatAuto    = "" // unset/auto → capability-driven
-	ToolFormatNative  = "native"
-	ToolFormatTrained = "trained"
-	ToolFormatXML     = "xml"
+	ToolFormatAuto      = ""     // unset/auto → capability-driven
+	ToolFormatAutoAlias = "auto" // explicit synonym for "" — never crashes a run
+	ToolFormatNative    = "native"
+	ToolFormatTrained   = "trained"
+	ToolFormatXML       = "xml"
 )
 
 // EndpointCaps describes what the configured endpoint advertises. For v1 these
@@ -32,8 +33,9 @@ type EndpointCaps struct {
 //
 //  1. Explicit toolFormat override wins: "native" | "trained" | "xml". A
 //     "xml" override forces the XML adapter even on a tool-capable endpoint.
-//  2. Auto (toolFormat unset) → native FC when the endpoint advertises tools,
-//     else the XML fallback.
+//  2. Auto (toolFormat unset "" or its explicit synonym "auto") → native FC when
+//     the endpoint advertises tools, else the XML fallback. "auto" is accepted so
+//     a reasonable-looking value never crashes a run.
 //  3. "yaml" or any unknown value → ErrUnsupportedToolFormat (YAML never
 //     selects an adapter).
 //
@@ -49,7 +51,7 @@ func SelectAdapter(toolFormat string, caps EndpointCaps) (ToolAdapter, error) {
 		return NativeFCAdapter{}, nil
 	case ToolFormatXML:
 		return XMLAdapter{}, nil
-	case ToolFormatAuto:
+	case ToolFormatAuto, ToolFormatAutoAlias: // "" and "auto" both auto-select
 		if caps.SupportsTools {
 			return NativeFCAdapter{}, nil
 		}
