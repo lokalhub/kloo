@@ -74,19 +74,26 @@ make binary          # build ./bin/kloo  (needs Go 1.25+ on PATH)
 
 kloo talks to an OpenAI-compatible endpoint (default
 `http://127.0.0.1:8080/v1`, model `local` — a placeholder a single-model llama.cpp
-server ignores). Point it at your own with
-`--endpoint` / `--model` or the `KLOO_*` env vars. For a **hosted** provider
-(OpenRouter, OpenAI, …) also set a bearer token:
+server ignores). Point it at your own with `--endpoint` / `--model` or the
+`KLOO_*` env vars. For a **hosted** provider (OpenRouter, OpenAI, …) also set a
+bearer token:
 
 ```sh
 export KLOO_API_KEY="$OPENROUTER_API_KEY"   # falls back to OPENAI_API_KEY
-kloo --effort heavy --endpoint https://openrouter.ai/api/v1 \
-     --model deepseek/deepseek-v4-flash \
-     --verify 'npm run build && bash benchmark/assert.sh src'
+kloo --endpoint https://openrouter.ai/api/v1 --model deepseek/deepseek-v4-flash
 ```
 
-See **[docs/setup.md](docs/setup.md)** for prerequisites (endpoint, git, the
-verify command) and the local/hosted recipes.
+Better, name your endpoints once in `profiles.json` under a **`providers`** block
+(endpoint + key + per-provider model aliases) and select one with `--provider` —
+so the same model served by several providers is just one alias each:
+
+```sh
+kloo --provider openrouter --model dsv4   # endpoint + key + real model id from the profile
+```
+
+(No `--verify` needed — kloo auto-detects the project's build/test; see below.) See
+**[docs/setup.md](docs/setup.md)** for prerequisites and the local/hosted recipes,
+and **[docs/configuration.md](docs/configuration.md)** for the `providers` schema.
 
 ## Usage
 
@@ -94,17 +101,18 @@ verify command) and the local/hosted recipes.
 |---|---|
 | `kloo` | Launch the interactive TUI session (autonomous loop under the UI). |
 | `kloo "<task>"` | One-shot: stream a single completion to stdout (scripting). |
-| `kloo --headless --verify '<cmd>' "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout. |
+| `kloo --headless "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout (verify auto-detected; `--verify` to override). |
 
 ### Common flags
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds step/token budgets + churn patience. |
-| `--model` | `local` | Model your endpoint serves (placeholder `local` for single-model llama.cpp). |
-| `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. |
+| `--model` | `local` | Model your endpoint serves (placeholder `local` for single-model llama.cpp). With `--provider`, a model alias from the profile. |
+| `--provider` | _(unset)_ | Named provider from the profile's `providers` block — sets endpoint + key and scopes the `--model` alias lookup. |
+| `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL (or supplied by `--provider`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
-| `--max-steps` | `40` | Max autonomous steps. |
+| `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
@@ -114,7 +122,7 @@ verify command) and the local/hosted recipes.
 | `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.kloo/profiles.json`, falls back to `~/.config/kloo/`). |
 
 Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
-Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and
+Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
 `OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `NO_COLOR` disables
 all TUI colour (see below).
