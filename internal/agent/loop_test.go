@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +150,73 @@ func proseResp(t *testing.T, text string) string {
 	}
 	b, _ := json.Marshal(resp)
 	return string(b)
+}
+
+// newRealEditLoop builds a loop wired to the mocked server and a REAL tool
+// registry (DefaultRegistry) jailed to a temp workspace seeded with fileName =
+// content, so edit_file actually runs the engine and the repair builder can
+// re-read the file. Returns the loop + the canonical workspace root.
+func newRealEditLoop(t *testing.T, srv *llmtest.Server, fileName, content string, v Verifier, b Budget, c ChurnDetector) (*Loop, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, fileName), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	canon, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := tools.NewWorkspace(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Loop{
+		Client:   llm.New(srv.URL+"/v1", "test-model"),
+		Adapter:  tools.NativeFCAdapter{},
+		Registry: tools.DefaultRegistry(ws),
+		Verifier: v,
+		Budget:   b,
+		Churn:    c,
+		Root:     canon,
+		System:   "you are kloo",
+	}, canon
+}
+
+// editFileCall renders a native edit_file tool call with a bare SEARCH/REPLACE
+// diff (search/replace bodies should carry their trailing newline).
+func editFileCall(t *testing.T, path, search, replace string, totalTokens int) string {
+	t.Helper()
+	diff := "<<<<<<< SEARCH\n" + search + "=======\n" + replace + ">>>>>>> REPLACE\n"
+	return toolResp(t, totalTokens, tcSpec{"edit_file", map[string]any{"path": path, "diff": diff}})
+}
+
+// transcriptContains reports whether any message in the transcript contains all
+// of the given substrings in a single message.
+func msgWithAll(msgs []llm.Message, subs ...string) bool {
+	for _, m := range msgs {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(m.Content, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// countMsgsContaining counts transcript messages containing sub.
+func countMsgsContaining(msgs []llm.Message, sub string) int {
+	n := 0
+	for _, m := range msgs {
+		if strings.Contains(m.Content, sub) {
+			n++
+		}
+	}
+	return n
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────
@@ -394,5 +463,117 @@ func TestLoopCtxCancelInterrupts(t *testing.T) {
 	rep, _ := loop.Run(ctx, "x")
 	if rep.Reason != ReasonInterrupted {
 		t.Errorf("reason = %q, want interrupted", rep.Reason)
+	}
+}
+
+// ─── repair-loop tests (task 03) ────────────────────────────────────────────
+
+// TestLoopRepairsNonMatchingEdit is the acceptance test: a 1st edit_file with a
+// non-matching SEARCH yields a repair observation (actual content + fix
+// instruction); the model's 2nd edit applies; the run reaches ReasonSuccess after
+// a green verify.
+func TestLoopRepairsNonMatchingEdit(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "WRONG\n", "right\n", 5)}, // turn 1: no-match
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 5)}, // turn 2: applies
+	)
+	loop, root := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
+		&stubVerifier{results: []VerifyResult{failResult(), passResult()}},
+		&stubBudget{}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "make answer.txt say right")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q, want success", rep.Reason)
+	}
+	if !msgWithAll(rep.Transcript, "Failing SEARCH block", "wrong", "Fix this edit") {
+		t.Errorf("transcript missing the repair observation (actual content + fix instruction)")
+	}
+	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
+		t.Errorf("answer.txt = %q, want %q", got, "right\n")
+	}
+}
+
+// TestLoopRepairIsBounded proves the per-target enrichment cap: a model that emits
+// a DISTINCT non-matching edit_file to the same path every turn gets at most
+// MaxRepairAttempts (2) enriched observations; later failing edits get the BARE
+// error; the run terminates via budget (not infinitely).
+func TestLoopRepairIsBounded(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "NOPE1\n", "x\n", 5)},
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "NOPE2\n", "x\n", 5)},
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "NOPE3\n", "x\n", 5)},
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "NOPE4\n", "x\n", 5)},
+	)
+	loop, _ := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
+		&stubVerifier{results: []VerifyResult{failResult()}},
+		&stubBudget{tripAt: 5, kind: BudgetSteps}, &stubChurn{})
+	loop.MaxRepairAttempts = 2
+
+	rep, err := loop.Run(context.Background(), "spin on distinct non-matching edits")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonBudgetExceeded {
+		t.Fatalf("reason = %q, want budget-exceeded (terminated, not infinite)", rep.Reason)
+	}
+	if n := countMsgsContaining(rep.Transcript, "Failing SEARCH block"); n != 2 {
+		t.Errorf("enriched observations = %d, want exactly 2 (the cap)", n)
+	}
+	// Past the cap the bare observation is used.
+	if countMsgsContaining(rep.Transcript, "tool edit_file error:") == 0 {
+		t.Errorf("expected bare 'tool edit_file error:' observations past the cap")
+	}
+}
+
+// TestLoopRepairRepeatedEditChurns proves the repair path does not suppress the
+// existing churn rail: when the model repeats the SAME non-matching edit, the real
+// churn detector still fires (it sees the repeated editSignature, not the repair
+// text), and at most MaxRepairAttempts enriched observations appeared.
+func TestLoopRepairRepeatedEditChurns(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: editFileCall(t, "answer.txt", "SAME\n", "x\n", 5)}) // same edit every turn
+	loop, _ := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
+		&stubVerifier{results: []VerifyResult{failResult()}},
+		&stubBudget{}, NewChurnDetector(2))
+	loop.MaxRepairAttempts = 2
+
+	rep, err := loop.Run(context.Background(), "repeat the same broken edit")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonChurn {
+		t.Fatalf("reason = %q, want churn (the repair path must not suppress churn)", rep.Reason)
+	}
+	if n := countMsgsContaining(rep.Transcript, "Failing SEARCH block"); n > 2 {
+		t.Errorf("enriched observations = %d, want <= MaxRepairAttempts (2)", n)
+	}
+}
+
+// TestLoopCleanEditNoRepairObservation (O5) proves clean-apply is byte-identical:
+// a matching first edit reaches ReasonSuccess with NO repair text in the
+// transcript and a single apply round-trip.
+func TestLoopCleanEditNoRepairObservation(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 5)}) // matches first try
+	loop, root := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
+		&stubVerifier{results: []VerifyResult{passResult()}},
+		&stubBudget{}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "fix it in one shot")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q, want success", rep.Reason)
+	}
+	if countMsgsContaining(rep.Transcript, "Failing SEARCH block") != 0 {
+		t.Errorf("clean apply must produce no repair observation in the transcript")
+	}
+	if rep.Steps != 1 {
+		t.Errorf("steps = %d, want 1 (single round-trip)", rep.Steps)
+	}
+	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
+		t.Errorf("answer.txt = %q, want %q", got, "right\n")
 	}
 }
