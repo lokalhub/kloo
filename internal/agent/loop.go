@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lokalhub/kloo/internal/edit"
 	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/repomap"
 	"github.com/lokalhub/kloo/internal/tools"
@@ -64,6 +65,16 @@ type Loop struct {
 	// ceiling, so the two never overlap. 0 ⇒ DefaultStallRounds.
 	StallRounds int
 
+	// MaxRepairAttempts bounds how many ENRICHED repair observations the loop emits
+	// per edit target before falling back to the bare error string. When an
+	// edit_file fails as a no-match/ambiguous match (a SEARCH the model can fix
+	// against the real file), the loop replaces the bare error with the file's
+	// actual contents + a "fix this edit" instruction (repair.go) — but only this
+	// many times per path, so a model that keeps failing terminates via the existing
+	// churn/budget/stall rails rather than being enriched forever. It governs
+	// ENRICHMENT only, never termination. 0 ⇒ DefaultMaxRepairAttempts.
+	MaxRepairAttempts int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -100,6 +111,12 @@ const DefaultMaxConversation = 30
 // enough to let the model read a few files before its first edit without tripping.
 const DefaultStallRounds = 3
 
+// DefaultMaxRepairAttempts is the per-target repair-enrichment cap when
+// MaxRepairAttempts is unset. Two enriched observations give the model the file's
+// real contents twice (once per close-but-wrong SEARCH); past that, the bare error
+// returns and the churn/budget rails terminate the run.
+const DefaultMaxRepairAttempts = 2
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
@@ -111,6 +128,24 @@ func (l *Loop) stallLimit() int {
 		return l.StallRounds
 	}
 	return DefaultStallRounds
+}
+
+// repairLimit is the effective per-target repair-enrichment cap (mirrors the
+// stallLimit 0-⇒-default seam).
+func (l *Loop) repairLimit() int {
+	if l.MaxRepairAttempts > 0 {
+		return l.MaxRepairAttempts
+	}
+	return DefaultMaxRepairAttempts
+}
+
+// isRepairableEditFailure reports whether an edit failure is fixable by the model
+// re-issuing a corrected SEARCH against the real file contents: a no-match
+// (ErrSearchNotFound) or an ambiguous match (ErrAmbiguousMatch). A malformed
+// block, path escape, or read error is NOT repairable-by-content — the bare error
+// already tells the model to fix the block shape — so it is excluded here.
+func isRepairableEditFailure(err error) bool {
+	return errors.Is(err, edit.ErrSearchNotFound) || errors.Is(err, edit.ErrAmbiguousMatch)
 }
 
 // maxConv returns the effective per-request transcript bound.
@@ -165,6 +200,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		ignoredAll  []string
 		step        int
 		edited      bool // has the agent applied an edit this run? gates ReasonSuccess
+
+		// repairAttempts counts the enriched repair observations emitted per edit
+		// target this run, so enrichment is bounded to repairLimit() per path. A fresh
+		// map per Run (like the other per-run vars) so the TUI's reused Loop starts
+		// each task clean.
+		repairAttempts = map[string]int{}
 
 		// Stall backstop state: a no-progress counter (resets on any progress) that
 		// catches a model spinning on read-only/no-op commands without calling finish.
@@ -296,7 +337,28 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if isEditTool(call.Name) && derr == nil {
 			edited = true // a real change landed this run
 		}
-		convo = append(convo, observation(call, result, derr))
+
+		// Repair enrichment: on a no-match/ambiguous edit_file failure under the
+		// per-target cap, replace the bare error with a repair observation carrying the
+		// file's ACTUAL contents + a "fix this edit" instruction (repair.go), so a weak
+		// model can correct its SEARCH instead of guessing blind. The repair text goes
+		// ONLY into convo (the model-facing transcript) — never into the churn feed
+		// below (which still sees editSignature+verifyOut) and never affecting `edited`
+		// (still set only on derr == nil), so no new false-churn/false-success source.
+		obs := observation(call, result, derr)
+		if call.Name == tools.NameEditFile {
+			path := str(call.Args["path"])
+			switch {
+			case derr == nil:
+				delete(repairAttempts, path) // a clean apply clears this target's repair budget
+			case isRepairableEditFailure(derr) && repairAttempts[path] < l.repairLimit():
+				if rep, okRep := buildRepairObservation(l.Root, path, str(call.Args["diff"])); okRep {
+					obs = rep
+					repairAttempts[path]++
+				}
+			}
+		}
+		convo = append(convo, obs)
 
 		// ── VERIFY ──────────────────────────────────────────────────────────
 		// Unverified mode (nil Verifier) skips this entirely: lastVerify stays the

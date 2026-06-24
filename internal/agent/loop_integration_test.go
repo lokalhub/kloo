@@ -238,3 +238,62 @@ func TestIntegrationInterrupt(t *testing.T) {
 		t.Errorf("answer.txt = %q, want unchanged", got)
 	}
 }
+
+// 6) repair-then-apply: a no-match edit_file gets a repair observation (actual
+// content + fix instruction) fed back; the model's corrected 2nd edit applies and
+// the real verify goes green → success. Exercises the REAL rails (DefaultRegistry,
+// churn, budget, checkpoint) end-to-end.
+func TestIntegrationRepairThenApply(t *testing.T) {
+	root := seedRepo(t)
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "WRONG\n", "right\n", 50)}, // turn 1: no-match
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 50)}, // turn 2: applies
+	)
+	cfg := config.Config{MaxSteps: 10, ChurnRounds: 10}
+	loop := buildLoop(t, root, srv, cfg)
+
+	rep, err := loop.Run(context.Background(), "make the check pass")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q (%s), want success", rep.Reason, rep.String())
+	}
+	if !msgWithAll(rep.Transcript, "Failing SEARCH block", "wrong", "Fix this edit") {
+		t.Errorf("transcript missing the repair observation between the two edits")
+	}
+	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
+		t.Errorf("answer.txt = %q, want %q", got, "right\n")
+	}
+	if rep.RolledBack {
+		t.Errorf("a successful run must not roll back")
+	}
+}
+
+// 7) repair-bounded: a model that emits the SAME non-matching edit every turn is
+// terminated by the real churn rail within the per-target enrichment cap — not an
+// infinite loop. At most MaxRepairAttempts (2) enriched observations appear, the
+// verify never goes green (file unchanged), and the abort rolls back.
+func TestIntegrationRepairBounded(t *testing.T) {
+	root := seedRepo(t)
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: editFileCall(t, "answer.txt", "DOESNOTMATCH\n", "right\n", 50)})
+	cfg := config.Config{MaxSteps: 100, ChurnRounds: 2}
+	loop := buildLoop(t, root, srv, cfg)
+
+	rep, err := loop.Run(context.Background(), "spin on a broken edit")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonChurn && rep.Reason != ReasonBudgetExceeded {
+		t.Fatalf("reason = %q (%s), want churn or budget-exceeded (terminated, not infinite)", rep.Reason, rep.String())
+	}
+	if n := countMsgsContaining(rep.Transcript, "Failing SEARCH block"); n > DefaultMaxRepairAttempts {
+		t.Errorf("enriched observations = %d, want <= %d", n, DefaultMaxRepairAttempts)
+	}
+	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "wrong\n" {
+		t.Errorf("a never-applied edit must leave answer.txt unchanged, got %q", got)
+	}
+	if !rep.RolledBack {
+		t.Errorf("a non-success terminal after an edit attempt should roll back")
+	}
+}
