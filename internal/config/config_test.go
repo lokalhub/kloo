@@ -267,6 +267,103 @@ func TestResolveEffort(t *testing.T) {
 	}
 }
 
+// TestResolveBundledDefaults exercises the bundled per-model defaults layer:
+// (a) a known model with a silent profile gets the bundled values; (b) a user
+// profile value wins over bundled (unset fields keep bundled); (c) an unknown
+// model is byte-for-byte the built-in defaults; flag/env still beat bundled; and
+// a provider alias that resolves to a table-matched id receives bundled defaults.
+func TestResolveBundledDefaults(t *testing.T) {
+	missing := func(t *testing.T) string { return filepath.Join(t.TempDir(), "none.json") }
+
+	// (a) known model + no profile file ⇒ bundled qwen2.5-coder row.
+	t.Run("a-bundled-applied-no-profile", func(t *testing.T) {
+		got, err := Resolve(Flags{Model: strp("qwen2.5-coder-7b")}, envFunc(nil), missing(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ToolFormat != "native" || got.Temperature != 0.1 || got.MaxContextTokens != 24576 {
+			t.Errorf("bundled qwen2.5-coder not applied: %+v", got)
+		}
+	})
+
+	// (a') profile file exists but has an entry with all three fields unset ⇒
+	// still the bundled values (the user set nothing to override them).
+	t.Run("a-bundled-applied-silent-entry", func(t *testing.T) {
+		prof := writeProfile(t, `{"qwen2.5-coder-7b":{"fewShotPath":"/fs/x.txt"}}`)
+		got, err := Resolve(Flags{Model: strp("qwen2.5-coder-7b")}, envFunc(nil), prof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ToolFormat != "native" || got.Temperature != 0.1 || got.MaxContextTokens != 24576 {
+			t.Errorf("bundled values not applied alongside a silent entry: %+v", got)
+		}
+		if got.FewShotPath != "/fs/x.txt" {
+			t.Errorf("unrelated profile field lost: %+v", got)
+		}
+	})
+
+	// (b) a profile value for two of the three fields ⇒ user wins; the unset
+	// field (toolFormat) keeps the bundled "native".
+	t.Run("b-user-overrides-bundled", func(t *testing.T) {
+		prof := writeProfile(t, `{"qwen2.5-coder-7b":{"temperature":0.5,"maxContextTokens":4096}}`)
+		got, err := Resolve(Flags{Model: strp("qwen2.5-coder-7b")}, envFunc(nil), prof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Temperature != 0.5 || got.MaxContextTokens != 4096 {
+			t.Errorf("user values should win over bundled: %+v", got)
+		}
+		if got.ToolFormat != "native" {
+			t.Errorf("unset toolFormat should keep bundled native: %+v", got)
+		}
+	})
+
+	// (c) unknown model ⇒ Config equals the built-in defaults (no change).
+	t.Run("c-unknown-model-unchanged", func(t *testing.T) {
+		got, err := Resolve(Flags{Model: strp("totally-unknown-model")}, envFunc(nil), missing(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ToolFormat != DefaultToolFormat || got.Temperature != DefaultTemperature || got.MaxContextTokens != DefaultMaxContextTokens {
+			t.Errorf("unknown model should equal built-in defaults: %+v", got)
+		}
+	})
+
+	// flag still wins over bundled.
+	t.Run("flag-beats-bundled", func(t *testing.T) {
+		got, err := Resolve(Flags{Model: strp("qwen2.5-coder-7b"), Temperature: fp(0.9)}, envFunc(nil), missing(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Temperature != 0.9 {
+			t.Errorf("flag temperature should win over bundled: %+v", got)
+		}
+	})
+
+	// a provider alias resolving to a deepseek id ⇒ the deepseek bundled defaults
+	// (proves the lookup keys off the resolved id; provider resolution unregressed).
+	t.Run("provider-alias-matches-table", func(t *testing.T) {
+		prof := writeProfile(t, `{
+			"providers": {
+				"or": {
+					"endpoint": "https://openrouter.ai/api/v1",
+					"models": {"ds": {"model": "deepseek-chat"}}
+				}
+			}
+		}`)
+		got, err := Resolve(Flags{Provider: strp("or"), Model: strp("ds")}, envFunc(nil), prof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Model != "deepseek-chat" {
+			t.Fatalf("alias not resolved to real id: %+v", got)
+		}
+		if got.ToolFormat != "native" || got.Temperature != 0.1 || got.MaxContextTokens != 32768 {
+			t.Errorf("deepseek bundled defaults not applied to resolved alias: %+v", got)
+		}
+	})
+}
+
 // TestResolveProvider: a --provider selects an endpoint+key from the "providers"
 // block, and --model resolves an alias under that provider to its real model id +
 // tuning. The same alias under a different provider yields that provider's slug.

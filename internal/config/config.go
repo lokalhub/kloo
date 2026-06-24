@@ -1,6 +1,8 @@
 // Package config resolves kloo's runtime config (endpoint, model, profile, and
-// core knobs) from a precedence chain: flags > env (KLOO_*) > profile file >
-// built-in defaults.
+// core knobs) from a precedence chain: flags > env (KLOO_*) > user profile file >
+// bundled per-model defaults > built-in defaults. The bundled layer
+// (model_defaults.go) is the lowest meaningful layer — it only ever fills the
+// flat built-in constants for a known model, never anything the user set.
 //
 // The package is pure: it performs no network I/O and reads only the profile
 // JSON file. Callers (internal/cli) build a Flags from parsed CLI flags, pass
@@ -226,7 +228,10 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 }
 
 // Resolve computes the effective Config from the precedence chain
-// flags > env > profile-file > defaults.
+// flags > env > user profile-file > bundled per-model defaults > built-in
+// defaults. The bundled layer (applyBundledDefaults) runs after the model id is
+// resolved (incl. provider alias) and before the user's per-model tuning, so a
+// known model "just works" while the user profile, env, and flags still win.
 //
 // getenv looks up an environment variable (pass os.Getenv in production; a map
 // closure in tests). profilePath points at the profile JSON; when empty the
@@ -321,20 +326,34 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	cfg.Model = modelSel
 
+	// Capture the user's per-model tuning entry (from EITHER the provider-alias
+	// path OR the legacy top-level path) instead of applying it inline, so the
+	// bundled-defaults layer can run between model-id resolution and user tuning.
+	var userTuning *profileEntry
 	if me, ok := providerModels[modelSel]; ok {
 		if me.Model != "" {
 			cfg.Model = me.Model // alias → real model id sent to the endpoint
 		}
-		applyModelTuning(&cfg, me.profileEntry)
+		e := me.profileEntry
+		userTuning = &e
 	} else {
 		// Legacy / no-provider path: top-level per-model entry keyed by model name.
 		entry, err := loadProfileEntry(profilePath, cfg.Model)
 		if err != nil {
 			return Config{}, err
 		}
-		if entry != nil {
-			applyModelTuning(&cfg, *entry)
-		}
+		userTuning = entry // may be nil
+	}
+
+	// BUNDLED defaults layer: below the user profile, above the flat built-ins.
+	// Keyed by the *resolved* model id (post provider-alias), it overwrites only
+	// the flat built-in fields (ToolFormat/Temperature/MaxContextTokens). An
+	// unknown model gets the generic fallback (== built-ins ⇒ no change).
+	applyBundledDefaults(&cfg, cfg.Model)
+
+	// User profile tuning ALWAYS wins over bundled (non-nil fields overwrite).
+	if userTuning != nil {
+		applyModelTuning(&cfg, *userTuning)
 	}
 
 	// MCP servers + cap (reserved profile keys; never collide with model entries —

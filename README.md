@@ -121,7 +121,12 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | `--no-mcp` | `false` | Disable all [MCP servers](docs/mcp.md) for this run (overrides `KLOO_MCP` + profile). |
 | `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.kloo/profiles.json`, falls back to `~/.config/kloo/`). |
 
-Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
+Config precedence is **flags > env (`KLOO_*`) > profile file > bundled per-model
+defaults > built-in defaults**. kloo **bundles per-model defaults** for common
+coding models (Qwen2.5-Coder, Qwen3-Coder, Devstral, DeepSeek…), so they run with
+sensible `toolFormat`/`temperature`/`maxContextTokens` **without a hand-written
+profile** — your profile/env/flags always win, and unknown models are unchanged.
+`toolFormat` also accepts `"auto"` (a safe alias for unset/auto-select).
 Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
 `OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `NO_COLOR` disables

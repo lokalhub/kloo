@@ -6,12 +6,13 @@ Every knob kloo reads, where it comes from, and what it does. Source of truth:
 ## Precedence
 
 ```
-flags  >  env (KLOO_*)  >  profile file  >  built-in defaults
+flags  >  env (KLOO_*)  >  profile file  >  bundled per-model defaults  >  built-in defaults
 ```
 
 ```mermaid
 flowchart LR
-    D[built-in<br/>defaults] --> P["profile file<br/>~/.config/kloo/profiles.json"]
+    D[built-in<br/>defaults] --> B["bundled per-model<br/>defaults"]
+    B --> P["profile file<br/>~/.config/kloo/profiles.json"]
     P --> E["env<br/>KLOO_*"]
     E --> F[CLI flags]
     F --> R([effective config])
@@ -20,6 +21,11 @@ flowchart LR
 ```
 
 Each layer overrides the one before it — the rightmost source that sets a field wins.
+
+The **bundled per-model defaults** layer fills gaps for known coding models (see
+[Bundled per-model defaults](#bundled-per-model-defaults)) so they work without a
+hand-written profile. It sits **below** your profile, so the profile, env, and
+flags **always** override it; an unmatched model just keeps the built-in defaults.
 
 The **effort tier** is resolved first and seeds the loop budgets (steps/tokens/
 churn/wall-clock). The **model is a separate axis** — flags/env/profile set it
@@ -115,6 +121,42 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 A headless run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
 
+## Bundled per-model defaults
+
+kloo ships an **in-binary table of known-good defaults** for common coding models,
+so a recognised model "just works" without a hand-written profile. Matching is by
+**model-id substring**, case-insensitive, evaluated in declared order — **first
+match wins** (so a specific key like `deepseek-coder` is tested before the
+`deepseek` family key). A match seeds `toolFormat`, `temperature`, and
+`maxContextTokens`.
+
+This layer sits **below your profile** in the precedence chain (`flags > env >
+profile > bundled defaults > built-in defaults`): the bundled values overwrite
+only the flat built-in defaults, and **anything you set in your profile, env, or a
+flag still wins**. A model that matches **no** row keeps the built-in defaults —
+unchanged.
+
+| Model (matched substring) | `toolFormat` | `temperature` | `maxContextTokens` |
+|---|---|---|---|
+| Qwen2.5-Coder (`qwen2.5-coder`, 7B/14B/32B) | `native` | `0.1` | `24576` |
+| Qwen3-Coder-30B-A3B (`qwen3-coder`) | `native` | `0.1` | `32768` |
+| Devstral-Small-2-24B (`devstral`) | `native` | `0.15` | `32768` |
+| DeepSeek-Coder (`deepseek-coder`) | `native` | `0.1` | `16384` |
+| DeepSeek v3 / chat (`deepseek`) | `native` | `0.1` | `32768` |
+| _any unmatched model_ (generic fallback) | `native` | `0.1` | `8000` |
+
+The generic fallback is pinned **equal to the built-in defaults**, so an unmatched
+model is byte-for-byte unchanged.
+
+> **`maxContextTokens` here is the curator's per-step budget, not the model's raw
+> window.** The seeded values reflect each model's real context size *ordinally*
+> (a bigger window gets a bigger budget) while staying **bounded** — pouring a
+> model's full 128K/256K window into the per-step curator would blow memory. Set
+> `maxContextTokens` in your profile to your model's real window if you want a
+> larger (or smaller) per-step budget.
+
+The table is the source of truth in `internal/config/model_defaults.go`.
+
 ## Profile file
 
 Optional. Default location `~/.config/kloo/profiles.json` (or
@@ -132,7 +174,7 @@ Two sections, both optional:
 {
   // per-model overrides (key = model name as passed to --model / KLOO_MODEL)
   "qwen2.5-coder": {
-    "toolFormat": "native",        // native | xml  (tool-call adapter)
+    "toolFormat": "native",        // "" (auto) | "auto" | "native" | "trained" | "xml"
     "temperature": 0.2,
     "fewShotPath": "/path/to/fewshot.txt",  // optional gold examples for the system prompt
     "maxContextTokens": 8000,
@@ -161,6 +203,13 @@ Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`
 `maxTokens`, `maxWallClockSeconds`, `churnRounds`.
 Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,
 `maxWallClockSeconds` (budgets only — no model).
+
+**`toolFormat` accepted values:** `""` (unset → auto-select) · `"auto"` (an
+explicit alias for unset/auto-select — **safe, never crashes a run**) · `"native"`
+(native function-calling) · `"trained"` (the model's trained tool-call format, via
+the native path) · `"xml"` (XML fallback, forced even on a tool-capable endpoint).
+With `""`/`"auto"`, kloo picks native FC when the endpoint advertises tools, else
+XML. Any other value (e.g. `"yaml"`) is rejected.
 
 ### `providers` — endpoint+key + model aliases
 
