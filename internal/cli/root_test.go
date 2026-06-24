@@ -203,6 +203,56 @@ func TestHeadlessWithoutTaskErrors(t *testing.T) {
 	}
 }
 
+// TestLintOptsResolution: --lint/--no-lint and KLOO_LINT/KLOO_NO_LINT resolve into
+// lintOpts with flag-beats-env precedence, mirroring the verify/MCP knobs. KLOO_LINT
+// "0"/"false" disables (it is not treated as a command), per the EnvMCP convention.
+func TestLintOptsResolution(t *testing.T) {
+	none := func(string) string { return "" }
+	env := func(pairs map[string]string) func(string) string {
+		return func(k string) string { return pairs[k] }
+	}
+
+	cases := []struct {
+		name          string
+		lintChanged   bool
+		noLintChanged bool
+		flagLint      string
+		flagNoLint    bool
+		getenv        func(string) string
+		want          lintOpts
+	}{
+		{"--no-lint disables", false, true, "", true, none, lintOpts{Disabled: true}},
+		{"--lint sets override", true, false, "x", false, none, lintOpts{Override: "x"}},
+		{"KLOO_NO_LINT=1 disables", false, false, "", false, env(map[string]string{config.EnvNoLint: "1"}), lintOpts{Disabled: true}},
+		{"KLOO_LINT=y sets override", false, false, "", false, env(map[string]string{config.EnvLint: "y"}), lintOpts{Override: "y"}},
+		{"flag beats env override", true, false, "flag", false, env(map[string]string{config.EnvLint: "env"}), lintOpts{Override: "flag"}},
+		{"explicit --no-lint=false beats KLOO_NO_LINT", false, true, "", false, env(map[string]string{config.EnvNoLint: "1"}), lintOpts{Disabled: false}},
+		{"KLOO_LINT=0 disables, not override", false, false, "", false, env(map[string]string{config.EnvLint: "0"}), lintOpts{Disabled: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lintOptsFrom(tc.lintChanged, tc.noLintChanged, tc.flagLint, tc.flagNoLint, tc.getenv)
+			if got != tc.want {
+				t.Errorf("lintOptsFrom = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLintFlagsRegistered: --lint and --no-lint appear in help (they exist and are
+// parseable in the real command path).
+func TestLintFlagsRegistered(t *testing.T) {
+	out, _, err := runCmd(t, Deps{}, "--help")
+	if err != nil {
+		t.Fatalf("--help should exit 0, got %v", err)
+	}
+	for _, want := range []string{"--lint", "--no-lint"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("help missing flag %s; out = %q", want, out.String())
+		}
+	}
+}
+
 // TestHelpFlagExitsZero: --help prints usage and exits 0.
 func TestHelpFlagExitsZero(t *testing.T) {
 	out, _, err := runCmd(t, Deps{}, "--help")

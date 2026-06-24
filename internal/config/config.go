@@ -66,6 +66,13 @@ const (
 	// disabled; unset or anything else ⇒ enabled. The --no-mcp flag (Phase 03)
 	// overrides this; per-server "disabled" is the profile-level switch.
 	EnvMCP = "KLOO_MCP"
+	// EnvLint overrides the auto-detected fast advisory lint command (mirrors the
+	// --lint flag). A value of "0"/"false" (case-insensitive) instead disables lint
+	// — mirroring the EnvMCP truthiness convention — and is NOT treated as a command.
+	EnvLint = "KLOO_LINT"
+	// EnvNoLint disables the fast advisory lint step when "1"/"true" (case-insensitive),
+	// mirroring the --no-lint flag. The --lint/--no-lint flags override both env vars.
+	EnvNoLint = "KLOO_NO_LINT"
 )
 
 // ErrProfileParse wraps a malformed profile JSON file. A *missing* profile file
