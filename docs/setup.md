@@ -27,7 +27,7 @@ server's default), with the placeholder model `local`.
    ```
 3. Run a task in the TUI:
    ```sh
-   kloo --model <served-name> --verify 'npm run build && bash benchmark/assert.sh src'
+   kloo --model <served-name>     # verify auto-detected from the project; --verify to override
    ```
 
 No API key is needed — a local server has no auth.
@@ -54,14 +54,20 @@ the endpoint, the model, and a bearer token.
 
 ```sh
 export KLOO_API_KEY="$OPENROUTER_API_KEY"      # or OPENAI_API_KEY (used as fallback)
-kloo --effort heavy \
-     --endpoint https://openrouter.ai/api/v1 \
-     --model deepseek/deepseek-v4-flash \
-     --verify 'npm run build && bash benchmark/assert.sh src'
+kloo --endpoint https://openrouter.ai/api/v1 --model deepseek/deepseek-v4-flash
+```
+
+Or name the endpoint+key once in a `providers` block in `profiles.json` and select
+it with `--provider` (see [configuration.md](configuration.md#providers--endpointkey--model-aliases)):
+
+```sh
+kloo --provider openrouter --model dsv4        # endpoint + key + real model id from the profile
 ```
 
 - `KLOO_API_KEY` is the bearer token; if unset, kloo falls back to `OPENAI_API_KEY`.
 - The hosted model name goes in `--model` verbatim (e.g. `deepseek/deepseek-v4-flash`).
+- Verify is auto-detected; add `--verify '<cmd>'` only to override (e.g. to conjoin a
+  structural check, as in [the verify section](#the-verify-command-is-the-spec)).
 - Hosted models don't run on your RAM — useful for big refactors that would OOM a
   local 32B. (They do cost per token; the effort budgets bound the spend.)
 
