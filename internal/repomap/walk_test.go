@@ -1,9 +1,43 @@
 package repomap
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+// TestWalkSkipsOversizeFiles is the OOM guard: a file larger than maxMappedFileBytes
+// (e.g. a checked-in binary / model weight) must be skipped from the map so it is
+// never read whole into memory. Small source beside it is still mapped.
+func TestWalkSkipsOversizeFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "small.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "huge.gguf"), make([]byte, maxMappedFileBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := Walk(dir)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	got := paths(nodes)
+	for _, p := range got {
+		if p == "huge.gguf" {
+			t.Errorf("oversize file must be skipped from the map, got %v", got)
+		}
+	}
+	small := false
+	for _, p := range got {
+		if p == "small.go" {
+			small = true
+		}
+	}
+	if !small {
+		t.Errorf("small source file should still be mapped, got %v", got)
+	}
+}
 
 func goFixture(t *testing.T) string {
 	t.Helper()

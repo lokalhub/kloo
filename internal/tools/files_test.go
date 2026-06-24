@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/edit"
@@ -26,6 +27,29 @@ func wsAt(t *testing.T) (Workspace, string) {
 }
 
 // --- task 05: read_file + list_dir ------------------------------------------
+
+// TestReadFileRefusesOversize: read_file refuses a file over the cap (rather than
+// reading it whole into memory and risking an OOM), with an actionable error.
+func TestReadFileRefusesOversize(t *testing.T) {
+	ws, root := wsAt(t)
+	if err := os.WriteFile(filepath.Join(root, "big.bin"), make([]byte, maxReadFileBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadFile(ws, "big.bin")
+	if err == nil {
+		t.Fatal("read_file should refuse an oversize file")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error should explain the size cap, got: %v", err)
+	}
+	// A normal small file still reads fine.
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(ws, "ok.txt"); err != nil {
+		t.Errorf("small file should still read: %v", err)
+	}
+}
 
 func TestReadFile(t *testing.T) {
 	ws, root := wsAt(t)
