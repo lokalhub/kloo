@@ -105,15 +105,53 @@ func TestRankPathProximitySignal(t *testing.T) {
 	}
 }
 
-// TestRankTieBreakStable: equal-score files always order by path ascending.
+// TestRankTieBreakStable: among equal-task-score files the order is now
+// (centrality desc, path asc). This test's premise legitimately changed when the
+// centrality tier was added (overview §4): the comparator inserts a centrality
+// key between task score and path. Both facets are asserted here —
+//
+//  1. With NO Contents the centrality tier is inert (uniformly 0), so the
+//     all-zero-task order is pure ascending path — the original guarantee, intact.
+//  2. With Contents the tier is active: among all-zero-task files the
+//     more-referenced file sorts before a less-referenced one of higher path.
+//
+// See tasks/03-rank-integration/decisions.md "Update exactly TestRankTieBreakStable".
 func TestRankTieBreakStable(t *testing.T) {
-	// A task matching nothing → all scores 0 → pure path tie-break.
+	// (1) No content → centrality inert → pure ascending path tie-break.
 	ranked := rankIonic(t, "zzzznomatch", nil)
 	got := rankedPaths(ranked)
-	sorted := append([]string(nil), got...)
-	for i := 1; i < len(sorted); i++ {
-		if sorted[i-1] > sorted[i] {
-			t.Errorf("zero-score files not path-sorted: %v", got)
+	for i := 1; i < len(got); i++ {
+		if got[i-1] > got[i] {
+			t.Errorf("zero-score files (no content) not path-sorted: %v", got)
+			break
+		}
+	}
+
+	// (2) Content present → centrality tier decides before path. b.go is
+	// referenced by a.go and c.go (higher centrality) while having a HIGHER path
+	// than a.go, so a pure-path tie-break would put a.go first; the centrality
+	// tier instead lifts b.go to the front. All task scores are 0 (neutral task).
+	files := []Node{{Path: "a.go"}, {Path: "b.go"}, {Path: "c.go"}}
+	symbols := map[string][]Symbol{
+		"b.go": {{Name: "Widget", Kind: KindType, File: "b.go", Line: 1}},
+	}
+	contents := map[string][]byte{
+		"a.go": []byte("x := Widget{}\n"), // a→b
+		"b.go": []byte("type Widget struct{}\n"),
+		"c.go": []byte("y := Widget{}\n"), // c→b
+	}
+	tiered := Rank(RankInput{Files: files, Symbols: symbols, Task: "zzzznomatch", Contents: contents})
+	order := rankedPaths(tiered)
+	for _, r := range tiered {
+		if r.Score != 0 {
+			t.Fatalf("expected all task scores 0, got %g for %s", r.Score, r.Path)
+		}
+	}
+	// b.go (highest centrality) first; a.go and c.go tie on centrality → path order.
+	want := []string{"b.go", "a.go", "c.go"}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Errorf("tiered tie-break order = %v, want %v", order, want)
 			break
 		}
 	}
