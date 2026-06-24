@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -16,8 +17,9 @@ import (
 
 // defaultLaunchTUI composes the full stack — P00 client, P01/P02 tools + jail,
 // P03 repo-map context, the P04 autonomous loop + safety rails — and runs it
-// under the Bubble Tea TUI (P05). The verify command (verifyCmd) is the real
-// success signal the loop trusts each step.
+// under the Bubble Tea TUI (P05). verifyCmd is the deprecated --verify override
+// ("" ⇒ kloo auto-detects the project's build/test); when it resolves to "" the
+// loop runs unverified (the model's finish stops calmly, but nothing is success).
 func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -27,6 +29,10 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 	if err != nil {
 		return err
 	}
+
+	// Resolve the verify command: the deprecated --verify flag (when set) overrides
+	// kloo's project-aware auto-detection; "" ⇒ unverified mode (no verifier built).
+	verifyCmd = resolveVerifyCommand(verifyCmd, cwd, writerLogf(os.Stderr))
 
 	// Resolve which session this launch uses (fresh by default, or --resume <id>),
 	// and the banner shown in the transcript when resuming.
@@ -41,11 +47,19 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 		return err
 	}
 
+	// MCP: connect configured servers (non-fatal) + register their tools alongside
+	// the builtins; the startup/trust lines go to stderr. The context lives for the
+	// whole TUI session and is cancelled (and sessions closed) on exit.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(os.Stderr))
+	defer closeMCP()
+
 	loop := &agent.Loop{
 		Client:        llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey)),
 		Adapter:       adapter,
-		Registry:      tools.DefaultRegistry(ws),
-		Verifier:      agent.NewCommandVerifier(ws, verifyCmd),
+		Registry:      reg,
+		Verifier:      buildVerifier(ws, verifyCmd),
 		Budget:        agent.NewBudget(cfg, nil),
 		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
@@ -67,6 +81,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 		MaxTokens: cfg.MaxTokens,
 		Runner:    runner,
 		Banner:    banner,
+		History:   sess.Transcript, // replay prior turns on resume (empty for a fresh session)
 	})
 	// Sessions are fresh by default, so on exit print the id (only once something
 	// was saved) so the user can pick this conversation back up with --resume.

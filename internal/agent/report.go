@@ -38,12 +38,17 @@ func (r *Report) String() string {
 		}
 	case ReasonInterrupted:
 		b.WriteString(" — interrupted")
+	case ReasonUnverified:
+		b.WriteString(" — finished, but no verify command was available (unverified — pass --verify to gate on one)")
 	}
 
-	// The real verify signal (never a model claim).
-	fmt.Fprintf(&b, "\n  verify: %q exit=%d passed=%v", r.FinalVerify.Command, r.FinalVerify.ExitCode, r.FinalVerify.Passed)
-	if out := strings.TrimSpace(r.FinalVerify.Stdout + "\n" + r.FinalVerify.Stderr); out != "" {
-		fmt.Fprintf(&b, "\n  output: %s", firstLine(out))
+	// The real verify signal (never a model claim). Omitted in unverified mode,
+	// where no command ran — an empty/zero verify line would just be noise.
+	if r.FinalVerify.Command != "" {
+		fmt.Fprintf(&b, "\n  verify: %q exit=%d passed=%v", r.FinalVerify.Command, r.FinalVerify.ExitCode, r.FinalVerify.Passed)
+		if out := strings.TrimSpace(r.FinalVerify.Stdout + "\n" + r.FinalVerify.Stderr); out != "" {
+			fmt.Fprintf(&b, "\n  output: %s", firstLine(out))
+		}
 	}
 
 	fmt.Fprintf(&b, "\n  tokens=%d elapsed=%s", r.TokensUsed, r.Elapsed)

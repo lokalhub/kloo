@@ -13,6 +13,7 @@ import (
 
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/session"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -300,6 +301,55 @@ func TestCapSession(t *testing.T) {
 	}
 	if capped[len(capped)-1].Content != last {
 		t.Errorf("cap dropped the newest message")
+	}
+}
+
+// TestToolSummary renders compact one-line action summaries for the resume log.
+func TestToolSummary(t *testing.T) {
+	cases := []struct {
+		name string
+		call tools.Call
+		res  tools.Result
+		err  error
+		want string
+	}{
+		{"run-ok", tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 0}, nil, "ran: npm run build [exit 0]"},
+		{"run-fail", tools.Call{Name: "run_command", Args: map[string]any{"command": "npm test"}}, tools.Result{ExitCode: 1}, nil, "ran: npm test [exit 1]"},
+		{"run-err", tools.Call{Name: "run_command", Args: map[string]any{"command": "x"}}, tools.Result{}, errors.New("boom"), "ran: x [error]"},
+		{"write", tools.Call{Name: "write_file", Args: map[string]any{"path": "home.page.html"}}, tools.Result{}, nil, "wrote home.page.html"},
+		{"edit", tools.Call{Name: "edit_file", Args: map[string]any{"path": "app.ts"}}, tools.Result{}, nil, "edited app.ts"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolSummary(tc.call, tc.res, tc.err); got != tc.want {
+				t.Errorf("toolSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewReplaysHistory: a resumed session's saved display items become rendered
+// transcript blocks (prompt/assistant/tool), with the banner as the boundary line.
+func TestNewReplaysHistory(t *testing.T) {
+	m := New(Config{
+		Banner: "resumed session · 1 run",
+		History: []session.DisplayItem{
+			{Kind: "user", Text: "build the app"},
+			{Kind: "assistant", Text: "scaffolding now"},
+			{Kind: "tool", Text: "ran: npm run build [exit 0]"},
+		},
+	})
+	if len(m.transcript) != 4 { // 3 history items + the banner
+		t.Fatalf("transcript len = %d, want 4: %#v", len(m.transcript), m.transcript)
+	}
+	if u, ok := m.transcript[0].(userItem); !ok || u.text != "build the app" {
+		t.Errorf("item 0 = %#v, want userItem 'build the app'", m.transcript[0])
+	}
+	if a, ok := m.transcript[1].(assistantItem); !ok || a.content != "scaffolding now" {
+		t.Errorf("item 1 = %#v, want assistantItem 'scaffolding now'", m.transcript[1])
+	}
+	if info, ok := m.transcript[2].(infoItem); !ok || !strings.Contains(info.text, "npm run build") {
+		t.Errorf("item 2 = %#v, want tool infoItem", m.transcript[2])
 	}
 }
 

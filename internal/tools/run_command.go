@@ -16,7 +16,12 @@ const NameRunCommand = "run_command"
 
 // run_command defaults.
 const (
-	defaultCommandTimeout = 30 * time.Second
+	// defaultCommandTimeout is generous because the agent runs real build/test/
+	// install steps (e.g. `npm install`, `ionic start`, `cargo build`) that take
+	// minutes — a tight default silently killed them mid-run, and a small model
+	// rarely thinks to raise timeout_seconds. The per-call timeout_seconds arg
+	// still overrides this in either direction.
+	defaultCommandTimeout = 5 * time.Minute
 	defaultMaxOutput      = 64 * 1024 // 64 KiB per stream
 )
 
@@ -135,7 +140,10 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		killProcGroup(cmd) // ensure any surviving children are reaped
 		res.TimedOut = true
-		return res, fmt.Errorf("tools: command killed after %s: %w", timeout, ErrCommandTimeout)
+		// The message is surfaced verbatim to the model (observation()), so it carries
+		// the fix: re-run with a larger timeout_seconds. A small model otherwise just
+		// retries the same command and times out identically.
+		return res, fmt.Errorf("tools: command killed after %s — if it just needs longer (e.g. a slow install/build), re-run it with a larger timeout_seconds: %w", timeout, ErrCommandTimeout)
 	}
 
 	if runErr != nil {

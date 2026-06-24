@@ -57,6 +57,12 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		if len(calls) == 0 {
 			calls = append(calls, extractFunctionCalls(msg.Content)...)
 		}
+		// Also the Claude-style invoke/parameter dialect some DeepSeek models emit
+		// wrapped in <｜DSML｜…｜> tokens (deepseek-v4-*): the provider leaves it in
+		// text instead of native tool_calls, so recover it here too.
+		if len(calls) == 0 {
+			calls = append(calls, extractInvokeToolCalls(msg.Content)...)
+		}
 	}
 	// Strip any leaked tool-call markup from string args. The <function=…> dialect
 	// frequently batches calls or forgets to close a <parameter=…>, so the server's
