@@ -76,6 +76,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 
 	var (
 		flagModel    string
+		flagProvider string
 		flagEndpoint string
 		flagMode     string
 		flagProfile  string
@@ -86,6 +87,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagEffort   string
 		flagNewSess  bool
 		flagResume   string
+		flagNoMCP    bool
 	)
 
 	cmd := &cobra.Command{
@@ -113,6 +115,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("model") {
 				flags.Model = &flagModel
 			}
+			if fs.Changed("provider") {
+				flags.Provider = &flagProvider
+			}
 			if fs.Changed("endpoint") {
 				flags.Endpoint = &flagEndpoint
 			}
@@ -124,6 +129,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("temperature") {
 				flags.Temperature = &flagTemp
+			}
+			if fs.Changed("no-mcp") {
+				flags.NoMCP = &flagNoMCP // flag beats KLOO_MCP env and the profile
 			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
@@ -156,16 +164,19 @@ func NewRootCmd(deps Deps) *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&flagEffort, "effort", config.DefaultEffort, "effort tier (fast|medium|heavy) — seeds step/token budgets + churn patience")
-	f.StringVar(&flagModel, "model", config.DefaultModel, "model your endpoint serves (e.g. qwen2.5-coder, gpt-4o); llama.cpp single-model servers ignore it")
+	f.StringVar(&flagModel, "model", config.DefaultModel, "model your endpoint serves (e.g. qwen2.5-coder, gpt-4o); with --provider, a model alias from the profile")
+	f.StringVar(&flagProvider, "provider", "", "named provider from the profile's \"providers\" block (sets endpoint+key; scopes --model alias lookup)")
 	f.StringVar(&flagEndpoint, "endpoint", config.DefaultEndpoint, "OpenAI-compatible base URL")
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
-	f.StringVar(&flagVerify, "verify", "go test ./...", "verify command the loop runs each step (the real success signal)")
+	f.StringVar(&flagVerify, "verify", "", "(deprecated) override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
+	_ = f.MarkDeprecated("verify", "kloo now auto-detects the project's build/test command — pass --verify only to override the detected one")
 	f.BoolVar(&flagHeadless, "headless", false, "run the autonomous loop non-interactively (no TTY), streaming progress to stdout; requires a task arg")
 	f.BoolVar(&flagNewSess, "new", false, "start a fresh session (the default; sessions are no longer auto-resumed)")
 	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (printed on exit; see {workspace}/.kloo/sessions)")
+	f.BoolVar(&flagNoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

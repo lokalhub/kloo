@@ -93,10 +93,26 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 			r.send(memoryMsg{Compactions: r.loop.Memory.Stats().Compactions})
 		}
 	}
+	// Capture a compact, human-readable display log of THIS run for resume: the
+	// prompt, the assistant's prose per turn, and a one-line summary per tool call.
+	// Separate from r.session (the model-facing recap) — this is what the TUI replays
+	// so a resumed session shows the prior conversation instead of a bare banner.
+	disp := []session.DisplayItem{{Kind: dispUser, Text: boundText(task)}}
+	var prose strings.Builder
+	flushProse := func() {
+		if t := strings.TrimSpace(prose.String()); t != "" {
+			disp = append(disp, session.DisplayItem{Kind: dispAssistant, Text: boundText(t)})
+		}
+		prose.Reset()
+	}
+
 	r.loop.OnDelta = func(content string) {
+		prose.WriteString(content)
 		r.send(streamDeltaMsg{Content: content})
 	}
 	r.loop.OnTool = func(call tools.Call, res tools.Result, err error) {
+		flushProse() // the prose streamed before this call belongs to this turn
+		disp = append(disp, session.DisplayItem{Kind: dispTool, Text: toolSummary(call, res, err)})
 		r.send(streamDoneMsg{}) // finalize any streamed assistant text for this turn
 		r.send(toolEvent(call, res))
 	}
@@ -117,8 +133,12 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 	// what it needs without derailing the model.
 	r.loop.SessionHistory = r.session
 	rep, _ := r.loop.Run(ctx, task)
+	flushProse() // the final turn's answer (prose with no trailing tool call)
 	if rep != nil {
 		r.session = capSession(append(r.session, sessionRecap(task, rep)))
+		if r.sess != nil {
+			r.sess.Transcript = capDisplay(append(r.sess.Transcript, disp...))
+		}
 		r.persist(task)
 	}
 	r.send(reportFor(rep, r.maxTokens))
@@ -206,6 +226,69 @@ func oneLine(s string) string {
 		s = s[:237] + "…"
 	}
 	return s
+}
+
+// Display-item kinds for the resumable transcript (session.DisplayItem.Kind).
+const (
+	dispUser      = "user"
+	dispAssistant = "assistant"
+	dispTool      = "tool"
+)
+
+// maxDisplayItems bounds the persisted display log so a long session's JSON stays
+// small; the oldest items beyond the cap are dropped (resume shows the recent tail).
+const maxDisplayItems = 400
+
+func capDisplay(d []session.DisplayItem) []session.DisplayItem {
+	if len(d) <= maxDisplayItems {
+		return d
+	}
+	return append([]session.DisplayItem{}, d[len(d)-maxDisplayItems:]...)
+}
+
+// boundText trims and caps a display string so one turn can't bloat the session
+// file. Newlines are preserved (readability); only length is bounded.
+func boundText(s string) string {
+	const max = 2000
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+// toolSummary renders one tool call as a compact, readable line for the resume log
+// (e.g. "ran: npm run build [exit 0]", "edited home.page.html", "read app.ts").
+// It mirrors the live cards but flattens each to a single line.
+func toolSummary(call tools.Call, res tools.Result, err error) string {
+	switch call.Name {
+	case "run_command":
+		cmd := oneLine(str(call.Args["command"]))
+		switch {
+		case err != nil:
+			return fmt.Sprintf("ran: %s [error]", cmd)
+		default:
+			return fmt.Sprintf("ran: %s [exit %d]", cmd, res.ExitCode)
+		}
+	case "edit_file", "write_file":
+		verb := "edited"
+		if call.Name == "write_file" {
+			verb = "wrote"
+		}
+		if err != nil {
+			return fmt.Sprintf("%s %s [error]", verb, str(call.Args["path"]))
+		}
+		return fmt.Sprintf("%s %s", verb, str(call.Args["path"]))
+	case "read_file":
+		return "read " + pathSummary(call, res.Output, "line", "lines")
+	case "list_dir":
+		return "listed " + pathSummary(call, res.Output, "entry", "entries")
+	default:
+		if err != nil {
+			return call.Name + " [error]"
+		}
+		return call.Name
+	}
 }
 
 // confirmGate sends a confirm request for an approve-each edit and waits for the

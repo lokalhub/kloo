@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,41 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.Title != "rework the tabs" || got.Model != "snappy" || got.Runs != 1 || len(got.Messages) != 2 {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
+// TestSaveLoadTranscript: the human-readable display log survives the round-trip
+// (so a resumed session can replay prior turns), and is omitted from JSON when empty.
+func TestSaveLoadTranscript(t *testing.T) {
+	st := NewStore(t.TempDir())
+	now := time.Date(2026, 6, 23, 17, 0, 0, 0, time.UTC)
+	sess := &Session{
+		ID: NewID(now), Created: now, Updated: now,
+		Transcript: []DisplayItem{
+			{Kind: "user", Text: "build the app"},
+			{Kind: "assistant", Text: "scaffolding now"},
+			{Kind: "tool", Text: "ran: npm run build [exit 0]"},
+		},
+	}
+	if err := st.Save(sess); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := st.Load(sess.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Transcript) != 3 || got.Transcript[0].Kind != "user" || got.Transcript[2].Text != "ran: npm run build [exit 0]" {
+		t.Errorf("transcript round-trip mismatch: %+v", got.Transcript)
+	}
+
+	// Empty transcript ⇒ omitted from the JSON (omitempty).
+	empty := &Session{ID: "empty", Created: now, Updated: now}
+	if err := st.Save(empty); err != nil {
+		t.Fatalf("Save empty: %v", err)
+	}
+	ed, _ := os.ReadFile(filepath.Join(st.dir, "empty.json"))
+	if strings.Contains(string(ed), "transcript") {
+		t.Errorf("empty transcript should be omitted from JSON:\n%s", ed)
 	}
 }
 

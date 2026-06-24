@@ -14,10 +14,11 @@ import (
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
-// headlessVerifyTimeout is the per-verify timeout for the headless loop. The
-// acceptance benchmark's verify (`npm run build` + the structural harness) is far
-// slower than the run_command 30s default, so it gets a generous ceiling.
-const headlessVerifyTimeout = 240 // seconds
+// headlessVerifyTimeout is the per-verify timeout for the headless loop's verify
+// step (the acceptance benchmark's `npm run build` + structural harness). Kept at
+// least as generous as the run_command default so a slow build is never the tighter
+// ceiling.
+const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
 
 // defaultRunHeadless composes the same full stack as defaultLaunchTUI (P00 client,
 // P01/P02 tools+jail, P03 repo map, P04 loop + safety rails) but runs the loop
@@ -34,16 +35,25 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 	if err != nil {
 		return err
 	}
+	// Resolve the verify command: deprecated --verify override, else auto-detect,
+	// else "" (unverified — the run can only end in answered/unverified, not success).
+	verifyCmd = resolveVerifyCommand(verifyCmd, cwd, writerLogf(out))
 	adapter, err := tools.SelectAdapter(cfg.ToolFormat, tools.EndpointCaps{SupportsTools: true})
 	if err != nil {
 		return err
 	}
 
+	// MCP: connect configured servers (non-fatal) + register their tools alongside
+	// the builtins; the startup/trust lines go to out. Closed on return.
+	ctx := context.Background()
+	reg, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
+	defer closeMCP()
+
 	loop := &agent.Loop{
 		Client:        llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey)),
 		Adapter:       adapter,
-		Registry:      tools.DefaultRegistry(ws),
-		Verifier:      agent.NewCommandVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Registry:      reg,
+		Verifier:      buildVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
 		Budget:        agent.NewBudget(cfg, nil),
 		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
@@ -84,7 +94,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 	fmt.Fprintf(out, "task: %s\n\n", task)
 
 	start := time.Now()
-	rep, runErr := loop.Run(context.Background(), task)
+	rep, runErr := loop.Run(ctx, task)
 	flush()
 	fmt.Fprintln(out)
 	printHeadlessReport(out, rep, time.Since(start))

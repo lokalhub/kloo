@@ -21,14 +21,32 @@ import (
 
 // Session is one persisted conversation plus the metadata to list/resume it.
 type Session struct {
-	ID       string        `json:"id"`
-	Title    string        `json:"title"`
-	Model    string        `json:"model"`
-	Verify   string        `json:"verify"`
-	Runs     int           `json:"runs"` // completed runs (submissions) — the friendly "N runs" count
-	Created  time.Time     `json:"created"`
-	Updated  time.Time     `json:"updated"`
+	ID      string    `json:"id"`
+	Title   string    `json:"title"`
+	Model   string    `json:"model"`
+	Verify  string    `json:"verify"`
+	Runs    int       `json:"runs"` // completed runs (submissions) — the friendly "N runs" count
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+	// Messages is the MODEL-facing carry: one compact recap per run, re-seeded as
+	// the loop's SessionHistory so follow-ups have context without a small model
+	// parroting/replaying the raw transcript.
 	Messages []llm.Message `json:"messages"`
+	// Transcript is the HUMAN-facing display log: a compact, readable replay of the
+	// conversation (your prompt, the assistant's prose, one-line tool summaries) so a
+	// resumed session re-renders the prior turns. Deliberately NOT the raw run
+	// transcript — file dumps and command output are summarised to a line, so one
+	// JSON file stays small. omitempty ⇒ pre-existing sessions resume as before.
+	Transcript []DisplayItem `json:"transcript,omitempty"`
+}
+
+// DisplayItem is one readable block of the resumable conversation. Kind is
+// "user" (a prompt), "assistant" (the model's prose), or "tool" (a one-line action
+// summary like "npm run build [exit 0]"); Text is the already-rendered, bounded
+// content the TUI replays on resume.
+type DisplayItem struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
 }
 
 // Meta is the listing view (no messages) for the launch picker.

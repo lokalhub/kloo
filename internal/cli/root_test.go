@@ -143,8 +143,10 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	if gotCfg.Model != config.DefaultModel {
 		t.Errorf("TUI should receive resolved config, got model %q", gotCfg.Model)
 	}
-	if gotVerify != "go test ./..." {
-		t.Errorf("TUI should receive the default verify command, got %q", gotVerify)
+	// --verify now defaults to "" (no longer go-test): the actual command is
+	// auto-detected downstream in defaultLaunchTUI, so the flag passes "" through.
+	if gotVerify != "" {
+		t.Errorf("TUI should receive an empty verify command (auto-detected downstream), got %q", gotVerify)
 	}
 }
 

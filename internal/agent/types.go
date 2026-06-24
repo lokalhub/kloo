@@ -59,6 +59,12 @@ const (
 	// answer) rather than acting — a calm stop, not an error. The reply is already
 	// shown; the loop just stops instead of churning/erroring on "no tool call".
 	ReasonAnswered Reason = "answered"
+	// ReasonUnverified: the model called finish but kloo had no verify command (none
+	// passed via --verify and none auto-detected for the project), so the change
+	// could not be proven. A calm terminal stop, honestly distinct from success —
+	// nothing was checked. Pass --verify (or work in a recognised project) to gate
+	// on a real command.
+	ReasonUnverified Reason = "unverified"
 )
 
 // BudgetKind names which budget tripped.

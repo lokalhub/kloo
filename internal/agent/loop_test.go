@@ -120,7 +120,8 @@ func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDet
 	var calls []tools.Call
 	reg := tools.NewRegistry()
 	reg.Register(recordTool{name: "read_file", calls: &calls})
-	reg.Register(recordTool{name: "edit_file", calls: &calls}) // an edit ⇒ a verify-pass counts as success
+	reg.Register(recordTool{name: "edit_file", calls: &calls})   // an edit ⇒ a verify-pass counts as success
+	reg.Register(recordTool{name: "run_command", calls: &calls}) // shell action (Acted) with no edit signature
 	return &Loop{
 		Client:   llm.New(srv.URL+"/v1", "test-model"),
 		Adapter:  tools.NativeFCAdapter{},

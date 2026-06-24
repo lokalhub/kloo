@@ -23,6 +23,16 @@ func runCmd(t *testing.T, tool RunCommandTool, args map[string]any) (Result, err
 	return tool.Invoke(context.Background(), Call{Name: NameRunCommand, Args: args})
 }
 
+// TestRunCommandDefaultTimeout pins the generous default: build/install steps
+// (npm install, ionic start) routinely exceed a tight timeout, so the default is
+// 5 minutes. A regression here would silently kill long commands mid-run.
+func TestRunCommandDefaultTimeout(t *testing.T) {
+	ws, _ := wsAt(t)
+	if got := NewRunCommandTool(ws).timeout; got != 5*time.Minute {
+		t.Errorf("default timeout = %v, want 5m", got)
+	}
+}
+
 func TestRunCommandCapturesStdoutAndExit(t *testing.T) {
 	skipIfNoSh(t)
 	ws, _ := wsAt(t)
@@ -69,6 +79,11 @@ func TestRunCommandTimeoutKills(t *testing.T) {
 
 	if !errors.Is(err, ErrCommandTimeout) {
 		t.Fatalf("want ErrCommandTimeout, got %v", err)
+	}
+	// The error is surfaced to the model verbatim, so it must carry the actionable
+	// fix (raise timeout_seconds) — otherwise a small model just retries identically.
+	if !strings.Contains(err.Error(), "timeout_seconds") {
+		t.Errorf("timeout error should hint at timeout_seconds, got %q", err.Error())
 	}
 	if !res.TimedOut {
 		t.Errorf("result should be marked TimedOut")

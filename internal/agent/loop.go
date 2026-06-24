@@ -139,7 +139,10 @@ func boundedHistory(convo []llm.Message, max int) []llm.Message {
 // programming/setup failure (e.g. a missing dependency); ordinary run outcomes
 // (including failures) are carried in the Report, never as an error.
 func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
-	if l.Client == nil || l.Adapter == nil || l.Registry == nil || l.Verifier == nil || l.Budget == nil || l.Churn == nil {
+	// Verifier is intentionally NOT required: a nil Verifier is "unverified mode"
+	// (no verify command configured or auto-detected), where finish is honoured but
+	// no run is labelled success. The other deps are always required.
+	if l.Client == nil || l.Adapter == nil || l.Registry == nil || l.Budget == nil || l.Churn == nil {
 		return nil, errors.New("agent: Loop is missing a required dependency")
 	}
 	now := l.Now
@@ -247,6 +250,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// summary stands, but nothing was verified).
 		if call.Name == tools.NameFinish {
 			convo = append(convo, observation(call, tools.Result{Output: str(call.Args["summary"])}, nil))
+			if l.Verifier == nil {
+				// Unverified mode: no command to prove the change works. Honour finish
+				// as a calm terminal stop, but label it UNVERIFIED — distinct from
+				// success, which always requires a real green verify.
+				return finish(ReasonUnverified, nil, nil, nil)
+			}
 			lastVerify = l.Verifier.Verify(ctx)
 			if lastVerify.Err == nil && lastVerify.Passed {
 				return finish(ReasonSuccess, nil, nil, nil)
@@ -290,15 +299,20 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		convo = append(convo, observation(call, result, derr))
 
 		// ── VERIFY ──────────────────────────────────────────────────────────
-		l.onState(StateVerify)
-		lastVerify = l.Verifier.Verify(ctx)
+		// Unverified mode (nil Verifier) skips this entirely: lastVerify stays the
+		// zero value (Passed=false), so the success gate below never fires and the
+		// run can only end via finish (→ unverified), churn, budget, or answered.
+		if l.Verifier != nil {
+			l.onState(StateVerify)
+			lastVerify = l.Verifier.Verify(ctx)
 
-		// A non-runnable verify command is an error outcome, never a false pass.
-		if lastVerify.Err != nil {
-			if ctx.Err() != nil {
-				return finish(ReasonInterrupted, nil, nil, nil)
+			// A non-runnable verify command is an error outcome, never a false pass.
+			if lastVerify.Err != nil {
+				if ctx.Err() != nil {
+					return finish(ReasonInterrupted, nil, nil, nil)
+				}
+				return finish(ReasonError, fmt.Errorf("verify: %w", lastVerify.Err), nil, nil)
 			}
-			return finish(ReasonError, fmt.Errorf("verify: %w", lastVerify.Err), nil, nil)
 		}
 
 		// Feed churn: the failing verify output (empty when passed), the edit, and
@@ -306,8 +320,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// launched (derr == nil) can mutate the tree (rm/mv/sed -i) yet leaves no edit
 		// signature — without flagging it, shell-driven work is invisible to the churn
 		// rail and a stuck run loops to the budget ceiling (see types.Turn.Acted).
+		//
+		// Unverified mode (no verifier) has NO failure signal to feed: lastVerify is
+		// the zero value, and failingOutput would synthesise "\n" (a constant the
+		// repeated-failure rail mis-reads as "same red build every step", churning a
+		// progressing shell-driven run). Pass "" so only the repeated-EDIT rail can
+		// fire — the one churn signal that still means "stuck" without a verify.
+		verifyOut := ""
+		if l.Verifier != nil {
+			verifyOut = failingOutput(lastVerify)
+		}
 		l.Churn.Observe(Turn{
-			VerifyOutput: failingOutput(lastVerify),
+			VerifyOutput: verifyOut,
 			Edit:         editSignature(call),
 			Acted:        call.Name == tools.NameRunCommand && derr == nil,
 		})

@@ -16,6 +16,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lokalhub/kloo/internal/session"
 )
 
 // Mode is the permission dial setting (dial.go owns its behaviour). The default
@@ -102,6 +104,10 @@ type Config struct {
 	Runner    Runner     // optional: launches a real run on task submit
 	Source    TaskSource // optional: defaults to the keyboard source
 	Banner    string     // optional: a startup notice shown in the transcript (e.g. "resumed session …")
+	// History is the prior conversation to replay on resume (compact display items
+	// from the saved session). Rendered above the banner so a resumed session shows
+	// what happened before, not just a one-line notice. Empty for a fresh session.
+	History []session.DisplayItem
 }
 
 // New constructs the root model in its idle state.
@@ -135,10 +141,29 @@ func New(cfg Config) Model {
 	if m.source == nil {
 		m.source = keyboardSource{} // the one v1 implementation of TaskSource
 	}
+	// Replay the prior conversation (resume), then the banner as the boundary line
+	// between "earlier" and the live prompt.
+	for _, d := range cfg.History {
+		m = m.appendItem(displayItemToTranscript(d))
+	}
 	if cfg.Banner != "" {
 		m = m.appendItem(infoItem{text: cfg.Banner}) // e.g. "resumed session …"
 	}
 	return m
+}
+
+// displayItemToTranscript maps a saved session display item back to a rendered
+// transcript block: prompts and assistant prose render as their live cards; a tool
+// summary renders as a dim info line (the one-line action, not the live diff card).
+func displayItemToTranscript(d session.DisplayItem) item {
+	switch d.Kind {
+	case dispUser:
+		return userItem{text: d.Text}
+	case dispAssistant:
+		return assistantItem{content: d.Text}
+	default: // dispTool (and any unknown kind) → a dim one-line action
+		return infoItem{text: "↳ " + d.Text}
+	}
 }
 
 // Init implements tea.Model.

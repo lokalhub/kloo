@@ -19,7 +19,7 @@ flowchart TD
     Task([your task]) --> Plan[plan one step]
     Plan --> Tool["one tool call<br/>read · edit · ls · run_command"]
     Tool --> Apply[apply edit / capture output]
-    Apply --> Verify{{"verify<br/>your --verify command"}}
+    Apply --> Verify{{"verify<br/>auto-detected build/test"}}
     Verify -- passes --> Done([done ✓])
     Verify -- fails --> Rails{budget or churn<br/>exceeded?}
     Rails -- no --> Plan
@@ -27,8 +27,11 @@ flowchart TD
     Tool <-->|OpenAI-compatible| Model[("your model<br/>llama.cpp · Ollama · OpenAI · OpenRouter")]
 ```
 
-The `--verify` command is the **only** success signal kloo trusts — not the
-model's self-report. See [docs/setup.md](docs/setup.md#the-verify-command-is-the-spec).
+A real build/test exit code is the **only** success signal kloo trusts — not the
+model's self-report. kloo auto-detects the project's command (e.g. an Ionic app →
+`npm run build`); `--verify` overrides it, and an unrecognised project runs
+unverified (finish stops it, but no run is marked success). See
+[docs/setup.md](docs/setup.md#the-verify-command-is-the-spec).
 
 To keep a small-context model (e.g. 8k) on-task while it auto-traverses the
 codebase, kloo rebuilds the prompt each turn — pinning the goal, the current file
@@ -41,9 +44,16 @@ in `{workspace}/.kloo/sessions/` (git-ignored automatically). Each `kloo` launch
 starts a **fresh** session; on exit it prints the session id so you can reopen it
 with `--resume <id>`. See **[docs/sessions.md](docs/sessions.md)**.
 
+kloo is also an **MCP client**: declare external [MCP](https://modelcontextprotocol.io)
+servers in your profile and their tools join the vocabulary as namespaced
+builtins (`<server>__<tool>`) — with a small-model-safe default that keeps a big
+server's many schemas out of the window until you curate them. MCP tools run
+outside kloo's workspace sandbox, so only connect servers you trust; `--no-mcp`
+disables it. See **[docs/mcp.md](docs/mcp.md)**.
+
 ## Quick start
 
-**Requires [Go 1.22+](https://go.dev/dl/)** to build or `go install` from source —
+**Requires [Go 1.25+](https://go.dev/dl/)** to build or `go install` from source —
 make sure it's on your `PATH` (`go version` should print a version). Don't have Go?
 Grab a prebuilt binary from [Releases](https://github.com/lokalhub/kloo/releases)
 instead — no Go needed.
@@ -57,7 +67,7 @@ go install github.com/lokalhub/kloo@latest   # → $(go env GOPATH)/bin/kloo
 Or build from a checkout:
 
 ```sh
-make binary          # build ./bin/kloo  (needs Go 1.22+ on PATH)
+make binary          # build ./bin/kloo  (needs Go 1.25+ on PATH)
 ./bin/kloo           # interactive TUI session
 ./bin/kloo "say hi"  # one-shot, streamed to stdout
 ```
@@ -96,16 +106,18 @@ verify command) and the local/hosted recipes.
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `40` | Max autonomous steps. |
 | `--temperature` | `0.1` | Sampling temperature. |
-| `--verify` | `go test ./...` | Verify command the loop runs each step (the real success signal). |
+| `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
 | `--new` | `false` | Start a fresh session (the default; saved sessions are no longer auto-resumed). |
 | `--resume` | _(unset)_ | Resume a specific saved session by id (printed on exit; see `{workspace}/.kloo/sessions`). |
+| `--no-mcp` | `false` | Disable all [MCP servers](docs/mcp.md) for this run (overrides `KLOO_MCP` + profile). |
 | `--profile` | _(unset)_ | Path to `profiles.json` (default `~/.kloo/profiles.json`, falls back to `~/.config/kloo/`). |
 
 Config precedence is **flags > env (`KLOO_*`) > profile file > defaults**.
 Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
-`OPENAI_API_KEY`); `NO_COLOR` disables all TUI colour (see below).
+`OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `NO_COLOR` disables
+all TUI colour (see below).
 
 Effort tiers seed the loop budgets in one switch (the model is independent).
 **Churn detection is the primary "stop when stuck" guard**; tokens are unbounded

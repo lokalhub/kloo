@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -168,7 +169,12 @@ func TestResolve(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Resolve returned error: %v", err)
 			}
-			if got != tc.want {
+			// These cases exercise the core precedence chain, not MCP; neutralise
+			// the MCP fields (covered by the dedicated MCP tests below) so the
+			// struct can be compared without listing them in every want literal.
+			// (Config now holds a map, so it is no longer != comparable.)
+			got.MCPServers, got.MCPMaxExposedTools, got.MCPDisabled = nil, 0, false
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Resolve mismatch\n got: %+v\nwant: %+v", got, tc.want)
 			}
 		})
@@ -258,5 +264,290 @@ func TestResolveEffort(t *testing.T) {
 	}
 	if got.ChurnRounds != 25 || got.MaxTokens != 900000 || got.Model != DefaultModel {
 		t.Errorf("efforts override = %+v", got)
+	}
+}
+
+// TestResolveProvider: a --provider selects an endpoint+key from the "providers"
+// block, and --model resolves an alias under that provider to its real model id +
+// tuning. The same alias under a different provider yields that provider's slug.
+func TestResolveProvider(t *testing.T) {
+	t.Setenv("KLOO_TEST_OR_KEY", "or-secret")
+	t.Setenv("KLOO_TEST_TG_KEY", "tg-secret")
+	prof := writeProfile(t, `{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"apiKey": "${KLOO_TEST_OR_KEY}",
+				"models": {
+					"dsv4": {"model": "deepseek/deepseek-v4-flash", "toolFormat": "native", "temperature": 0.2, "maxContextTokens": 128000}
+				}
+			},
+			"together": {
+				"endpoint": "https://api.together.xyz/v1",
+				"apiKey": "${KLOO_TEST_TG_KEY}",
+				"models": {
+					"dsv4": {"model": "deepseek-ai/DeepSeek-V4-Flash"}
+				}
+			}
+		}
+	}`)
+
+	// --provider or --model dsv4 → OpenRouter endpoint/key + that provider's slug.
+	got, err := Resolve(Flags{Provider: strp("or"), Model: strp("dsv4")}, envFunc(nil), prof)
+	if err != nil {
+		t.Fatalf("Resolve(or): %v", err)
+	}
+	if got.Provider != "or" || got.Endpoint != "https://openrouter.ai/api/v1" || got.APIKey != "or-secret" {
+		t.Errorf("provider or: endpoint/key wrong: %+v", got)
+	}
+	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "native" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 {
+		t.Errorf("alias dsv4 under or not resolved: %+v", got)
+	}
+
+	// Same alias under a different provider → that provider's endpoint/key/slug.
+	got, err = Resolve(Flags{Provider: strp("together"), Model: strp("dsv4")}, envFunc(nil), prof)
+	if err != nil {
+		t.Fatalf("Resolve(together): %v", err)
+	}
+	if got.Endpoint != "https://api.together.xyz/v1" || got.APIKey != "tg-secret" || got.Model != "deepseek-ai/DeepSeek-V4-Flash" {
+		t.Errorf("alias dsv4 under together wrong: %+v", got)
+	}
+
+	// An unmatched --model under a provider is used verbatim as the model id
+	// (provider still supplies endpoint+key).
+	got, err = Resolve(Flags{Provider: strp("or"), Model: strp("gpt-4o")}, envFunc(nil), prof)
+	if err != nil {
+		t.Fatalf("Resolve(or,gpt-4o): %v", err)
+	}
+	if got.Model != "gpt-4o" || got.Endpoint != "https://openrouter.ai/api/v1" {
+		t.Errorf("unmatched alias should pass through: %+v", got)
+	}
+
+	// An unknown provider is a clear error.
+	if _, err := Resolve(Flags{Provider: strp("nope")}, envFunc(nil), prof); err == nil {
+		t.Error("unknown provider should error")
+	}
+
+	// KLOO_PROVIDER selects it from env; --endpoint flag still overrides the
+	// provider's endpoint (flags > env > profile).
+	got, err = Resolve(Flags{Endpoint: strp("http://local/v1")}, envFunc(map[string]string{EnvProvider: "or", EnvModel: "dsv4"}), prof)
+	if err != nil {
+		t.Fatalf("Resolve(env provider): %v", err)
+	}
+	if got.Endpoint != "http://local/v1" || got.Model != "deepseek/deepseek-v4-flash" || got.APIKey != "or-secret" {
+		t.Errorf("env provider + endpoint flag override: %+v", got)
+	}
+}
+
+// TestResolveMCPServers: the mcpServers block decodes into typed entries (stdio +
+// HTTP), the cap nests under "mcp", and the presence of these reserved keys does
+// not disturb per-model entry resolution.
+func TestResolveMCPServers(t *testing.T) {
+	t.Setenv("KLOO_TEST_MCP_TOKEN", "test-token")
+	prof := writeProfile(t, `{
+		"qwen3-coder": {"toolFormat": "native", "temperature": 0.2},
+		"efforts": {"heavy": {"churnRounds": 9}},
+		"mcpServers": {
+			"mempalace": {
+				"command": "mempalace-mcp",
+				"args": ["--db", "/var/db"],
+				"env": {"MEMPALACE_LOG": "warn"},
+				"exposeMode": "curated",
+				"expose": ["recall", "remember"],
+				"timeoutSeconds": 45,
+				"disabled": false
+			},
+			"docs": {
+				"url": "http://127.0.0.1:9000/mcp",
+				"headers": {"Authorization": "Bearer ${KLOO_TEST_MCP_TOKEN}"},
+				"exposeMode": "lazy"
+			}
+		},
+		"mcp": {"maxExposedTools": 8}
+	}`)
+
+	got, err := Resolve(Flags{Model: strp("qwen3-coder")}, envFunc(nil), prof)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Per-model entry still resolves despite the reserved mcp keys.
+	if got.Model != "qwen3-coder" || got.ToolFormat != "native" || got.Temperature != 0.2 {
+		t.Errorf("model entry not resolved alongside mcp keys: %+v", got)
+	}
+
+	if len(got.MCPServers) != 2 {
+		t.Fatalf("want 2 mcp servers, got %d: %+v", len(got.MCPServers), got.MCPServers)
+	}
+	mp := got.MCPServers["mempalace"]
+	wantMP := MCPServerEntry{
+		Command:        "mempalace-mcp",
+		Args:           []string{"--db", "/var/db"},
+		Env:            map[string]string{"MEMPALACE_LOG": "warn"},
+		ExposeMode:     "curated",
+		Expose:         []string{"recall", "remember"},
+		TimeoutSeconds: 45,
+		Disabled:       false,
+	}
+	if !reflect.DeepEqual(mp, wantMP) {
+		t.Errorf("mempalace entry\n got: %+v\nwant: %+v", mp, wantMP)
+	}
+	docs := got.MCPServers["docs"]
+	if docs.URL != "http://127.0.0.1:9000/mcp" || docs.ExposeMode != "lazy" || docs.Command != "" {
+		t.Errorf("docs entry = %+v", docs)
+	}
+	if docs.Headers["Authorization"] != "Bearer test-token" {
+		t.Errorf("docs headers = %+v", docs.Headers)
+	}
+	if got.MCPMaxExposedTools != 8 {
+		t.Errorf("cap = %d, want 8", got.MCPMaxExposedTools)
+	}
+	if got.MCPDisabled {
+		t.Error("MCPDisabled should default to false")
+	}
+}
+
+// TestResolveMCPDefaults: no mcp config ⇒ empty servers map, default cap, enabled.
+func TestResolveMCPDefaults(t *testing.T) {
+	got, err := Resolve(Flags{}, envFunc(nil), filepath.Join(t.TempDir(), "none.json"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.MCPServers == nil || len(got.MCPServers) != 0 {
+		t.Errorf("want empty (non-nil) servers map, got %#v", got.MCPServers)
+	}
+	if got.MCPMaxExposedTools != DefaultMCPMaxExposedTools {
+		t.Errorf("cap = %d, want default %d", got.MCPMaxExposedTools, DefaultMCPMaxExposedTools)
+	}
+	if got.MCPDisabled {
+		t.Error("MCP should be enabled by default")
+	}
+}
+
+// TestLoadMCPServersCap: the loader returns the raw cap (0 when absent); Resolve
+// applies the default. A profile with mcpServers but no "mcp" key ⇒ cap 0 here.
+func TestLoadMCPServersCap(t *testing.T) {
+	prof := writeProfile(t, `{"mcpServers": {"x": {"command": "y"}}}`)
+	servers, maxExposed, err := loadMCPServers(prof)
+	if err != nil {
+		t.Fatalf("loadMCPServers: %v", err)
+	}
+	if maxExposed != 0 {
+		t.Errorf("absent cap = %d, want 0", maxExposed)
+	}
+	if _, ok := servers["x"]; !ok {
+		t.Errorf("server x not decoded: %+v", servers)
+	}
+
+	// Absent file ⇒ empty map, 0, no error.
+	servers, maxExposed, err = loadMCPServers(filepath.Join(t.TempDir(), "none.json"))
+	if err != nil || maxExposed != 0 || servers == nil || len(servers) != 0 {
+		t.Errorf("absent file: servers=%#v cap=%d err=%v", servers, maxExposed, err)
+	}
+}
+
+// TestResolveMCPGlobalDisable: precedence --no-mcp (flag) > KLOO_MCP (env) > default.
+func TestResolveMCPGlobalDisable(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "none.json")
+	bp := func(b bool) *bool { return &b }
+
+	cases := []struct {
+		name string
+		flag *bool
+		env  map[string]string
+		want bool
+	}{
+		{name: "default-enabled", want: false},
+		{name: "env-0-disables", env: map[string]string{EnvMCP: "0"}, want: true},
+		{name: "env-false-disables", env: map[string]string{EnvMCP: "false"}, want: true},
+		{name: "env-FALSE-disables", env: map[string]string{EnvMCP: "FALSE"}, want: true},
+		{name: "env-1-enabled", env: map[string]string{EnvMCP: "1"}, want: false},
+		{name: "flag-true-overrides-env-enable", flag: bp(true), env: map[string]string{EnvMCP: "1"}, want: true},
+		{name: "flag-false-overrides-env-disable", flag: bp(false), env: map[string]string{EnvMCP: "0"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Resolve(Flags{NoMCP: tc.flag}, envFunc(tc.env), missing)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if got.MCPDisabled != tc.want {
+				t.Errorf("MCPDisabled = %v, want %v", got.MCPDisabled, tc.want)
+			}
+		})
+	}
+}
+
+// TestExpandValue: leading ~ / ~/ → home; $VAR/${VAR} → env; non-leading ~ and
+// plain values are left literal.
+func TestExpandValue(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	t.Setenv("KLOO_TEST_X", "VAL")
+
+	cases := []struct {
+		in, want string
+	}{
+		{"~/.mempalace", home + "/.mempalace"},
+		{"~", home},
+		{"$KLOO_TEST_X", "VAL"},
+		{"${KLOO_TEST_X}", "VAL"},
+		{"~/db/$KLOO_TEST_X", home + "/db/VAL"},
+		{"/abs/path", "/abs/path"},
+		{"mid~tilde", "mid~tilde"}, // non-leading ~ stays literal
+		{"~user/x", "~user/x"},     // only ~ and ~/ expand; ~user is left literal
+		{"plain-arg", "plain-arg"},
+	}
+	for _, tc := range cases {
+		if got := expandValue(tc.in); got != tc.want {
+			t.Errorf("expandValue(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestResolveMCPExpansion: end-to-end, the loader expands ~ and $VAR in
+// command/args/env values surfaced on Config.
+func TestResolveMCPExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	t.Setenv("KLOO_TEST_LOG", "warn")
+	t.Setenv("KLOO_TEST_TOKEN", "secret")
+	prof := writeProfile(t, `{"mcpServers": {"s": {
+		"command": "~/bin/srv",
+		"args": ["--db", "~/.data", "--mode", "$KLOO_TEST_LOG"],
+		"env": {"LOG": "${KLOO_TEST_LOG}", "PLAIN": "x"},
+		"headers": {
+			"Authorization": "Bearer ${KLOO_TEST_TOKEN}",
+			"X-Config": "~/headers/$KLOO_TEST_LOG",
+			"$KLOO_TEST_LOG": "literal-name"
+		}
+	}}}`)
+	got, err := Resolve(Flags{}, envFunc(nil), prof)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	s := got.MCPServers["s"]
+	if s.Command != home+"/bin/srv" {
+		t.Errorf("command = %q", s.Command)
+	}
+	wantArgs := []string{"--db", home + "/.data", "--mode", "warn"}
+	if !reflect.DeepEqual(s.Args, wantArgs) {
+		t.Errorf("args = %v, want %v", s.Args, wantArgs)
+	}
+	if s.Env["LOG"] != "warn" || s.Env["PLAIN"] != "x" {
+		t.Errorf("env = %v", s.Env)
+	}
+	if s.Headers["Authorization"] != "Bearer secret" {
+		t.Errorf("Authorization header = %q", s.Headers["Authorization"])
+	}
+	if s.Headers["X-Config"] != home+"/headers/warn" {
+		t.Errorf("X-Config header = %q", s.Headers["X-Config"])
+	}
+	if _, ok := s.Headers["$KLOO_TEST_LOG"]; !ok {
+		t.Errorf("header names should remain literal, got %v", s.Headers)
 	}
 }
