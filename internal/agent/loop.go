@@ -512,6 +512,12 @@ func (l *Loop) systemWithContext(task string, mapBudget int) string {
 	return l.System + "\n\nRepository map (most relevant first):\n" + ctxStr
 }
 
+// repoMapFileCap mirrors repomap.maxMappedFileBytes (walk.go:34): a defensive
+// upper bound on the size of a file whose content we read into memory for the
+// graph signal. Walk already excludes files above this, but the guard keeps the
+// OOM fix (171fcbf) honest at the read site too.
+const repoMapFileCap = 1 << 20 // 1 MiB
+
 // assembleContext runs the Phase-03 pipeline for the task, bounded by mapBudget.
 // Any failure degrades to empty context (the loop still runs).
 func (l *Loop) assembleContext(task string, mapBudget int) string {
@@ -532,7 +538,30 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 	for _, s := range syms {
 		byFile[s.File] = append(byFile[s.File], s)
 	}
-	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task})
+
+	// Read each mapped file's content ONCE, through the jailed workspace (never a
+	// raw os.ReadFile — keeps the path-jail intact), so Rank can build the
+	// def→ref graph for the PageRank centrality signal. Reads are capped and
+	// degrade non-fatally: a >cap or unreadable file is simply omitted (it then
+	// contributes no graph references), matching assembleContext's degrade-to-
+	// empty contract. (repomap excludes >1MiB at walk time; the cap here is a
+	// defensive guard against re-reading a huge file into memory — the OOM fixed
+	// in 171fcbf.)
+	contents := map[string][]byte{}
+	if ws, err := tools.NewWorkspace(l.Root); err == nil {
+		for _, f := range files {
+			if f.Size > repoMapFileCap {
+				continue
+			}
+			data, err := tools.ReadFile(ws, f.Path)
+			if err != nil {
+				continue
+			}
+			contents[f.Path] = []byte(data)
+		}
+	}
+
+	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents})
 	budget := mapBudget
 	if budget <= 0 {
 		budget = 2000

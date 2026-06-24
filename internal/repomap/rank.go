@@ -34,6 +34,13 @@ type RankInput struct {
 	// RecentlyTouched is the set of recently-edited file paths (the recency
 	// signal). Passed in so ranking stays deterministic and testable.
 	RecentlyTouched map[string]bool
+	// Contents is the already-read, ≤maxMappedFileBytes content of each file
+	// (path → bytes), used to build the def→ref graph for the PageRank
+	// centrality signal. It is OPTIONAL: when nil/empty there is no graph signal
+	// and ordering is byte-identical to the pre-graph behavior (centrality is a
+	// secondary sort key that is uniformly 0). Passing it in (rather than reading
+	// here) keeps Rank pure/deterministic and reuses the caller's bytes.
+	Contents map[string][]byte
 }
 
 // RankedFile is one file scored for relevance to the task, with its symbols.
@@ -49,6 +56,16 @@ type RankedFile struct {
 func Rank(in RankInput) []RankedFile {
 	taskTokens := tokenSet(in.Task)
 
+	// Structural centrality (secondary sort key). Built only when content is
+	// provided; otherwise cent is nil and every lookup is 0, so ordering is
+	// identical to the pre-graph behavior (the comparator falls straight through
+	// to the path tie-break). centrality is intentionally NOT folded into Score:
+	// Score keeps its task-relevance meaning for existing tests/consumers.
+	var cent map[string]float64
+	if len(in.Contents) > 0 {
+		cent = PageRank(BuildRefGraph(in.Files, in.Symbols, in.Contents))
+	}
+
 	ranked := make([]RankedFile, 0, len(in.Files))
 	for _, f := range in.Files {
 		syms := in.Symbols[f.Path]
@@ -56,9 +73,15 @@ func Rank(in RankInput) []RankedFile {
 		ranked = append(ranked, RankedFile{Path: f.Path, Score: score, Symbols: syms})
 	}
 
+	// Tiered comparator (overview §4): task relevance is primary; PageRank
+	// centrality refines ties among equally task-relevant files; path is the
+	// final deterministic tie-break.
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].Score != ranked[j].Score {
 			return ranked[i].Score > ranked[j].Score
+		}
+		if ci, cj := cent[ranked[i].Path], cent[ranked[j].Path]; ci != cj {
+			return ci > cj
 		}
 		return ranked[i].Path < ranked[j].Path
 	})
