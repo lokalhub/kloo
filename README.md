@@ -174,6 +174,14 @@ attempts) rather than ending the run, so a local server that's slow or reloading
 doesn't throw away a long session. Deterministic errors (4xx auth/bad-request) are
 never retried. Common with `llama.cpp`/`llama-swap`, where the first call after a
 model swap can be slow.
+
+In the interactive TUI, a message that **isn't an actionable task** — a greeting,
+"thanks", "looks good", or a question you can answer from the conversation — is
+handled by a single **no-tools turn**: kloo replies directly instead of launching a
+tool-driven run. This stops a small model from re-doing finished work when you just
+say "thanks" on a resumed session. The most obvious acknowledgments are answered
+instantly (no model call); everything else is classified by that one gated turn,
+which has no tools and so *cannot* start work.
 The **full reference** — every flag, env var, the effort table, and the
 `profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 

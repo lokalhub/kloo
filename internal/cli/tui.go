@@ -71,9 +71,11 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		ContextTokens: cfg.MaxContextTokens,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:        defaultSystemPrompt,
-		StallRounds:   cfg.ChurnRounds,
-		Model:         cfg.Model,
-		Temperature:   cfg.Temperature,
+		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
+
+		StallRounds: cfg.ChurnRounds,
+		Model:       cfg.Model,
+		Temperature: cfg.Temperature,
 	}
 
 	runner := tui.NewLoopRunner(loop, ws, cfg.MaxTokens).WithSession(store, sess)
