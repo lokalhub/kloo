@@ -114,6 +114,11 @@ func activityPhrase(msg toolEventMsg) string {
 			return "reading " + msg.Path
 		}
 		return "reading"
+	case "read_dir":
+		if msg.Path != "" {
+			return "reading folder " + msg.Path
+		}
+		return "reading folder"
 	default:
 		return msg.Name
 	}
@@ -292,7 +297,7 @@ func (g genericCardItem) render(width int) string {
 	// noise (the one-line summary is enough). Mutations (write_file) keep the card
 	// box for emphasis.
 	switch g.name {
-	case "read_file", "list_dir":
+	case "read_file", "list_dir", "read_dir":
 		return "  " + line
 	}
 	return cardStyle(width, lipgloss.NormalBorder()).Render(line)

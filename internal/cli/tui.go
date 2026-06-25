@@ -70,7 +70,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:        defaultSystemPrompt,
+		System:        defaultSystemPrompt + agentsInstructions(cwd, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
 		StallRounds: cfg.ChurnRounds,
