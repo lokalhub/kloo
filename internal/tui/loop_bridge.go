@@ -100,7 +100,7 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 	disp := []session.DisplayItem{{Kind: dispUser, Text: boundText(task)}}
 	var prose strings.Builder
 	flushProse := func() {
-		if t := strings.TrimSpace(prose.String()); t != "" {
+		if t := strings.TrimSpace(stripToolMarkup(prose.String())); t != "" {
 			disp = append(disp, session.DisplayItem{Kind: dispAssistant, Text: boundText(t)})
 		}
 		prose.Reset()
