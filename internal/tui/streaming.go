@@ -1,6 +1,29 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import (
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// stripToolMarkup removes a trailing tool-call markup block from displayed
+// assistant prose. Some models (e.g. DeepSeek's <｜DSML｜invoke…｜> dialect, or the
+// <function=…> form) emit the tool call as text after their prose; kloo PARSES and
+// executes it (native_fc text fallbacks), but the raw markup would otherwise show
+// in the transcript. Cut at the earliest such opener — these tokens never occur in
+// real prose. Display-only; the parse path is unaffected.
+func stripToolMarkup(s string) string {
+	cut := -1
+	for _, mk := range []string{"<｜DSML｜", "<function=", "<tool_call>"} {
+		if i := strings.Index(s, mk); i >= 0 && (cut < 0 || i < cut) {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		return s
+	}
+	return strings.TrimRight(s[:cut], " \t\r\n")
+}
 
 // streamDeltaMsg is one streamed assistant content delta (from the P00 Stream
 // callback, bridged into the program via tea.Program.Send).
@@ -40,6 +63,7 @@ func (m Model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
 	if m.streamIdx >= 0 {
 		cur := m.transcript[m.streamIdx].(assistantItem)
 		cur.streaming = false
+		cur.content = stripToolMarkup(cur.content) // hide any trailing tool-call markup the model emitted as text
 		nt := appendItems(m.transcript[:m.streamIdx:m.streamIdx], cur)
 		nt = append(nt, m.transcript[m.streamIdx+1:]...)
 		m.transcript = nt

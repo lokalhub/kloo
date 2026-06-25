@@ -142,20 +142,65 @@ func (e editCardItem) render(width int) string {
 	return cardStyle(width, lipgloss.NormalBorder()).Render(strings.Join(lines, "\n"))
 }
 
-// hunkLines renders one edit pair: SEARCH lines as red `- `, REPLACE lines as
-// green `+ ` (an empty SEARCH is the new-file form — all `+`). The raw fence is
-// never shown; the bridge already parsed it into clean pairs.
+// hunkLines renders one edit pair as a MINIMAL line diff between SEARCH and
+// REPLACE: unchanged anchor/context lines as dim context, only genuinely changed
+// lines as red `- ` / green `+ ` (an empty SEARCH is the new-file form — all `+`).
+// Dumping the whole SEARCH as `-` and whole REPLACE as `+` duplicated every
+// context line as a remove+add pair (noisy); this shows just the change. The apply
+// path still matches the exact SEARCH text — this is display-only.
 func hunkLines(p editPair) []string {
-	var out []string
-	if s := strings.TrimRight(p.search, "\n"); s != "" {
-		for _, line := range strings.Split(s, "\n") {
-			out = append(out, diffMinus.Render("- "+line))
+	return lineDiff(splitDiffLines(p.search), splitDiffLines(p.replace))
+}
+
+// splitDiffLines splits a SEARCH/REPLACE body into lines (trailing newline
+// trimmed); "" ⇒ no lines (e.g. a new-file edit's empty SEARCH).
+func splitDiffLines(s string) []string {
+	if s = strings.TrimRight(s, "\n"); s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+// lineDiff renders a minimal line-level diff (LCS) of old→new: unchanged lines as
+// dim context, removed lines as `- `, added lines as `+ `. Deterministic, pure Go,
+// display-only. Empty old (new file) ⇒ all `+`; empty new ⇒ all `-`.
+func lineDiff(oldL, newL []string) []string {
+	n, m := len(oldL), len(newL)
+	c := make([][]int, n+1) // LCS length table, filled back-to-front
+	for i := range c {
+		c[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if oldL[i] == newL[j] {
+				c[i][j] = c[i+1][j+1] + 1
+			} else if c[i+1][j] >= c[i][j+1] {
+				c[i][j] = c[i+1][j]
+			} else {
+				c[i][j] = c[i][j+1]
+			}
 		}
 	}
-	if r := strings.TrimRight(p.replace, "\n"); r != "" {
-		for _, line := range strings.Split(r, "\n") {
-			out = append(out, diffPlus.Render("+ "+line))
+	var out []string
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case oldL[i] == newL[j]:
+			out = append(out, muted.Render("  "+oldL[i]))
+			i, j = i+1, j+1
+		case c[i+1][j] >= c[i][j+1]:
+			out = append(out, diffMinus.Render("- "+oldL[i]))
+			i++
+		default:
+			out = append(out, diffPlus.Render("+ "+newL[j]))
+			j++
 		}
+	}
+	for ; i < n; i++ {
+		out = append(out, diffMinus.Render("- "+oldL[i]))
+	}
+	for ; j < m; j++ {
+		out = append(out, diffPlus.Render("+ "+newL[j]))
 	}
 	return out
 }
