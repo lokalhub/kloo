@@ -16,6 +16,15 @@ import (
 // governed by the caller's context instead.
 const DefaultTimeout = 120 * time.Second
 
+// DefaultStreamIdleTimeout aborts a stream that produces NO new token for this
+// long. It is NOT an overall deadline — the timer resets on every token, so it
+// never cuts a stream that is still flowing. The only window it really bounds is
+// time-to-FIRST-token (prefill), which for a small local model chewing a large
+// context on weak hardware can take minutes — so the default is deliberately
+// generous (it's a backstop for an indefinite hang, not a tight SLA). Override per
+// run with WithStreamIdleTimeout (0 ⇒ disabled, the old no-timeout behaviour).
+const DefaultStreamIdleTimeout = 5 * time.Minute
+
 // completionsPath is appended to the configured endpoint (e.g. ".../v1").
 const completionsPath = "/chat/completions"
 
@@ -36,6 +45,7 @@ type Client struct {
 	apiKey     string // optional; sent as Authorization: Bearer when set
 	httpClient *http.Client
 	timeout    time.Duration // per-call deadline for Complete
+	streamIdle time.Duration // abort a stream after this long with no new token
 }
 
 // Option customises a Client.
@@ -53,6 +63,11 @@ func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.timeout = d }
 }
 
+// WithStreamIdleTimeout sets the no-token idle timeout for Stream (0 ⇒ disabled).
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(c *Client) { c.streamIdle = d }
+}
+
 // WithAPIKey sets a bearer token (unused against a local llama.cpp/Ollama server, needed for
 // hosted OpenAI-compatible endpoints).
 func WithAPIKey(key string) Option {
@@ -66,6 +81,7 @@ func New(endpoint, model string, opts ...Option) *Client {
 		model:      model,
 		httpClient: &http.Client{}, // no global Timeout: streaming must run long
 		timeout:    DefaultTimeout,
+		streamIdle: DefaultStreamIdleTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -118,6 +134,7 @@ func (c *Client) do(ctx context.Context, req ChatRequest) (*http.Response, error
 	if req.Model == "" {
 		req.Model = c.model
 	}
+	req.Messages = normalizeMessages(req.Messages)
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: encode request: %w", err)
@@ -142,6 +159,36 @@ func (c *Client) do(ctx context.Context, req ChatRequest) (*http.Response, error
 		return nil, fmt.Errorf("llm: request %s: %w", c.endpoint+completionsPath, err)
 	}
 	return resp, nil
+}
+
+// normalizeMessages merges consecutive same-role messages so the request never
+// sends two adjacent same-role turns. Strict OpenAI-compatible servers (llama.cpp)
+// reject e.g. two trailing assistant messages — which kloo's working-memory
+// assembler can produce when it filters the edit-path turns out of the recent tail,
+// leaving two assistants adjacent. Lenient providers (OpenRouter) accept it; this
+// makes the request well-formed for both. System messages are never merged.
+func normalizeMessages(in []Message) []Message {
+	if len(in) < 2 {
+		return in
+	}
+	out := make([]Message, 0, len(in))
+	for _, m := range in {
+		n := len(out)
+		if n > 0 && out[n-1].Role == m.Role && m.Role != RoleSystem {
+			prev := out[n-1]
+			switch {
+			case prev.Content == "":
+				prev.Content = m.Content
+			case m.Content != "":
+				prev.Content = strings.TrimRight(prev.Content, "\n") + "\n" + m.Content
+			}
+			prev.ToolCalls = append(prev.ToolCalls, m.ToolCalls...)
+			out[n-1] = prev
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // APIError is returned when the endpoint responds with a non-2xx status. It

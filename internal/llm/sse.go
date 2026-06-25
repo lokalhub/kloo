@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // Streaming sentinel errors.
@@ -18,6 +20,9 @@ var (
 	ErrStreamIncomplete = errors.New("stream ended without [DONE]")
 	// ErrStreamError wraps an error chunk surfaced mid-stream by the endpoint.
 	ErrStreamError = errors.New("stream error chunk")
+	// ErrStreamIdle is returned when a stream produced no new token for the idle
+	// timeout (a stalled server) — it breaks the hang without capping a live stream.
+	ErrStreamIdle = errors.New("stream stalled (idle timeout)")
 )
 
 // streamChunk is one SSE "data:" payload of a streaming chat completion. It
@@ -56,7 +61,29 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, onDelta func(Delta
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	httpResp, err := c.do(ctx, req)
+	// Idle watchdog: cancel the request if no token arrives for streamIdle, and
+	// reset the clock on every delta. This breaks a STALLED stream (a server that
+	// accepted the request then went silent — e.g. a hung local model) without ever
+	// capping a stream that is still flowing.
+	streamCtx := ctx
+	var idled atomic.Bool
+	if c.streamIdle > 0 {
+		var cancel context.CancelFunc
+		streamCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		timer := time.AfterFunc(c.streamIdle, func() { idled.Store(true); cancel() })
+		defer timer.Stop()
+		inner := onDelta
+		onDelta = func(d Delta) error {
+			timer.Reset(c.streamIdle)
+			if inner != nil {
+				return inner(d)
+			}
+			return nil
+		}
+	}
+
+	httpResp, err := c.do(streamCtx, req)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -72,7 +99,13 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, onDelta func(Delta
 		}
 	}
 
-	return parseSSE(ctx, httpResp.Body, onDelta)
+	resp, err := parseSSE(streamCtx, httpResp.Body, onDelta)
+	if idled.Load() {
+		// The watchdog cancelled the context; surface a clear stall error (not a
+		// generic context.Canceled) so the loop reports it and the rails take over.
+		return resp, fmt.Errorf("llm: no token for %s: %w", c.streamIdle, ErrStreamIdle)
+	}
+	return resp, err
 }
 
 // parseSSE consumes an SSE body, accumulating deltas into a ChatResponse. It is
