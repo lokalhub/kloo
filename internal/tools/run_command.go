@@ -158,15 +158,31 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	return res, nil
 }
 
-// controlledEnv builds the allowlisted environment for executed commands.
+// nonInteractiveEnv signals automated/non-interactive mode to common toolchains so
+// a build/test command never blocks on a consent or credential PROMPT (kloo has no
+// TTY, so a prompt would hang until the timeout — e.g. Angular CLI's analytics
+// "(y/N)", or git asking for credentials). CI=true is the near-universal switch
+// (npm/ng/yarn/many tools disable prompts+analytics under it); the rest cover the
+// usual stragglers. stdin is already /dev/null, so these are belt-and-suspenders.
+var nonInteractiveEnv = []string{
+	"CI=true",
+	"GIT_TERMINAL_PROMPT=0",  // git never prompts for credentials
+	"NG_CLI_ANALYTICS=false", // Angular CLI: no analytics prompt
+	"DEBIAN_FRONTEND=noninteractive",
+	"NPM_CONFIG_FUND=false",
+	"NPM_CONFIG_AUDIT=false",
+}
+
+// controlledEnv builds the allowlisted environment for executed commands, plus the
+// non-interactive signals so a prompting command can't hang the loop.
 func controlledEnv() []string {
-	env := make([]string, 0, len(envAllowlist))
+	env := make([]string, 0, len(envAllowlist)+len(nonInteractiveEnv))
 	for _, k := range envAllowlist {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
 	}
-	return env
+	return append(env, nonInteractiveEnv...)
 }
 
 // argSeconds reads a numeric "seconds" argument that may arrive as a JSON number
