@@ -26,6 +26,54 @@ type SessionOpts struct {
 	ResumeID string
 }
 
+// lintOpts is the user's fast-advisory-lint configuration for a run, built from the
+// --lint/--no-lint flags with KLOO_LINT/KLOO_NO_LINT as env fallbacks (flag beats
+// env). resolveLintCommand turns it into the effective lint command. It is threaded
+// into the entry points in Phase 02; this phase only parses and resolves it.
+type lintOpts struct {
+	Override string // --lint / KLOO_LINT — explicit command, wins over detection
+	Disabled bool   // --no-lint / KLOO_NO_LINT (or KLOO_LINT "0"/"false") — forces lint off
+}
+
+// lintOptsFrom builds lintOpts from the flag state and env, mirroring the verify/MCP
+// flag-beats-env shape. lintChanged/noLintChanged are the cobra Changed() bits for
+// --lint/--no-lint. A changed flag wins over env; otherwise KLOO_LINT supplies the
+// override and KLOO_NO_LINT (truthy) or KLOO_LINT ("0"/"false") disables.
+func lintOptsFrom(lintChanged, noLintChanged bool, flagLint string, flagNoLint bool, getenv func(string) string) lintOpts {
+	var o lintOpts
+
+	switch {
+	case lintChanged:
+		o.Override = flagLint // explicit --lint wins over env
+	default:
+		if v := getenv(config.EnvLint); v != "" && !envLintDisables(v) {
+			o.Override = v
+		}
+	}
+
+	switch {
+	case noLintChanged:
+		o.Disabled = flagNoLint // explicit --no-lint (true or false) wins over env
+	default:
+		o.Disabled = envTruthy(getenv(config.EnvNoLint)) || envLintDisables(getenv(config.EnvLint))
+	}
+
+	return o
+}
+
+// envLintDisables mirrors the EnvMCP convention: "0"/"false" (case-insensitive)
+// means "off". Used for KLOO_LINT, where such a value disables lint rather than
+// being treated as a command.
+func envLintDisables(v string) bool {
+	return v == "0" || strings.EqualFold(v, "false")
+}
+
+// envTruthy reports whether v is an affirmative env value ("1"/"true"), used for
+// the KLOO_NO_LINT disable switch.
+func envTruthy(v string) bool {
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // Deps are the injectable dependencies of the root command, so tests can run
 // offline (fake client) and capture output.
 type Deps struct {
@@ -34,13 +82,14 @@ type Deps struct {
 	NewClient func(cfg config.Config) llm.LLMClient
 	// LaunchTUI starts the interactive TUI session (the autonomous loop wired
 	// under the Bubble Tea UI). sess carries the user's session choice (--new /
-	// --resume). Injected so tests stay offline.
-	LaunchTUI func(cfg config.Config, verifyCmd string, sess SessionOpts) error
+	// --resume); lint carries the fast-advisory-lint config (--lint/--no-lint +
+	// env). Injected so tests stay offline.
+	LaunchTUI func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error
 	// RunHeadless runs the autonomous loop NON-interactively (no TTY), streaming
 	// progress to out and returning the loop's terminal report. Used for the
-	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. Injected
-	// so tests stay offline.
-	RunHeadless func(cfg config.Config, task, verifyCmd string, out io.Writer) error
+	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. lint carries
+	// the fast-advisory-lint config. Injected so tests stay offline.
+	RunHeadless func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error
 	// Getenv looks up env vars (defaults to os.Getenv).
 	Getenv func(string) string
 	Out    io.Writer
@@ -88,6 +137,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagNewSess  bool
 		flagResume   string
 		flagNoMCP    bool
+		flagLint     string
+		flagNoLint   bool
 	)
 
 	cmd := &cobra.Command{
@@ -139,20 +190,25 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				return err
 			}
 
+			// Fast-advisory-lint knobs (--lint/--no-lint + KLOO_LINT/KLOO_NO_LINT),
+			// threaded into the entry points alongside verifyCmd; resolved to a
+			// command (or nil linter) downstream in defaultLaunchTUI/defaultRunHeadless.
+			lopts := lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
+
 			if len(args) == 0 {
 				if flagHeadless {
 					return fmt.Errorf("--headless requires a task argument (e.g. kloo --headless --verify '…' \"do X\")")
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
-				return deps.LaunchTUI(cfg, flagVerify, SessionOpts{New: flagNewSess, ResumeID: flagResume})
+				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume})
 			}
 
 			if flagHeadless {
 				// A task argument + --headless → run the autonomous loop
 				// non-interactively (no TTY), streaming progress to stdout. This is
 				// the acceptance-benchmark / scripted-CI path.
-				return deps.RunHeadless(cfg, args[0], flagVerify, deps.Out)
+				return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
 			}
 
 			// A task argument → the non-interactive one-shot stream (scripting /
@@ -177,6 +233,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagNewSess, "new", false, "start a fresh session (the default; sessions are no longer auto-resumed)")
 	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (printed on exit; see {workspace}/.kloo/sessions)")
 	f.BoolVar(&flagNoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
+	f.StringVar(&flagLint, "lint", "", "override kloo's auto-detected fast lint command (advisory; runs on edited files after each edit)")
+	f.BoolVar(&flagNoLint, "no-lint", false, "disable the fast advisory lint step (lint is on by default when a linter is detected)")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

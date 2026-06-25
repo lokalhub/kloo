@@ -28,6 +28,14 @@ type Loop struct {
 	Churn      ChurnDetector
 	Checkpoint Checkpointer
 
+	// Linter is the fast ADVISORY lint rail. nil ⇒ no lint step; the loop is
+	// byte-identical to pre-lint behaviour (off-by-default-safe). When set, after a
+	// successful edit the loop runs it on the edited file and appends its output to
+	// the conversation as a model-visible observation ONLY. Lint NEVER gates success
+	// (verify alone does, at the success gate below) and is NEVER fed to the churn
+	// rail (Turn{} below is unchanged) — so it cannot false-churn.
+	Linter Linter
+
 	// Memory is the in-process working-memory assembler. nil ⇒ the legacy
 	// boundedHistory path (byte-identical to pre-P00: the repo-map budget stays
 	// the full ContextTokens and the history is the bounded transcript). When
@@ -359,6 +367,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		convo = append(convo, obs)
+
+		// ── LINT (advisory) ─────────────────────────────────────────────────
+		// After a SUCCESSFUL edit, run the fast lint on the edited file and feed its
+		// output back to the model as an observation — and nothing else. This step
+		// is nil-gated (Linter == nil ⇒ skipped, byte-identical to pre-lint) and
+		// touches NONE of the decision state: not lastVerify, not edited, not the
+		// Turn{} fed to churn below, not stall/prevFp, not the success gate. The
+		// observation is an ordinary model-visible message; because it never reaches
+		// the churn detector (which reads only Turn.VerifyOutput/Edit/Acted), a
+		// linter that emits identical text every turn CANNOT false-churn a
+		// progressing run (the prior constant-signal scar this plan must not redo).
+		if isEditTool(call.Name) && derr == nil && l.Linter != nil {
+			lr := l.Linter.Lint(ctx, []string{curEditPath})
+			if lintMsg, ok := lintObservation(lr); ok { // ok == false when clean OR non-runnable
+				convo = append(convo, lintMsg)
+			}
+		}
 
 		// ── VERIFY ──────────────────────────────────────────────────────────
 		// Unverified mode (nil Verifier) skips this entirely: lastVerify stays the

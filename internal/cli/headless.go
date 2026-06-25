@@ -26,7 +26,7 @@ const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
 // plain lines, and the terminal report is printed at the end. No Bubble Tea / TTY
 // is involved, so it works under nohup, CI, or a captured pipe (the Phase-06
 // acceptance benchmark, task 03).
-func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer) error {
+func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -38,6 +38,9 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 	// Resolve the verify command: deprecated --verify override, else auto-detect,
 	// else "" (unverified — the run can only end in answered/unverified, not success).
 	verifyCmd = resolveVerifyCommand(verifyCmd, cwd, writerLogf(out))
+	// Resolve the fast advisory lint command (--lint/--no-lint + env, else auto-detect,
+	// else "" = no lint step). Advisory only — it never gates the run's success.
+	lintCmd, lintPerFile := resolveLintCommand(lint.Override, lint.Disabled, cwd, writerLogf(out))
 	adapter, err := tools.SelectAdapter(cfg.ToolFormat, tools.EndpointCaps{SupportsTools: true})
 	if err != nil {
 		return err
@@ -54,6 +57,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 		Adapter:       adapter,
 		Registry:      reg,
 		Verifier:      buildVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Linter:        buildLinter(ws, lintCmd, lintPerFile),
 		Budget:        agent.NewBudget(cfg, nil),
 		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
@@ -89,8 +93,8 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, out io.Writer
 		fmt.Fprint(out, headlessToolLine(call, res, err))
 	}
 
-	fmt.Fprintf(out, "kloo headless run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q\n",
-		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd)
+	fmt.Fprintf(out, "kloo headless run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
+		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)
 	fmt.Fprintf(out, "task: %s\n\n", task)
 
 	start := time.Now()

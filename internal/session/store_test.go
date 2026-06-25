@@ -66,6 +66,49 @@ func TestSaveLoadTranscript(t *testing.T) {
 	}
 }
 
+// TestSaveLoadLint: the resolved fast-advisory-lint command survives the round-trip
+// (resume parity), is omitted from JSON when empty, and a pre-existing session JSON
+// without a "lint" key still decodes (back-compat).
+func TestSaveLoadLint(t *testing.T) {
+	st := NewStore(t.TempDir())
+	now := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+
+	sess := &Session{ID: NewID(now), Verify: "go test ./...", Lint: "gofmt -l", Created: now, Updated: now}
+	if err := st.Save(sess); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := st.Load(sess.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Lint != "gofmt -l" {
+		t.Errorf("lint did not round-trip, got %q", got.Lint)
+	}
+
+	// Empty lint ⇒ omitted from JSON (omitempty).
+	empty := &Session{ID: "blank", Created: now, Updated: now}
+	if err := st.Save(empty); err != nil {
+		t.Fatalf("Save empty: %v", err)
+	}
+	ed, _ := os.ReadFile(filepath.Join(st.dir, "blank.json"))
+	if strings.Contains(string(ed), `"lint"`) {
+		t.Errorf("empty lint should be omitted from JSON:\n%s", ed)
+	}
+
+	// Back-compat: a session JSON written before the lint field still loads (Lint="").
+	legacy := `{"id":"legacy","title":"old","model":"m","verify":"go test ./...","runs":1,"created":"2026-06-01T00:00:00Z","updated":"2026-06-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(st.dir, "legacy.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := st.Load("legacy")
+	if err != nil {
+		t.Fatalf("Load legacy: %v", err)
+	}
+	if old.Lint != "" || old.Verify != "go test ./..." {
+		t.Errorf("legacy session without a lint key should load unchanged, got %+v", old)
+	}
+}
+
 func TestSaveWritesSelfIgnoringGitignore(t *testing.T) {
 	ws := t.TempDir()
 	st := NewStore(ws)

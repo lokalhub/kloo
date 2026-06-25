@@ -20,7 +20,7 @@ import (
 // under the Bubble Tea TUI (P05). verifyCmd is the deprecated --verify override
 // ("" ⇒ kloo auto-detects the project's build/test); when it resolves to "" the
 // loop runs unverified (the model's finish stops calmly, but nothing is success).
-func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) error {
+func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt SessionOpts) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -33,11 +33,14 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 	// Resolve the verify command: the deprecated --verify flag (when set) overrides
 	// kloo's project-aware auto-detection; "" ⇒ unverified mode (no verifier built).
 	verifyCmd = resolveVerifyCommand(verifyCmd, cwd, writerLogf(os.Stderr))
+	// Resolve the fast advisory lint command (--lint/--no-lint + env, else auto-detect,
+	// else "" = no lint step). Advisory only — it never gates the run's success.
+	lintCmd, lintPerFile := resolveLintCommand(lint.Override, lint.Disabled, cwd, writerLogf(os.Stderr))
 
 	// Resolve which session this launch uses (fresh by default, or --resume <id>),
 	// and the banner shown in the transcript when resuming.
 	store := session.NewStore(cwd)
-	sess, banner, err := chooseSession(store, cfg, verifyCmd, opt, time.Now())
+	sess, banner, err := chooseSession(store, cfg, verifyCmd, lintCmd, opt, time.Now())
 	if err != nil {
 		return err
 	}
@@ -60,6 +63,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 		Adapter:       adapter,
 		Registry:      reg,
 		Verifier:      buildVerifier(ws, verifyCmd),
+		Linter:        buildLinter(ws, lintCmd, lintPerFile),
 		Budget:        agent.NewBudget(cfg, nil),
 		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
@@ -95,7 +99,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, opt SessionOpts) erro
 // session unless --resume <id> names one to reopen. (Auto-resuming the workspace's
 // last session was surprising — a bare `kloo` reloaded a stale, possibly polluted
 // transcript that also re-primed the model. The id to resume is printed on exit.)
-func chooseSession(store *session.Store, cfg config.Config, verifyCmd string, opt SessionOpts, now time.Time) (*session.Session, string, error) {
+func chooseSession(store *session.Store, cfg config.Config, verifyCmd, lintCmd string, opt SessionOpts, now time.Time) (*session.Session, string, error) {
 	if opt.ResumeID != "" {
 		s, err := store.Load(opt.ResumeID)
 		if err != nil {
@@ -103,8 +107,9 @@ func chooseSession(store *session.Store, cfg config.Config, verifyCmd string, op
 		}
 		return s, resumeBanner(s), nil
 	}
-	// Default (and --new): a clean session.
-	return &session.Session{ID: session.NewID(now), Model: cfg.Model, Verify: verifyCmd, Created: now, Updated: now}, "", nil
+	// Default (and --new): a clean session. Lint is persisted beside Verify for
+	// resume parity.
+	return &session.Session{ID: session.NewID(now), Model: cfg.Model, Verify: verifyCmd, Lint: lintCmd, Created: now, Updated: now}, "", nil
 }
 
 func resumeBanner(s *session.Session) string {

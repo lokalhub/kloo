@@ -120,13 +120,15 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	var launched bool
 	var gotCfg config.Config
 	var gotVerify string
+	var gotLint lintOpts
 	clientCalled := false
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string, sess SessionOpts) error {
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
 			launched = true
 			gotCfg = cfg
 			gotVerify = verifyCmd
+			gotLint = lint
 			return nil
 		},
 	}
@@ -148,6 +150,10 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	if gotVerify != "" {
 		t.Errorf("TUI should receive an empty verify command (auto-detected downstream), got %q", gotVerify)
 	}
+	// No --lint/--no-lint flags ⇒ zero lintOpts (resolved/auto-detected downstream).
+	if (gotLint != lintOpts{}) {
+		t.Errorf("TUI should receive zero lintOpts by default, got %+v", gotLint)
+	}
 }
 
 // TestHeadlessWithTaskRoutesToRunHeadless: a task arg + --headless runs the
@@ -156,18 +162,22 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	var ran bool
 	var gotTask, gotVerify string
+	var gotLint lintOpts
 	var gotCfg config.Config
 	clientCalled, tuiCalled := false, false
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string, sess SessionOpts) error { tuiCalled = true; return nil },
-		RunHeadless: func(cfg config.Config, task, verifyCmd string, out io.Writer) error {
-			ran, gotCfg, gotTask, gotVerify = true, cfg, task, verifyCmd
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
+			tuiCalled = true
+			return nil
+		},
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+			ran, gotCfg, gotTask, gotVerify, gotLint = true, cfg, task, verifyCmd, lint
 			return nil
 		},
 	}
 
-	if _, _, err := runCmd(t, deps, "--headless", "--verify", "npm run build", "rework the tabs"); err != nil {
+	if _, _, err := runCmd(t, deps, "--headless", "--verify", "npm run build", "--lint", "golangci-lint run", "rework the tabs"); err != nil {
 		t.Fatalf("--headless with a task should exit 0, got %v", err)
 	}
 	if !ran {
@@ -182,6 +192,9 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	if gotVerify != "npm run build" {
 		t.Errorf("verify = %q, want \"npm run build\"", gotVerify)
 	}
+	if gotLint.Override != "golangci-lint run" || gotLint.Disabled {
+		t.Errorf("--lint should thread into RunHeadless as an override, got %+v", gotLint)
+	}
 	if gotCfg.Model != config.DefaultModel {
 		t.Errorf("headless should receive resolved config, got model %q", gotCfg.Model)
 	}
@@ -192,14 +205,67 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 func TestHeadlessWithoutTaskErrors(t *testing.T) {
 	tuiCalled := false
 	deps := Deps{
-		LaunchTUI:   func(cfg config.Config, verifyCmd string, sess SessionOpts) error { tuiCalled = true; return nil },
-		RunHeadless: func(cfg config.Config, task, verifyCmd string, out io.Writer) error { return nil },
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
+			tuiCalled = true
+			return nil
+		},
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error { return nil },
 	}
 	if _, _, err := runCmd(t, deps, "--headless"); err == nil {
 		t.Fatal("--headless with no task should be an error")
 	}
 	if tuiCalled {
 		t.Error("--headless with no task must not fall back to launching the TUI")
+	}
+}
+
+// TestLintOptsResolution: --lint/--no-lint and KLOO_LINT/KLOO_NO_LINT resolve into
+// lintOpts with flag-beats-env precedence, mirroring the verify/MCP knobs. KLOO_LINT
+// "0"/"false" disables (it is not treated as a command), per the EnvMCP convention.
+func TestLintOptsResolution(t *testing.T) {
+	none := func(string) string { return "" }
+	env := func(pairs map[string]string) func(string) string {
+		return func(k string) string { return pairs[k] }
+	}
+
+	cases := []struct {
+		name          string
+		lintChanged   bool
+		noLintChanged bool
+		flagLint      string
+		flagNoLint    bool
+		getenv        func(string) string
+		want          lintOpts
+	}{
+		{"--no-lint disables", false, true, "", true, none, lintOpts{Disabled: true}},
+		{"--lint sets override", true, false, "x", false, none, lintOpts{Override: "x"}},
+		{"KLOO_NO_LINT=1 disables", false, false, "", false, env(map[string]string{config.EnvNoLint: "1"}), lintOpts{Disabled: true}},
+		{"KLOO_LINT=y sets override", false, false, "", false, env(map[string]string{config.EnvLint: "y"}), lintOpts{Override: "y"}},
+		{"flag beats env override", true, false, "flag", false, env(map[string]string{config.EnvLint: "env"}), lintOpts{Override: "flag"}},
+		{"explicit --no-lint=false beats KLOO_NO_LINT", false, true, "", false, env(map[string]string{config.EnvNoLint: "1"}), lintOpts{Disabled: false}},
+		{"KLOO_LINT=0 disables, not override", false, false, "", false, env(map[string]string{config.EnvLint: "0"}), lintOpts{Disabled: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lintOptsFrom(tc.lintChanged, tc.noLintChanged, tc.flagLint, tc.flagNoLint, tc.getenv)
+			if got != tc.want {
+				t.Errorf("lintOptsFrom = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLintFlagsRegistered: --lint and --no-lint appear in help (they exist and are
+// parseable in the real command path).
+func TestLintFlagsRegistered(t *testing.T) {
+	out, _, err := runCmd(t, Deps{}, "--help")
+	if err != nil {
+		t.Fatalf("--help should exit 0, got %v", err)
+	}
+	for _, want := range []string{"--lint", "--no-lint"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("help missing flag %s; out = %q", want, out.String())
+		}
 	}
 }
 
