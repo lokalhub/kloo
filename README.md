@@ -37,9 +37,11 @@ To keep a small-context model (e.g. 8k) on-task while it auto-traverses the
 codebase, kloo rebuilds the prompt each turn — pinning the goal, the current file
 (re-read fresh), and the last verify result, while folding old exploration into a
 running summary. **[docs/memory.md](docs/memory.md)** has the diagrams. The model
-reads on demand with `read_file`, `list_dir`, and **`read_dir`** — the last bulk-
-reads a whole folder in one call (skip-aware, bounded), so a big-context model can
-ingest an area at once instead of many round-trips.
+navigates with `search` (jailed regex grep → `file:line` results), `read_file`,
+`list_dir`, and **`read_dir`** (bulk-reads a whole folder in one call). All are
+skip-aware (deps/build dirs + `.gitignore`) and bounded — so `search` to locate →
+`read_dir` the area → `edit_file` is the find-read-change loop, fast even for a
+big-context model.
 
 If your repo has an **`AGENTS.md`**, kloo loads it into the system prompt and
 follows it every turn — checked in the launch directory *and* immediate

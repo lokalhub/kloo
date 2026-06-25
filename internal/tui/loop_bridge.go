@@ -368,6 +368,13 @@ func toolEvent(call tools.Call, res tools.Result) toolEventMsg {
 		}
 		p := str(call.Args["path"])
 		return toolEventMsg{Name: "read_dir", Path: p, Summary: p + "  · " + n + " files"}
+	case "search":
+		// "<query> · N matches" (N from the result head "found N match(es) …").
+		n := "0"
+		if f := strings.Fields(res.Output); len(f) >= 2 && f[0] == "found" {
+			n = f[1]
+		}
+		return toolEventMsg{Name: "search", Summary: str(call.Args["query"]) + "  · " + n + " matches"}
 	default:
 		return toolEventMsg{Name: call.Name, Summary: res.Output}
 	}
