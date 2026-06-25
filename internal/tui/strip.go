@@ -32,7 +32,10 @@ func stripToolCallSyntax(s string) string {
 // models often pretty-print the call (e.g. `…interested in.{⏎  "tool": "read"…}`),
 // which an exact-string marker would miss. Used to truncate a STILL-STREAMING
 // partial call that stripToolCallSyntax can't match yet (no closing brace/tag).
-var reToolOpener = regexp.MustCompile(`\{\s*"(name|tool)"|<tool_call|<function|<\|tool_call`)
+// The trailing `<｜` (U+FF5C) catches DeepSeek special-token tool markup
+// (`<｜DSML｜tool_calls>`, `<｜tool▁calls｜>`) that leaks into streamed prose; those
+// openers always start with `<｜`, which is otherwise vanishingly rare in prose.
+var reToolOpener = regexp.MustCompile(`\{\s*"(name|tool)"|<tool_call|<function|<\|tool_call|<｜`)
 
 // firstToolMarker returns the index of the earliest tool-call opener in s, or -1.
 func firstToolMarker(s string) int {

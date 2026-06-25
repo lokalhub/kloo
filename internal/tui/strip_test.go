@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestStripToolCallSyntax(t *testing.T) {
 	cases := []struct{ name, in, want string }{
@@ -32,6 +35,22 @@ func TestCleanAssistantText(t *testing.T) {
 	for _, c := range cases {
 		if got := cleanAssistantText(c.in); got != c.want {
 			t.Errorf("%s: clean(%q)=%q want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestCleanAssistantTextStripsDSMLLive: the DeepSeek DSML tool-call markup
+// (dsv4's finish) must be hidden in the LIVE streaming render, not just at done —
+// the opener is the U+FF5C `<｜` special token, which reToolOpener now catches.
+func TestCleanAssistantTextStripsDSMLLive(t *testing.T) {
+	content := "The change is done. On mobile it stays full-width as before.<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"finish\">\n<｜DSML｜parameter name=\"summary\" string=\"true\">Added responsive CSS.</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+	got := cleanAssistantText(content)
+	if want := "The change is done. On mobile it stays full-width as before."; got != want {
+		t.Errorf("live DSML strip:\n got  %q\n want %q", got, want)
+	}
+	for _, leak := range []string{"DSML", "invoke", "tool_calls", "parameter"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("markup leaked: %q still in %q", leak, got)
 		}
 	}
 }

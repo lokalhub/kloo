@@ -14,7 +14,7 @@ import (
 // real prose. Display-only; the parse path is unaffected.
 func stripToolMarkup(s string) string {
 	cut := -1
-	for _, mk := range []string{"<｜DSML｜", "<function=", "<tool_call>"} {
+	for _, mk := range []string{"<｜", "<function=", "<tool_call>"} {
 		if i := strings.Index(s, mk); i >= 0 && (cut < 0 || i < cut) {
 			cut = i
 		}
