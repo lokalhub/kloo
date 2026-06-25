@@ -30,6 +30,13 @@ func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// An empty (or whitespace-only) file would otherwise return a BLANK observation,
+	// which a small model can't tell apart from "the read gave me nothing" — and it
+	// loops, re-reading the same file forever ("let me check the content…"). Return
+	// an explicit marker so the model knows the file IS empty and moves on.
+	if strings.TrimSpace(content) == "" {
+		return Result{Output: "(file exists but is empty — 0 meaningful bytes)"}, nil
+	}
 	return Result{Output: content}, nil
 }
 

@@ -139,6 +139,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagNoMCP    bool
 		flagLint     string
 		flagNoLint   bool
+		flagCtx      int
 	)
 
 	cmd := &cobra.Command{
@@ -177,6 +178,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("max-steps") {
 				flags.MaxSteps = &flagMaxSteps
+			}
+			if fs.Changed("ctx") {
+				flags.MaxContextTokens = &flagCtx
 			}
 			if fs.Changed("temperature") {
 				flags.Temperature = &flagTemp
@@ -226,6 +230,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
+	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "", "(deprecated) override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
 	_ = f.MarkDeprecated("verify", "kloo now auto-detects the project's build/test command — pass --verify only to override the detected one")
