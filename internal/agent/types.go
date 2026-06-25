@@ -82,6 +82,12 @@ type ChurnKind string
 const (
 	ChurnRepeatedFailure ChurnKind = "repeated-failure"
 	ChurnRepeatedEdit    ChurnKind = "repeated-edit"
+	// ChurnRepeatedCall: the model fired the SAME tool call (name + args) many
+	// times in a row with nothing changing — e.g. re-reading one empty file over
+	// and over. The repeated-failure/edit rails only watch verify output and
+	// edits, so a read-only repeat (read_file/list_dir) is invisible to them; this
+	// rail covers that degenerate-repetition gap. See [[kloo-churn-flail-gap]].
+	ChurnRepeatedCall ChurnKind = "repeated-call"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

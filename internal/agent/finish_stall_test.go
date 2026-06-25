@@ -147,6 +147,9 @@ func TestLoopStallNotTrippedOnRedVerify(t *testing.T) {
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{tripAt: 8}, &stubChurn{})
 	loop.StallRounds = 3
+	// This test repeats ONE identical read to drive a long run for the budget rail;
+	// disable the repetition rail (off the default 6) so it doesn't pre-empt budget.
+	loop.RepeatNudgeRounds, loop.RepeatAbortRounds = 1000, 1000
 
 	rep, err := loop.Run(context.Background(), "read everything, then fix")
 	if err != nil {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -83,6 +84,13 @@ type Loop struct {
 	// ENRICHMENT only, never termination. 0 ⇒ DefaultMaxRepairAttempts.
 	MaxRepairAttempts int
 
+	// RepeatNudgeRounds / RepeatAbortRounds tune the repetition rail: how many
+	// IDENTICAL consecutive tool calls (name + args) before the loop injects one
+	// corrective observation, then halts the run as churn. 0 ⇒ the package
+	// defaults (DefaultRepeatNudgeRounds / DefaultRepeatAbortRounds).
+	RepeatNudgeRounds int
+	RepeatAbortRounds int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -125,6 +133,19 @@ const DefaultStallRounds = 3
 // returns and the churn/budget rails terminate the run.
 const DefaultMaxRepairAttempts = 2
 
+// DefaultRepeatNudgeRounds / DefaultRepeatAbortRounds bound the repetition rail:
+// after a model fires the IDENTICAL tool call (name + args) this many times in a
+// row, the loop first injects ONE corrective observation (nudge), then halts the
+// run as churn (abort) if it keeps going. This catches degenerate repetition the
+// repeated-failure/edit rails miss — most importantly a read-only spin (the same
+// read_file/list_dir over and over), which leaves no edit or verify signal. Kept
+// a touch above the verify/edit churn rounds so a legitimate read-twice never
+// trips it. See [[kloo-churn-flail-gap]].
+const (
+	DefaultRepeatNudgeRounds = 3
+	DefaultRepeatAbortRounds = 6
+)
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
@@ -145,6 +166,22 @@ func (l *Loop) repairLimit() int {
 		return l.MaxRepairAttempts
 	}
 	return DefaultMaxRepairAttempts
+}
+
+// repeatNudgeRounds / repeatAbortRounds are the effective repetition-rail
+// thresholds (mirror the stallLimit 0-⇒-default seam).
+func (l *Loop) repeatNudgeRounds() int {
+	if l.RepeatNudgeRounds > 0 {
+		return l.RepeatNudgeRounds
+	}
+	return DefaultRepeatNudgeRounds
+}
+
+func (l *Loop) repeatAbortRounds() int {
+	if l.RepeatAbortRounds > 0 {
+		return l.RepeatAbortRounds
+	}
+	return DefaultRepeatAbortRounds
 }
 
 // isRepairableEditFailure reports whether an edit failure is fixable by the model
@@ -220,6 +257,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		stall       int
 		stallSeeded bool
 		prevFp      string // workspace tree fingerprint from the previous turn
+
+		// Repetition rail state: the previous turn's tool-call signature, how many
+		// times it has repeated identically in a row, and whether the one-shot nudge
+		// for this streak has been emitted. Catches a model locked onto a single
+		// identical call (e.g. re-reading one empty file) — a read-only spin the
+		// edit/verify churn rails cannot see.
+		repeatKeyLast string
+		repeatStreak  int
+		repeatNudged  bool
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -433,6 +479,34 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// (ReasonAnswered) or a budget/churn rail fires.
 		if lastVerify.Passed && edited {
 			return finish(ReasonSuccess, nil, nil, nil)
+		}
+
+		// Repetition rail: a weak model can lock onto ONE identical tool call and
+		// fire it over and over (the canonical case: re-reading a single empty file,
+		// emitting the same prose each turn — see [[kloo-edit-silent-noop]] /
+		// [[kloo-churn-flail-gap]]). The repeated-failure/edit rails never see it: a
+		// read_file/list_dir leaves no edit signature and no verify change. So we
+		// track the call's normalised (name + args) signature; the FIRST time it has
+		// repeated repeatNudgeRounds times we inject one corrective observation (a
+		// chance to recover without losing the run), and if it keeps repeating to
+		// repeatAbortRounds we halt as churn. A distinct call resets the streak, so a
+		// progressing run — which never fires the same call twice running — is immune.
+		if key := repeatKey(call); key != "" {
+			if key == repeatKeyLast {
+				repeatStreak++
+			} else {
+				repeatKeyLast, repeatStreak, repeatNudged = key, 1, false
+			}
+			switch {
+			case repeatStreak >= l.repeatAbortRounds():
+				return finish(ReasonChurn, nil, nil, &ChurnEvidence{
+					Kind:     ChurnRepeatedCall,
+					Artifact: repeatArtifact(call, repeatStreak),
+				})
+			case repeatStreak >= l.repeatNudgeRounds() && !repeatNudged:
+				repeatNudged = true
+				convo = append(convo, repeatCorrective(call, repeatStreak))
+			}
 		}
 
 		// Stall backstop: a no-progress counter, ORTHOGONAL to MaxSteps. It engages
@@ -734,6 +808,56 @@ func editSignature(call tools.Call) string {
 	default:
 		return ""
 	}
+}
+
+// repeatKey is the normalised signature (tool name + args) the repetition rail
+// compares turn-to-turn: two calls collide only when they would do the SAME thing.
+// finish is excluded — it terminates the loop on its own and never repeats. Args
+// are JSON-encoded (encoding/json sorts map keys, so the bytes are stable across
+// turns) then run through normalizeChurn, so volatile bits (temp paths, durations,
+// hex) can't make two otherwise-identical calls look distinct.
+func repeatKey(call tools.Call) string {
+	if call.Name == "" || call.Name == tools.NameFinish {
+		return ""
+	}
+	raw, err := json.Marshal(call.Args)
+	if err != nil {
+		raw = fmt.Appendf(nil, "%v", call.Args)
+	}
+	return call.Name + "\x00" + normalizeChurn(string(raw))
+}
+
+// repeatArtifact is the short "what was repeated ×N" line shown in the churn
+// report when the repetition rail halts a run.
+func repeatArtifact(call tools.Call, n int) string {
+	target := str(call.Args["path"])
+	if target == "" {
+		target = str(call.Args["command"])
+	}
+	if target != "" {
+		return fmt.Sprintf("%s %s (×%d)", call.Name, firstLine(target), n)
+	}
+	return fmt.Sprintf("%s (×%d)", call.Name, n)
+}
+
+// repeatCorrective is the one-shot nudge injected the first time a call repeats
+// repeatNudgeRounds times: it names the stuck call and points at the usual escape
+// (an empty file needs write_file, not another read), so a weak model can break
+// the loop instead of riding it to the abort threshold.
+func repeatCorrective(call tools.Call, n int) llm.Message {
+	target := str(call.Args["path"])
+	var b strings.Builder
+	fmt.Fprintf(&b, "STOP — you have called %s", call.Name)
+	if target != "" {
+		fmt.Fprintf(&b, " on %s", target)
+	}
+	fmt.Fprintf(&b, " %d times in a row with the SAME arguments, and nothing changed. Repeating it will not help.\n", n)
+	b.WriteString("Take a DIFFERENT action now:\n")
+	if call.Name == tools.NameReadFile {
+		b.WriteString("- If that file is empty or missing, create its contents with write_file — do NOT read it again.\n")
+	}
+	b.WriteString("- Otherwise make the change the task actually needs, or call finish if the work is already done.\n")
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
 }
 
 // failingOutput returns the combined output to compare for churn, or "" if the
