@@ -50,3 +50,27 @@ func TestStripToolMarkup(t *testing.T) {
 		}
 	}
 }
+
+// TestParseDiffEditsBareMarkers: a BARE (unfenced) SEARCH/REPLACE block — what
+// small models emit, and what the edit_file tool applies via ParseFlexible — must
+// parse into clean pairs so the card renders a minimal diff, NOT the raw block
+// (markers and all) dumped as red lines.
+func TestParseDiffEditsBareMarkers(t *testing.T) {
+	diff := "<<<<<<< SEARCH\n  <ion-label>Tab 1</ion-label>\n=======\n  <ion-label>Home</ion-label>\n>>>>>>> REPLACE\n"
+	pairs := parseDiffEdits("tabs.page.html", diff)
+	if len(pairs) != 1 {
+		t.Fatalf("want 1 parsed pair, got %d: %+v", len(pairs), pairs)
+	}
+	if !strings.Contains(pairs[0].search, "Tab 1") || strings.Contains(pairs[0].search, "<<<<<<<") {
+		t.Errorf("search not cleanly parsed (raw markers leaked): %q", pairs[0].search)
+	}
+	if !strings.Contains(pairs[0].replace, "Home") {
+		t.Errorf("replace not parsed: %q", pairs[0].replace)
+	}
+	j := strings.Join(hunkLines(pairs[0]), "\n")
+	for _, bad := range []string{"SEARCH", "REPLACE", "======="} {
+		if strings.Contains(j, bad) {
+			t.Errorf("raw marker %q leaked into the rendered diff:\n%s", bad, j)
+		}
+	}
+}
