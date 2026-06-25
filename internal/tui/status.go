@@ -58,6 +58,10 @@ func (m Model) handleProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 	if msg.MaxTokens > 0 {
 		m.status.maxTokens = msg.MaxTokens
 	}
+	// A new step begins with the model call — clear the previous tool's in-flight
+	// phrase so the thinking line shows "thinking" (not a stale "running <cmd>" from
+	// a command that already finished) while the model is being called.
+	m.activity = ""
 	return m, nil
 }
 
