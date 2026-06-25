@@ -32,3 +32,32 @@ func TestParseFlexible(t *testing.T) {
 		t.Errorf("unterminated bare block should be ErrMalformedBlock, got %v", err)
 	}
 }
+
+// TestParseFlexibleReplaceAsDivider: a weak model (e.g. gpt-oss) omits the
+// "=======" divider and writes ">>>>>>> REPLACE" in its place, then the replace
+// body with no closing marker. The lenient parser recovers it (treats REPLACE as
+// the divider) so the edit applies instead of failing as malformed.
+func TestParseFlexibleReplaceAsDivider(t *testing.T) {
+	// SEARCH / (no =======) / >>>>>>> REPLACE used as divider / replace body, no close.
+	in := "<<<<<<< SEARCH\nold line 1\nold line 2\n>>>>>>> REPLACE\nnew line 1\nnew line 2\n"
+	blocks, err := ParseFlexible(in)
+	if err != nil {
+		t.Fatalf("expected lenient recovery, got error: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	if blocks[0].Search != "old line 1\nold line 2\n" {
+		t.Errorf("Search = %q", blocks[0].Search)
+	}
+	if blocks[0].Replace != "new line 1\nnew line 2\n" {
+		t.Errorf("Replace = %q (trailing newline should not double)", blocks[0].Replace)
+	}
+
+	// A well-formed block (======= present) is UNCHANGED by the leniency.
+	ok := "<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE"
+	b, err := ParseFlexible(ok)
+	if err != nil || len(b) != 1 || b[0].Search != "foo\n" || b[0].Replace != "bar\n" {
+		t.Errorf("well-formed block changed by leniency: %+v err=%v", b, err)
+	}
+}
