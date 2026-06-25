@@ -21,7 +21,20 @@ const (
 	hotBudgetFrac      = 0.35 // pin-hot set + recent tail cap
 	maxKeepItemTokens  = 256  // per-item verbatim cap; a larger kept item is truncated-with-marker
 	ceilSlack          = 4    // tokens reserved when truncating, to absorb ApproxTokens rounding so the hard ceiling holds strictly
+	// usableWindowFrac budgets the PROMPT to a fraction of the model's context
+	// window (maxContextTokens), reserving the rest for: the COMPLETION (n_ctx holds
+	// prompt + output), the tool/function schemas added to each request (not counted
+	// in the message budget), and ApproxTokens slack (chars/4 undercounts dense
+	// code/markup). Without it, a prompt budgeted to the full window overflowed
+	// n_ctx — a real 33570-token prompt on a 32768 server returned a 400.
+	usableWindowFrac = 0.80
 )
+
+// usableWindow is the prompt-token budget for a model whose context window is
+// `window` (maxContextTokens): a fraction of it, leaving headroom for the output,
+// the request's tool schemas, and estimation slack so the real request stays under
+// the server's n_ctx.
+func usableWindow(window int) int { return int(float64(window) * usableWindowFrac) }
 
 // mapBudgetTokens is the repo-map token budget when working memory is engaged —
 // a fraction of the window, so the map can no longer consume the whole context.

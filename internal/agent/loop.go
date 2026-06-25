@@ -491,9 +491,16 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// Repo-map budget: the legacy path keeps the full window (byte-identical to
 	// pre-P00); the memory path caps it at mapBudgetTokens so the map can no
 	// longer eat the whole window (the Lead-1 fix — gated behind Memory != nil).
+	// win is the prompt-token budget. The memory path reserves headroom below the
+	// model's context window (usableWindow) for the output + tool schemas +
+	// estimation slack, so the assembled request stays under the server's n_ctx
+	// (a full-window prompt overflowed it → 400). The legacy path keeps the full
+	// window (byte-identical to pre-P00).
+	win := l.ContextTokens
 	mapBudget := l.ContextTokens
 	if l.Memory != nil {
-		mapBudget = mapBudgetTokens(l.ContextTokens)
+		win = usableWindow(l.ContextTokens)
+		mapBudget = mapBudgetTokens(win)
 	}
 	sys := llm.Message{Role: llm.RoleSystem, Content: l.systemWithContext(task, mapBudget)}
 
@@ -508,7 +515,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			LastVerify:   lastVerify,
 			EditPath:     curEditPath,
 			FreshFile:    l.reread(curEditPath),
-			WindowTokens: l.ContextTokens,
+			WindowTokens: win,
 			SystemTokens: repomap.ApproxTokens(sys.Content),
 			MapBudget:    mapBudget,
 		})
