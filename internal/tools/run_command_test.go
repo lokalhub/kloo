@@ -158,3 +158,21 @@ func TestRunCommandEmptyCommand(t *testing.T) {
 		t.Errorf("want ErrEmptyCommand, got %v", err)
 	}
 }
+
+// TestRunCommandNonInteractiveEnv: build/test commands run with CI=true (+ friends)
+// so a tool's consent/credential PROMPT (Angular analytics, git creds) can't hang
+// the loop — kloo has no TTY, so a prompt would otherwise block until the timeout.
+func TestRunCommandNonInteractiveEnv(t *testing.T) {
+	skipIfNoSh(t)
+	ws, _ := wsAt(t)
+	res, err := NewRunCommandTool(ws).Invoke(context.Background(), Call{Name: NameRunCommand,
+		Args: map[string]any{"command": `echo "CI=$CI GTP=$GIT_TERMINAL_PROMPT NG=$NG_CLI_ANALYTICS"`}})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	for _, want := range []string{"CI=true", "GTP=0", "NG=false"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("non-interactive env missing %q, got %q", want, strings.TrimSpace(res.Output))
+		}
+	}
+}
