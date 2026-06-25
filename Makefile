@@ -5,6 +5,16 @@ GO        ?= go
 CGO_ENABLED ?= 0
 BIN       := bin/kloo
 
+# Version stamp for `make binary` so `kloo --version` reports a real build. Local
+# builds always carry a "-dev" suffix (e.g. "v0.9.2-dev") so they're never mistaken
+# for a release — the exact commit/date sit in the parens. Release binaries are
+# stamped by goreleaser with the bare tag (no "-dev").
+VERSION   ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)-dev
+COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE      ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+VPKG      := github.com/lokalhub/kloo/internal/cli
+LDFLAGS   := -X $(VPKG).version=$(VERSION) -X $(VPKG).commit=$(COMMIT) -X $(VPKG).date=$(DATE)
+
 .PHONY: build binary run test vet fmt fmtcheck lint tidy check clean bench-assert
 
 # Plain `make` builds the runnable binary (./bin/kloo) — the intuitive default.
@@ -15,9 +25,9 @@ BIN       := bin/kloo
 build:
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build ./...
 
-# Build the runnable binary.
+# Build the runnable binary (version-stamped so `kloo --version` works).
 binary:
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o $(BIN) .
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN) .
 
 # Run kloo, forwarding args:  make run ARGS='--model snappy "say hi"'
 run:

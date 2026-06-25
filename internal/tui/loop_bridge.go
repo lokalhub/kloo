@@ -386,8 +386,14 @@ func pathSummary(call tools.Call, output, unit, units string) string {
 // is prefixed as the engine's filename line (as the edit_file tool itself does),
 // covering multi-block and empty-SEARCH (new-file) cases. A malformed/unparsable
 // diff degrades to showing the raw text as a single removed block.
+//
+// Uses ParseFlexible (NOT strict Parse) — the SAME parser the edit_file tool uses
+// to APPLY the edit. Small models often emit BARE (unfenced) SEARCH/REPLACE blocks;
+// strict Parse rejected those, so the card fell back to dumping the whole raw block
+// (markers and all) as red `-` lines while the edit still applied. Matching the
+// apply parser keeps the card's diff in sync with what actually lands.
 func parseDiffEdits(path, diff string) []editPair {
-	blocks, err := edit.Parse(path + "\n" + diff)
+	blocks, err := edit.ParseFlexible(path + "\n" + diff)
 	if err != nil || len(blocks) == 0 {
 		return []editPair{{search: diff}}
 	}
