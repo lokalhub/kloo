@@ -41,8 +41,8 @@ reads on demand with `read_file`, `list_dir`, and **`read_dir`** — the last bu
 reads a whole folder in one call (skip-aware, bounded), so a big-context model can
 ingest an area at once instead of many round-trips.
 
-If your repo has an **`AGENTS.md`** (or `CLAUDE.md`), kloo loads it into the system
-prompt and follows it every turn — checked in the launch directory *and* immediate
+If your repo has an **`AGENTS.md`**, kloo loads it into the system prompt and
+follows it every turn — checked in the launch directory *and* immediate
 subdirectories, so a project that lives in a subdir (`./myApp`) still has its rules
 applied.
 

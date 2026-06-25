@@ -16,13 +16,12 @@ var agentsSkipDirs = map[string]bool{
 	"target": true, "vendor": true, "www": true, ".angular": true,
 }
 
-// agentsInstructions reads project-level agent instructions and returns a
-// system-prompt section to append, or "" if none. It looks for AGENTS.md (the open
-// agent-instructions convention) — falling back to CLAUDE.md — in the launch
-// directory AND in each immediate subdirectory, so a project that lives in a subdir
-// (e.g. kloo run at a parent while the app is in ./myApp) still has its AGENTS.md
-// honoured. All found files are stacked (each labelled with its location), bounded,
-// and logged so the user knows what was applied.
+// agentsInstructions reads project-level agent instructions from AGENTS.md (the open
+// agent-instructions convention) and returns a system-prompt section to append, or
+// "" if none. It looks in the launch directory AND in each immediate subdirectory,
+// so a project that lives in a subdir (e.g. kloo run at a parent while the app is in
+// ./myApp) still has its AGENTS.md honoured. All found files are stacked (each
+// labelled with its location), bounded, and logged so the user knows what applied.
 func agentsInstructions(dir string, logf func(string, ...any)) string {
 	dirs := []string{dir} // the entered/launch directory first
 	if entries, err := os.ReadDir(dir); err == nil {
@@ -36,32 +35,29 @@ func agentsInstructions(dir string, logf func(string, ...any)) string {
 	var sections []string
 	used := 0
 	for _, d := range dirs {
-		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-			data, err := os.ReadFile(filepath.Join(d, name))
-			if err != nil {
-				continue
+		data, err := os.ReadFile(filepath.Join(d, "AGENTS.md"))
+		if err != nil {
+			continue
+		}
+		s := strings.TrimSpace(string(data))
+		if s == "" {
+			continue
+		}
+		rel, _ := filepath.Rel(dir, filepath.Join(d, "AGENTS.md"))
+		if rel == "" {
+			rel = "AGENTS.md"
+		}
+		if used+len(s) > maxAgentsBytes { // stay within the budget across all files
+			avail := maxAgentsBytes - used
+			if avail <= 0 {
+				break
 			}
-			s := strings.TrimSpace(string(data))
-			if s == "" {
-				continue
-			}
-			rel, _ := filepath.Rel(dir, filepath.Join(d, name))
-			if rel == "" {
-				rel = name
-			}
-			if used+len(s) > maxAgentsBytes { // stay within the budget across all files
-				if avail := maxAgentsBytes - used; avail > 0 {
-					s = s[:avail] + "\n…[truncated]"
-				} else {
-					break
-				}
-			}
-			used += len(s)
-			sections = append(sections, "## "+rel+"\n"+s)
-			if logf != nil {
-				logf("instructions: loaded %s — applied to every turn", rel)
-			}
-			break // one file per directory (AGENTS.md preferred over CLAUDE.md)
+			s = s[:avail] + "\n…[truncated]"
+		}
+		used += len(s)
+		sections = append(sections, "## "+rel+"\n"+s)
+		if logf != nil {
+			logf("instructions: loaded %s — applied to every turn", rel)
 		}
 	}
 
