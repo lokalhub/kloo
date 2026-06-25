@@ -141,19 +141,53 @@ func parseBare(s string) ([]Block, error) {
 		}
 		searchIdx := i
 
-		dividerIdx := -1
+		// Find the divider. Standard form: the first "=======" before any other
+		// marker. LENIENT recovery: a weak model (e.g. gpt-oss) routinely OMITS the
+		// "=======" and writes ">>>>>>> REPLACE" where the divider belongs, then the
+		// replace body with no closing marker. If we reach a ">>>>>>> REPLACE" with no
+		// "=======" seen, treat THAT as the divider — the two cases never collide
+		// because a well-formed block always has "=======" before its REPLACE.
+		dividerIdx, dividerIsReplace := -1, false
 		for j := searchIdx + 1; j < len(lines); j++ {
 			t := trim(lines[j])
 			if t == markerDivider {
 				dividerIdx = j
 				break
 			}
-			if t == markerReplace || t == markerSearch {
+			if t == markerReplace {
+				dividerIdx, dividerIsReplace = j, true
 				break
+			}
+			if t == markerSearch {
+				break // a new block opened before any divider → malformed
 			}
 		}
 		if dividerIdx == -1 {
 			return nil, fmt.Errorf("edit: SEARCH without a %q divider: %w", markerDivider, ErrMalformedBlock)
+		}
+
+		if dividerIsReplace {
+			// ">>>>>>> REPLACE" was used as the divider, so there is no closing
+			// marker: the replace body runs to the next SEARCH or EOF. Drop one
+			// trailing empty line (the diff arg's trailing newline) so the body
+			// matches the well-formed shape.
+			replaceEnd := len(lines)
+			for j := dividerIdx + 1; j < len(lines); j++ {
+				if trim(lines[j]) == markerSearch {
+					replaceEnd = j
+					break
+				}
+			}
+			rep := lines[dividerIdx+1 : replaceEnd]
+			if len(rep) > 0 && rep[len(rep)-1] == "" {
+				rep = rep[:len(rep)-1]
+			}
+			blocks = append(blocks, Block{
+				Search:  body(lines[searchIdx+1 : dividerIdx]),
+				Replace: body(rep),
+			})
+			i = replaceEnd
+			continue
 		}
 
 		replaceIdx := -1

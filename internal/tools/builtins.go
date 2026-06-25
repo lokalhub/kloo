@@ -108,7 +108,7 @@ func (t editFileTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
 			"path": {Type: "string", Description: "Workspace-relative path to edit."},
-			"diff": {Type: "string", Description: "A SEARCH/REPLACE block (the ``` fence is optional):\\n<<<<<<< SEARCH\\n<exact lines to find>\\n=======\\n<replacement lines>\\n>>>>>>> REPLACE"},
+			"diff": {Type: "string", Description: "A SEARCH/REPLACE block with ALL THREE marker lines, each on its own line, in this EXACT order — the ======= divider line between the two sections is REQUIRED (do not omit it or replace it with >>>>>>> REPLACE):\n<<<<<<< SEARCH\n<exact lines to find>\n=======\n<replacement lines>\n>>>>>>> REPLACE\nThe SEARCH text must match the file byte-for-byte. To create a new file, leave the SEARCH section empty. The ``` fence is optional."},
 		},
 		Required: []string{"path", "diff"},
 	}
