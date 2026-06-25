@@ -88,6 +88,9 @@ const (
 	// edits, so a read-only repeat (read_file/list_dir) is invisible to them; this
 	// rail covers that degenerate-repetition gap. See [[kloo-churn-flail-gap]].
 	ChurnRepeatedCall ChurnKind = "repeated-call"
+	// ChurnEditFailed: the model kept attempting edit_file edits that FAIL to apply
+	// (malformed/no-match) without ever landing a valid one — the edit↔read flail.
+	ChurnEditFailed ChurnKind = "edit-failed"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

@@ -103,6 +103,10 @@ type Loop struct {
 	ExploreNudgeRounds int
 	ExploreAbortRounds int
 
+	// EditFailLimit is how many consecutive failed edit_file attempts (no successful
+	// edit between) before the run halts as churn. 0 ⇒ DefaultEditFailLimit.
+	EditFailLimit int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -194,6 +198,15 @@ const (
 	DefaultExploreAbortRounds = 10
 )
 
+// DefaultEditFailLimit bounds the failed-edit rail: after this many CONSECUTIVE
+// edit_file attempts that fail to apply (malformed block, no-match, rejected) — with
+// no successful edit in between (reads don't reset it) — the run halts as churn. The
+// model can't produce a valid edit and is flailing (edit↔read), which no other rail
+// catches (the call/edit varies → not repetition; reads break the explore streak; no
+// verify signal in unverified mode). Past the repair-nudge budget (3) plus slack. See
+// [[kloo-churn-flail-gap]].
+const DefaultEditFailLimit = 5
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
@@ -251,6 +264,13 @@ func (l *Loop) exploreAbortRounds() int {
 		return l.ExploreAbortRounds
 	}
 	return DefaultExploreAbortRounds
+}
+
+func (l *Loop) editFailLimit() int {
+	if l.EditFailLimit > 0 {
+		return l.EditFailLimit
+	}
+	return DefaultEditFailLimit
 }
 
 // isRepairableEditFailure reports whether an edit failure is fixable by the model
@@ -341,6 +361,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// model that inspects+analyzes forever without acting.
 		exploreStreak int
 		exploreNudged bool
+
+		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
+		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
+		editFailStreak int
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -482,8 +506,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
 		}
-		if isEditTool(call.Name) && derr == nil {
-			edited = true // a real change landed this run
+		if isEditTool(call.Name) {
+			if derr == nil {
+				edited = true // a real change landed this run
+				editFailStreak = 0
+			} else {
+				// An edit that FAILED to apply (malformed block, no-match, rejected).
+				// Tracked across turns — reads in between don't reset it — so a model
+				// that alternates failing-edit ↔ read without ever landing a valid edit
+				// (the churn-flail-gap) is caught even though no single rail's signal
+				// (identical call / read-only spin / repeated verify) fires.
+				editFailStreak++
+			}
 		}
 
 		// Repair enrichment: on a no-match/ambiguous edit_file failure under the
@@ -579,6 +613,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// (ReasonAnswered) or a budget/churn rail fires.
 		if lastVerify.Passed && edited {
 			return finish(ReasonSuccess, nil, nil, nil)
+		}
+
+		// Failed-edit rail: the model keeps attempting edits that fail to apply (malformed
+		// block, no-match) and re-reading between tries, never landing a valid edit — the
+		// edit↔read flail that slips past the repetition/explore/churn rails. Halt it.
+		if editFailStreak >= l.editFailLimit() {
+			art := "edit_file kept failing to apply"
+			if curEditPath != "" {
+				art += " on " + curEditPath
+			}
+			art += fmt.Sprintf(" (%d attempts, no valid edit landed)", editFailStreak)
+			return finish(ReasonChurn, nil, nil, &ChurnEvidence{Kind: ChurnEditFailed, Artifact: art})
 		}
 
 		// Repetition rail: a weak model can lock onto ONE identical tool call and

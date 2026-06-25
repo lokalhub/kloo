@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -326,5 +327,36 @@ func TestIntegrationMalformedEditNudgeRecovers(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
 		t.Errorf("after recovery, answer.txt = %q, want \"right\\n\"", got)
+	}
+}
+
+// 9) failed-edit flail: the model alternates a MALFORMED edit (distinct each time →
+// not repeated-edit churn) with a read (breaks the explore streak) and never lands a
+// valid edit. Only the failed-edit rail catches this — it halts as ChurnEditFailed
+// instead of looping to the step ceiling.
+func TestIntegrationFailedEditFlailHalts(t *testing.T) {
+	root := seedRepo(t)
+	var mocks []llmtest.Mock
+	for i := 0; i < 8; i++ {
+		// Missing >>>>>>> REPLACE terminator → ErrMalformedBlock; vN makes each distinct.
+		diff := fmt.Sprintf("<<<<<<< SEARCH\nwrong v%d\n=======\nright\n", i)
+		mocks = append(mocks,
+			llmtest.Mock{Body: toolResp(t, 5, tcSpec{"edit_file", map[string]any{"path": "answer.txt", "diff": diff}})},
+			llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "answer.txt"}})},
+		)
+	}
+	srv := llmtest.Sequence(t, mocks...)
+	cfg := config.Config{MaxSteps: 100, ChurnRounds: 20} // churn high so ONLY the edit-fail rail can fire
+	loop := buildLoop(t, root, srv, cfg)
+
+	rep, err := loop.Run(context.Background(), "convert the inline styles (a malformed edit it keeps botching)")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonChurn || rep.Churn == nil || rep.Churn.Kind != ChurnEditFailed {
+		t.Fatalf("want ChurnEditFailed, got reason=%q churn=%+v (%s)", rep.Reason, rep.Churn, rep.String())
+	}
+	if rep.Steps > 12 { // ~5 failed edits + the reads between, not the step ceiling
+		t.Errorf("steps=%d, expected to halt promptly (~10), not spin", rep.Steps)
 	}
 }
