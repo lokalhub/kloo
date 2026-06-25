@@ -19,15 +19,15 @@ func saveSession(t *testing.T, st *session.Store, id, title string, updated time
 
 func TestChooseSessionNoneStartsFresh(t *testing.T) {
 	st := session.NewStore(t.TempDir())
-	sess, banner, err := chooseSession(st, config.Config{Model: "m"}, "v", SessionOpts{}, ts())
+	sess, banner, err := chooseSession(st, config.Config{Model: "m"}, "v", "lc", SessionOpts{}, ts())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if banner != "" || sess.Runs != 0 {
 		t.Errorf("empty workspace should start fresh (no banner), got banner=%q runs=%d", banner, sess.Runs)
 	}
-	if sess.Model != "m" || sess.Verify != "v" {
-		t.Errorf("fresh session didn't carry model/verify: %+v", sess)
+	if sess.Model != "m" || sess.Verify != "v" || sess.Lint != "lc" {
+		t.Errorf("fresh session didn't carry model/verify/lint: %+v", sess)
 	}
 }
 
@@ -36,7 +36,7 @@ func TestChooseSessionNoneStartsFresh(t *testing.T) {
 func TestChooseSessionDefaultStartsFreshDespiteSaved(t *testing.T) {
 	st := session.NewStore(t.TempDir())
 	saveSession(t, st, "20260622-120000", "rework tabs", ts())
-	sess, banner, err := chooseSession(st, config.Config{}, "v", SessionOpts{}, ts())
+	sess, banner, err := chooseSession(st, config.Config{}, "v", "lc", SessionOpts{}, ts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestChooseSessionDefaultStartsFreshDespiteSaved(t *testing.T) {
 func TestChooseSessionNewFlagForcesFresh(t *testing.T) {
 	st := session.NewStore(t.TempDir())
 	saveSession(t, st, "20260622-120000", "old", ts())
-	sess, banner, err := chooseSession(st, config.Config{}, "v", SessionOpts{New: true}, ts())
+	sess, banner, err := chooseSession(st, config.Config{}, "v", "lc", SessionOpts{New: true}, ts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestChooseSessionResumeIDLoadsSpecific(t *testing.T) {
 	st := session.NewStore(t.TempDir())
 	saveSession(t, st, "20260622-120000", "a", ts())
 	saveSession(t, st, "20260622-130000", "b", ts().Add(time.Hour))
-	sess, _, err := chooseSession(st, config.Config{}, "v", SessionOpts{ResumeID: "20260622-120000"}, ts())
+	sess, _, err := chooseSession(st, config.Config{}, "v", "lc", SessionOpts{ResumeID: "20260622-120000"}, ts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestChooseSessionResumeIDLoadsSpecific(t *testing.T) {
 
 func TestChooseSessionResumeUnknownErrors(t *testing.T) {
 	st := session.NewStore(t.TempDir())
-	if _, _, err := chooseSession(st, config.Config{}, "v", SessionOpts{ResumeID: "nope"}, ts()); err == nil {
+	if _, _, err := chooseSession(st, config.Config{}, "v", "lc", SessionOpts{ResumeID: "nope"}, ts()); err == nil {
 		t.Error("resuming an unknown id should error")
 	}
 }

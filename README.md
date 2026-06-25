@@ -115,6 +115,8 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
+| `--lint` | _(auto-detected)_ | Override the fast **advisory** lint command run on edited files after each edit (see below); auto-detected from the project when unset. |
+| `--no-lint` | `false` | Disable the fast advisory lint step (lint is on by default when a linter is detected). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
 | `--new` | `false` | Start a fresh session (the default; saved sessions are no longer auto-resumed). |
 | `--resume` | _(unset)_ | Resume a specific saved session by id (printed on exit; see `{workspace}/.kloo/sessions`). |
@@ -129,8 +131,26 @@ profile** — your profile/env/flags always win, and unknown models are unchange
 `toolFormat` also accepts `"auto"` (a safe alias for unset/auto-select).
 Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
-`OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `NO_COLOR` disables
-all TUI colour (see below).
+`OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `KLOO_LINT=<cmd>`
+overrides the advisory lint command and `KLOO_NO_LINT=1` disables it; `NO_COLOR`
+disables all TUI colour (see below).
+
+### Fast advisory lint
+
+After each successful edit, kloo runs a **fast, auto-detected lint on the file(s)
+you just edited** and feeds the output back to the model as a hint, so it can fix
+obvious syntax/style mistakes on the next turn — a separate, quick signal from the
+slower build/test **verify** gate (mirrors aider's lint-after-edit).
+
+- **Advisory, not a gate.** Lint never decides success: a run still succeeds only
+  on a green **verify** plus an edit, and lint output is never fed to the
+  churn detector, so it can't stall a progressing run.
+- **Auto-detected per project:** Go → `gofmt -l`; TypeScript → `tsc --noEmit`;
+  JavaScript → `eslint`; Python → `ruff check` (else `flake8`). None detected ⇒ no
+  lint step.
+- **Configurable:** `--lint "<cmd>"` (or `KLOO_LINT`) overrides the detected
+  command; `--no-lint` (or `KLOO_NO_LINT=1`) opts out. The resolved mode is logged
+  once at startup. A repo with no linter, or `--no-lint`, behaves exactly as before.
 
 Effort tiers seed the loop budgets in one switch (the model is independent).
 **Churn detection is the primary "stop when stuck" guard**; tokens are unbounded

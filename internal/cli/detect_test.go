@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 func writeFile(t *testing.T, dir, name, body string) {
@@ -91,6 +95,54 @@ func TestResolveLintCommand(t *testing.T) {
 	}
 	if cmd, _ := resolveLintCommand("", false, t.TempDir(), quiet); cmd != "" {
 		t.Errorf("unrecognised project should be silent, got %q", cmd)
+	}
+}
+
+// TestBuildLinter: an empty command yields a nil Linter (loop skips the lint step,
+// off-by-default-safe); a non-empty command yields a real CommandLinter. The nil
+// must be an untyped-nil interface so the loop's `Linter != nil` guard is false.
+func TestBuildLinter(t *testing.T) {
+	ws, err := tools.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := buildLinter(ws, "", true); l != nil {
+		t.Errorf("empty lint command should yield a nil Linter, got %T", l)
+	}
+	if l := buildLinter(ws, "   ", false); l != nil {
+		t.Errorf("blank lint command should yield a nil Linter, got %T", l)
+	}
+	if l := buildLinter(ws, "gofmt -l", true); l == nil {
+		t.Errorf("a real lint command should yield a non-nil Linter")
+	}
+}
+
+// TestResolveLintCommandLogsMode: the resolver prints exactly the four §3.5 / S1
+// lint-mode lines (the Product-lens comparison target, artifacts/lint-log-lines.txt).
+func TestResolveLintCommandLogsMode(t *testing.T) {
+	goDir := t.TempDir()
+	writeFile(t, goDir, "go.mod", "module x\n")
+
+	cases := []struct {
+		name     string
+		explicit string
+		disabled bool
+		dir      string
+		wantLine string
+	}{
+		{"disabled", "", true, goDir, `lint: disabled (--no-lint)`},
+		{"explicit", "golangci-lint run --fast", false, goDir, `lint: using --lint "golangci-lint run --fast"`},
+		{"detected", "", false, goDir, `lint: auto-detected "gofmt -l" (override with --lint, disable with --no-lint)`},
+		{"none", "", false, t.TempDir(), `lint: no linter detected — skipping (no lint feedback)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			resolveLintCommand(tc.explicit, tc.disabled, tc.dir, writerLogf(&buf))
+			if got := strings.TrimRight(buf.String(), "\n"); got != tc.wantLine {
+				t.Errorf("log line = %q, want %q", got, tc.wantLine)
+			}
+		})
 	}
 }
 

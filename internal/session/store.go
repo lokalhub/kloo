@@ -21,10 +21,14 @@ import (
 
 // Session is one persisted conversation plus the metadata to list/resume it.
 type Session struct {
-	ID      string    `json:"id"`
-	Title   string    `json:"title"`
-	Model   string    `json:"model"`
-	Verify  string    `json:"verify"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Model  string `json:"model"`
+	Verify string `json:"verify"`
+	// Lint is the resolved fast advisory lint command for this session, persisted
+	// for resume parity beside Verify. omitempty ⇒ pre-existing session JSON without
+	// a "lint" key loads unchanged (back-compat).
+	Lint    string    `json:"lint,omitempty"`
 	Runs    int       `json:"runs"` // completed runs (submissions) — the friendly "N runs" count
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`

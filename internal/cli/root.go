@@ -82,13 +82,14 @@ type Deps struct {
 	NewClient func(cfg config.Config) llm.LLMClient
 	// LaunchTUI starts the interactive TUI session (the autonomous loop wired
 	// under the Bubble Tea UI). sess carries the user's session choice (--new /
-	// --resume). Injected so tests stay offline.
-	LaunchTUI func(cfg config.Config, verifyCmd string, sess SessionOpts) error
+	// --resume); lint carries the fast-advisory-lint config (--lint/--no-lint +
+	// env). Injected so tests stay offline.
+	LaunchTUI func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error
 	// RunHeadless runs the autonomous loop NON-interactively (no TTY), streaming
 	// progress to out and returning the loop's terminal report. Used for the
-	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. Injected
-	// so tests stay offline.
-	RunHeadless func(cfg config.Config, task, verifyCmd string, out io.Writer) error
+	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. lint carries
+	// the fast-advisory-lint config. Injected so tests stay offline.
+	RunHeadless func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error
 	// Getenv looks up env vars (defaults to os.Getenv).
 	Getenv func(string) string
 	Out    io.Writer
@@ -189,11 +190,10 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				return err
 			}
 
-			// Parse the fast-advisory-lint knobs in the real command path so the
-			// flags are honoured and env-resolved here. Phase 02 threads lopts into
-			// LaunchTUI/RunHeadless and resolves it to a command; for this phase the
-			// loop is not yet lint-aware, so the resolved value is intentionally unused.
-			_ = lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
+			// Fast-advisory-lint knobs (--lint/--no-lint + KLOO_LINT/KLOO_NO_LINT),
+			// threaded into the entry points alongside verifyCmd; resolved to a
+			// command (or nil linter) downstream in defaultLaunchTUI/defaultRunHeadless.
+			lopts := lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
 
 			if len(args) == 0 {
 				if flagHeadless {
@@ -201,14 +201,14 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
-				return deps.LaunchTUI(cfg, flagVerify, SessionOpts{New: flagNewSess, ResumeID: flagResume})
+				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume})
 			}
 
 			if flagHeadless {
 				// A task argument + --headless → run the autonomous loop
 				// non-interactively (no TTY), streaming progress to stdout. This is
 				// the acceptance-benchmark / scripted-CI path.
-				return deps.RunHeadless(cfg, args[0], flagVerify, deps.Out)
+				return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
 			}
 
 			// A task argument → the non-interactive one-shot stream (scripting /

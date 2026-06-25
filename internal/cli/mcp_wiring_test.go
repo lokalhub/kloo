@@ -91,10 +91,13 @@ func TestNoMCPFlagAndEnvPrecedence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotDisabled bool
 			deps := Deps{
-				Getenv:    func(k string) string { return tc.env[k] },
-				LaunchTUI: func(cfg config.Config, _ string, _ SessionOpts) error { gotDisabled = cfg.MCPDisabled; return nil },
-				Out:       io.Discard,
-				Err:       io.Discard,
+				Getenv: func(k string) string { return tc.env[k] },
+				LaunchTUI: func(cfg config.Config, _ string, _ lintOpts, _ SessionOpts) error {
+					gotDisabled = cfg.MCPDisabled
+					return nil
+				},
+				Out: io.Discard,
+				Err: io.Discard,
 			}
 			cmd := NewRootCmd(deps)
 			cmd.SetArgs(append([]string{"--profile", noProfile}, tc.args...))
@@ -134,7 +137,7 @@ func TestHeadlessWiresMCPNonFatal(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", &out); err != nil {
+	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", lintOpts{}, &out); err != nil {
 		t.Fatalf("non-fatal MCP: headless run should still succeed: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -167,7 +170,7 @@ func TestHeadlessMCPDisabledNoLines(t *testing.T) {
 		MCPServers:  map[string]config.MCPServerEntry{"bad": {Command: "kloo-nope"}},
 	}
 	var out strings.Builder
-	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", &out); err != nil {
+	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", lintOpts{}, &out); err != nil {
 		t.Fatalf("run: %v\n%s", err, out.String())
 	}
 	if strings.Contains(out.String(), "mcp ·") {

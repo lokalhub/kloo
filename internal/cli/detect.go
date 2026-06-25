@@ -21,6 +21,18 @@ func buildVerifier(ws tools.Workspace, command string, opts ...agent.VerifyOptio
 	return agent.NewCommandVerifier(ws, command, opts...)
 }
 
+// buildLinter returns the loop's fast advisory Linter for command, or a nil Linter
+// when command is empty — which the loop reads as "no lint step" (byte-identical to
+// pre-lint behaviour). perFile (from resolveLintCommand) decides whether the edited
+// path is appended; the short lintTimeout default in NewCommandLinter applies.
+// Mirrors buildVerifier, but advisory: lint never gates success.
+func buildLinter(ws tools.Workspace, command string, perFile bool, opts ...agent.LintOption) agent.Linter {
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+	return agent.NewCommandLinter(ws, command, perFile, opts...)
+}
+
 // resolveVerifyCommand decides the verify command for a run. The explicit value
 // (from the deprecated --verify flag) wins when set; otherwise kloo auto-detects
 // the project's canonical build/test command (project awareness). When nothing is

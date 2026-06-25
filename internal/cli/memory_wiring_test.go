@@ -56,7 +56,7 @@ func TestHeadlessRunSurfacesTokensAndOmitsCompactionsWhenZero(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", &out); err != nil {
+	if err := defaultRunHeadless(cfg, "make the check pass", "grep -qx right answer.txt", lintOpts{}, &out); err != nil {
 		t.Fatalf("headless run did not succeed: %v\n%s", err, out.String())
 	}
 	got := out.String()
