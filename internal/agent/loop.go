@@ -97,6 +97,12 @@ type Loop struct {
 	RepeatNudgeRounds int
 	RepeatAbortRounds int
 
+	// ExploreNudgeRounds / ExploreAbortRounds tune the exploration rail: how many
+	// CONSECUTIVE read-only turns (read_file/list_dir, no edit/run_command) before
+	// the loop nudges the model to act, then stops the run. 0 ⇒ the package defaults.
+	ExploreNudgeRounds int
+	ExploreAbortRounds int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -175,9 +181,27 @@ const (
 	DefaultRepeatAbortRounds = 6
 )
 
+// DefaultExploreNudgeRounds / DefaultExploreAbortRounds bound the exploration rail:
+// after this many CONSECUTIVE read-only turns (read_file/list_dir, no edit / write
+// / run_command) the model is inspecting without acting — a weak model (e.g. a 2B
+// ollama model) gets stuck analyzing and asking questions instead of editing, and
+// no other rail catches it (different files each turn ⇒ not repetition; no verify
+// change ⇒ not stall; no edit/failure ⇒ not churn). After the nudge it is told to
+// act or ask-and-stop; after the abort the run stops (ReasonAnswered) so the human
+// can step in. Generous so a legitimate read-many-then-edit run is never cut off.
+const (
+	DefaultExploreNudgeRounds = 6
+	DefaultExploreAbortRounds = 10
+)
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
+}
+
+// isReadOnlyTool reports whether a tool only inspects (no mutation, no shell).
+func isReadOnlyTool(name string) bool {
+	return name == tools.NameReadFile || name == tools.NameListDir
 }
 
 // stallLimit is the effective stall backstop threshold.
@@ -211,6 +235,22 @@ func (l *Loop) repeatAbortRounds() int {
 		return l.RepeatAbortRounds
 	}
 	return DefaultRepeatAbortRounds
+}
+
+// exploreNudgeRounds / exploreAbortRounds are the effective exploration-rail
+// thresholds (mirror the stallLimit 0-⇒-default seam).
+func (l *Loop) exploreNudgeRounds() int {
+	if l.ExploreNudgeRounds > 0 {
+		return l.ExploreNudgeRounds
+	}
+	return DefaultExploreNudgeRounds
+}
+
+func (l *Loop) exploreAbortRounds() int {
+	if l.ExploreAbortRounds > 0 {
+		return l.ExploreAbortRounds
+	}
+	return DefaultExploreAbortRounds
 }
 
 // isRepairableEditFailure reports whether an edit failure is fixable by the model
@@ -295,6 +335,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		repeatKeyLast string
 		repeatStreak  int
 		repeatNudged  bool
+
+		// Exploration rail state: consecutive read-only turns (read_file/list_dir) with
+		// no edit/run_command, and whether the one-shot nudge fired. Catches a weak
+		// model that inspects+analyzes forever without acting.
+		exploreStreak int
+		exploreNudged bool
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -561,6 +607,26 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				repeatNudged = true
 				convo = append(convo, repeatCorrective(call, repeatStreak))
 			}
+		}
+
+		// Exploration rail: a weak model (e.g. a 2B ollama model) inspects file after
+		// file, narrating analysis and asking the user questions, but never edits — and
+		// because it reads a DIFFERENT file each turn (not repetition), with no verify
+		// change (not stall) and no edit/failure (not churn), nothing else stops it; it
+		// spins to the step ceiling. Count consecutive READ-ONLY turns (any edit / write
+		// / run_command resets it): nudge once to act-or-ask, then stop the run
+		// (ReasonAnswered) so the human can step in.
+		if isReadOnlyTool(call.Name) {
+			exploreStreak++
+		} else {
+			exploreStreak, exploreNudged = 0, false
+		}
+		switch {
+		case exploreStreak >= l.exploreAbortRounds():
+			return finish(ReasonAnswered, nil, nil, nil)
+		case exploreStreak >= l.exploreNudgeRounds() && !exploreNudged:
+			exploreNudged = true
+			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
 		// Stall backstop: a no-progress counter, ORTHOGONAL to MaxSteps. It engages
@@ -912,6 +978,18 @@ func repeatCorrective(call tools.Call, n int) llm.Message {
 	}
 	b.WriteString("- Otherwise make the change the task actually needs, or call finish if the work is already done.\n")
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// exploreCorrective is the one-shot nudge when the model has inspected files for
+// exploreNudgeRounds turns without making any change — it has enough context;
+// it should ACT, or ask the user a single short question and stop (no tool call →
+// a calm answered stop) rather than keep reading.
+func exploreCorrective(n int) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"You have inspected %d files in a row without making any change. You have enough "+
+			"context now — STOP reading and ACT: make the edit the task requires (edit_file/"+
+			"write_file) or run the needed command. If you genuinely need the user to clarify "+
+			"something, reply with ONE short question and NO tool call so they can answer.", n)}
 }
 
 // failingOutput returns the combined output to compare for churn, or "" if the

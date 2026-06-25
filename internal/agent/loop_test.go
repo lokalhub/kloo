@@ -420,9 +420,10 @@ func TestLoopBoundsConversationHistory(t *testing.T) {
 	)
 	const maxConv = 6
 	loop.MaxConversation = maxConv
-	// This test repeats ONE identical read to drive a 12-step run; disable the
-	// repetition rail (off the default 6) so it doesn't pre-empt the step budget.
+	// This test repeats reads to drive a 12-step run; disable the repetition AND
+	// exploration rails (off their defaults) so neither pre-empts the step budget.
 	loop.RepeatNudgeRounds, loop.RepeatAbortRounds = 1000, 1000
+	loop.ExploreNudgeRounds, loop.ExploreAbortRounds = 1000, 1000
 
 	rep, _ := loop.Run(context.Background(), "look around for a long time")
 	if rep.Reason != ReasonBudgetExceeded {
