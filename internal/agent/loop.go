@@ -155,11 +155,12 @@ const (
 	DefaultRetryBaseDelay = 2 * time.Second
 )
 
-// DefaultMaxRepairAttempts is the per-target repair-enrichment cap when
-// MaxRepairAttempts is unset. Two enriched observations give the model the file's
-// real contents twice (once per close-but-wrong SEARCH); past that, the bare error
-// returns and the churn/budget rails terminate the run.
-const DefaultMaxRepairAttempts = 2
+// DefaultMaxRepairAttempts is the per-target edit-repair cap when MaxRepairAttempts
+// is unset: up to this many CORRECTIVE observations per edit target (file contents
+// for a no-match, or the grammar nudge for a malformed block) before the bare error
+// returns and the churn/budget rails take over. Three gives a weak/reasoner model a
+// real chance to recover its SEARCH or its block format instead of giving up.
+const DefaultMaxRepairAttempts = 3
 
 // DefaultRepeatNudgeRounds / DefaultRepeatAbortRounds bound the repetition rail:
 // after a model fires the IDENTICAL tool call (name + args) this many times in a
@@ -452,6 +453,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			switch {
 			case derr == nil:
 				delete(repairAttempts, path) // a clean apply clears this target's repair budget
+			case errors.Is(derr, edit.ErrMalformedBlock) && repairAttempts[path] < l.repairLimit():
+				// Malformed block SHAPE (bad/duplicated/missing markers): nudge with the
+				// exact grammar so the model retries with a correct call instead of
+				// apologizing and stopping (the gpt-oss failure mode).
+				obs = buildMalformedCorrection(path)
+				repairAttempts[path]++
 			case isRepairableEditFailure(derr) && repairAttempts[path] < l.repairLimit():
 				if rep, okRep := buildRepairObservation(l.Root, path, str(call.Args["diff"])); okRep {
 					obs = rep

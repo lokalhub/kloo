@@ -297,3 +297,34 @@ func TestIntegrationRepairBounded(t *testing.T) {
 		t.Errorf("a non-success terminal after an edit attempt should roll back")
 	}
 }
+
+// 8) malformed-edit recovery: a structurally malformed edit (gpt-oss's failure —
+// duplicated SEARCH markers) gets a FORMAT-correction nudge, and the model uses it
+// to retry with a valid block that applies and turns the check green. Proves kloo
+// COACHES a weak/reasoner model through a bad edit format instead of letting it
+// fail and give up.
+func TestIntegrationMalformedEditNudgeRecovers(t *testing.T) {
+	root := seedRepo(t)
+	// Two SEARCH markers before any divider → ErrMalformedBlock (the gpt-oss shape).
+	malformed := "<<<<<<< SEARCH\nwrong\n<<<<<<< SEARCH\n=======\nright\n>>>>>>> REPLACE\n"
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 50, tcSpec{"edit_file", map[string]any{"path": "answer.txt", "diff": malformed}})}, // malformed → nudge
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 50)},                                       // corrected → applies → green
+	)
+	cfg := config.Config{MaxSteps: 50, ChurnRounds: 5}
+	loop := buildLoop(t, root, srv, cfg)
+
+	rep, err := loop.Run(context.Background(), "fix the check, recovering from a bad edit format")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q (%s), want success (recovered via the nudge)", rep.Reason, rep.String())
+	}
+	if n := countMsgsContaining(rep.Transcript, "MALFORMED"); n == 0 {
+		t.Error("expected a malformed-format correction nudge in the transcript")
+	}
+	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
+		t.Errorf("after recovery, answer.txt = %q, want \"right\\n\"", got)
+	}
+}

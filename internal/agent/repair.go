@@ -108,6 +108,26 @@ func buildRepairObservation(root, path, diff string) (llm.Message, bool) {
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}, true
 }
 
+// buildMalformedCorrection is the model-facing nudge when an edit_file block is
+// structurally MALFORMED (missing/duplicated markers, no divider) — distinct from
+// a no-match (buildRepairObservation, which shows the file). It restates the exact
+// grammar, calls out the usual mistakes (omitting =======, repeating markers,
+// cramming several changes between one pair), and tells the model to RETRY with a
+// corrected call instead of apologizing and stopping — which weak/reasoner models
+// (e.g. gpt-oss) tend to do. No file read needed: the block shape is the problem.
+func buildMalformedCorrection(path string) llm.Message {
+	var b strings.Builder
+	fmt.Fprintf(&b, "tool edit_file could not apply to %s: the SEARCH/REPLACE block was MALFORMED.\n\n", path)
+	b.WriteString("A block must be EXACTLY these three marker lines, once each, in this order:\n")
+	b.WriteString("<<<<<<< SEARCH\n<lines copied verbatim from the file>\n=======\n<the replacement lines>\n>>>>>>> REPLACE\n\n")
+	b.WriteString("Fix the format:\n")
+	b.WriteString("- Do NOT omit the ======= divider, and do NOT use >>>>>>> REPLACE in its place.\n")
+	b.WriteString("- Use <<<<<<< SEARCH and >>>>>>> REPLACE exactly ONCE each per block — never repeat them inside one block.\n")
+	b.WriteString("- For SEVERAL changes, send SEPARATE blocks (each with its own three markers), or call edit_file once per change — never cram multiple changes between one pair of markers.\n\n")
+	b.WriteString("Re-issue the edit_file call now with a corrected block. Do not apologize or stop.")
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
 // failReason maps a failing MatchKind to the human-readable reason embedded in
 // the observation. The MatchKind.String() label ("not-found"/"ambiguous") is kept
 // verbatim so the text stays a stable, asserted contract.
