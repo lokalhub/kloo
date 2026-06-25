@@ -92,6 +92,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		flush()
 		fmt.Fprint(out, headlessToolLine(call, res, err))
 	}
+	loop.OnRetry = func(attempt, max int, err error, wait time.Duration) {
+		flush()
+		fmt.Fprintf(out, "⟳ model call failed transiently — retrying %d/%d in %s\n", attempt, max, wait.Round(time.Second))
+	}
 
 	fmt.Fprintf(out, "kloo headless run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
 		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)

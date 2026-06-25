@@ -189,6 +189,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStreamDone(msg)
 	case toolEventMsg:
 		return m.handleToolEvent(msg)
+	case noticeMsg:
+		return m.appendItem(infoItem{text: msg.text}), nil
 	case progressMsg:
 		return m.handleProgress(msg)
 	case memoryMsg:

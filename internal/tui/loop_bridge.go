@@ -116,6 +116,12 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 		r.send(streamDoneMsg{}) // finalize any streamed assistant text for this turn
 		r.send(toolEvent(call, res))
 	}
+	r.loop.OnRetry = func(attempt, max int, err error, wait time.Duration) {
+		// A transient model-call failure is being retried — show it as a dim line so a
+		// slow/cold endpoint reads as "retrying", not a frozen run.
+		r.send(noticeMsg{text: fmt.Sprintf("⟳ retrying model call %d/%d in %s — %s",
+			attempt, max, wait.Round(time.Second), humanizeError(err))})
+	}
 	// approve-each: hold each edit for a y/n confirm (debug mode); auto/accept-edits apply directly.
 	if mode == ModeApproveEach {
 		r.loop.OnBeforeEdit = func(call tools.Call) bool {

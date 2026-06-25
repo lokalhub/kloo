@@ -167,6 +167,13 @@ once before halting. kloo also **self-corrects edits**: when a `SEARCH/REPLACE`
 doesn't match, it re-reads the file and hands the model the actual contents to
 retry against — and when the target is empty, it tells the model to `write_file`
 the contents instead of searching a void.
+
+A **transient** model-call failure — an endpoint timeout, a cold model load, a 5xx,
+or a dropped connection — is **retried** with exponential backoff (a couple of
+attempts) rather than ending the run, so a local server that's slow or reloading
+doesn't throw away a long session. Deterministic errors (4xx auth/bad-request) are
+never retried. Common with `llama.cpp`/`llama-swap`, where the first call after a
+model swap can be slow.
 The **full reference** — every flag, env var, the effort table, and the
 `profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 
