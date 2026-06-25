@@ -323,9 +323,13 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 	const ctxTokens = 2000
 	task := "look at File3Func2DoesSomething"
 
+	// The memory path budgets to usableWindow(ctxTokens) (reserving headroom for
+	// output + tool schemas + estimation slack), so the map/hot caps are fractions
+	// of the USABLE window, not the raw ctxTokens.
+	win := usableWindow(ctxTokens)
 	probe := &Loop{Root: root, System: "you are kloo"}
 	full := probe.systemWithContext(task, ctxTokens)
-	shrunk := probe.systemWithContext(task, mapBudgetTokens(ctxTokens))
+	shrunk := probe.systemWithContext(task, mapBudgetTokens(win))
 	if full == shrunk {
 		t.Fatalf("repo map too small to exercise the budget split; raise nFiles/nFuncs")
 	}
@@ -343,11 +347,11 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 		t.Errorf("memory-path system prompt did not use mapBudgetTokens(window)")
 	}
 	st := wm.Stats()
-	if st.MapBudget != mapBudgetTokens(ctxTokens) {
-		t.Errorf("Stats().MapBudget = %d, want %d", st.MapBudget, mapBudgetTokens(ctxTokens))
+	if st.MapBudget != mapBudgetTokens(win) {
+		t.Errorf("Stats().MapBudget = %d, want %d", st.MapBudget, mapBudgetTokens(win))
 	}
-	if st.HotBudget != hotBudgetTokens(ctxTokens) {
-		t.Errorf("Stats().HotBudget = %d, want %d", st.HotBudget, hotBudgetTokens(ctxTokens))
+	if st.HotBudget != hotBudgetTokens(win) {
+		t.Errorf("Stats().HotBudget = %d, want %d", st.HotBudget, hotBudgetTokens(win))
 	}
 	// And the assembled history confirms the map budget really is < the window.
 	if mapBudgetTokens(ctxTokens) >= ctxTokens {
@@ -641,5 +645,20 @@ func TestMemoryB8LoopReasonError(t *testing.T) {
 	}
 	if !errors.Is(rep.Err, ErrWindowTooSmall) {
 		t.Errorf("rep.Err = %v, want ErrWindowTooSmall", rep.Err)
+	}
+}
+
+// TestUsableWindowReservesHeadroom: the prompt budget is a fraction of the model's
+// context window, leaving room for output + tool schemas + estimation slack so the
+// real request stays under n_ctx (the 33570>32768 overflow fix).
+func TestUsableWindowReservesHeadroom(t *testing.T) {
+	for _, w := range []int{32768, 16384, 8000} {
+		u := usableWindow(w)
+		if u >= w {
+			t.Errorf("usableWindow(%d) = %d, must reserve headroom (be < window)", w, u)
+		}
+		if u < w/2 {
+			t.Errorf("usableWindow(%d) = %d, reserve too aggressive", w, u)
+		}
 	}
 }
