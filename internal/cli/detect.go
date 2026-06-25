@@ -60,7 +60,45 @@ func resolveVerifyCommand(explicit, dir string, logf func(string, ...any)) strin
 // through the same jailed run_command tool as before, so its exit code remains the
 // trusted, unfoolable success signal — only its *source* moved from a required
 // flag to project awareness.
+// detectVerify infers the project's verify command from dir, OR — when dir itself
+// has no recognised project — from a single immediate subdirectory that does. The
+// subdir case covers the common "kloo launched one dir up while the app lives in
+// ./myApp" layout: the command is prefixed with `cd <subdir> && …` so it runs in
+// the right place. If SEVERAL subdirs are projects (a monorepo), it stays ambiguous
+// (returns "" → unverified) rather than guess wrong.
 func detectVerify(dir string) string {
+	if cmd := detectVerifyHere(dir); cmd != "" {
+		return cmd
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	sub, cmd, n := "", "", 0
+	for _, e := range entries {
+		if !e.IsDir() || verifySkipDirs[e.Name()] || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if c := detectVerifyHere(filepath.Join(dir, e.Name())); c != "" {
+			sub, cmd, n = e.Name(), c, n+1
+		}
+	}
+	if n == 1 { // exactly one subdir project — unambiguous
+		return "cd " + sub + " && " + cmd
+	}
+	return ""
+}
+
+// verifySkipDirs are subdirectories never scanned for a project when auto-detecting
+// the verify command (deps/build/VCS).
+var verifySkipDirs = map[string]bool{
+	"node_modules": true, "dist": true, "build": true, "out": true,
+	"target": true, "vendor": true, "www": true, "coverage": true,
+}
+
+// detectVerifyHere infers a project's verify (build/test) command from the manifest
+// files IN dir (no recursion), or "" when none is recognised.
+func detectVerifyHere(dir string) string {
 	// Node/JS app — the common case: prefer a build script, then test (whichever
 	// exists; the script's exit code is what gates completion).
 	if scripts := nodeScripts(dir); scripts != nil {
