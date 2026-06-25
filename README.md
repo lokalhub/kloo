@@ -158,6 +158,15 @@ Effort tiers seed the loop budgets in one switch (the model is independent).
 and steps/wall-clock are generous so long small-model runs aren't cut off:
 `fast` (50 steps), `medium` (500 — the default), `heavy` (1000). Set `maxTokens`
 in the profile for a hard cost cap.
+
+Churn covers three degenerate patterns a small model can fall into: the same
+**verify failure** repeated with no new edit, the same **edit** re-tried, and the
+same **tool call** fired over and over (e.g. re-reading one empty file) — the last
+catches read-only spins that leave no edit or verify signal, nudging the model
+once before halting. kloo also **self-corrects edits**: when a `SEARCH/REPLACE`
+doesn't match, it re-reads the file and hands the model the actual contents to
+retry against — and when the target is empty, it tells the model to `write_file`
+the contents instead of searching a void.
 The **full reference** — every flag, env var, the effort table, and the
 `profiles.json` schema — is in **[docs/configuration.md](docs/configuration.md)**.
 

@@ -40,6 +40,19 @@ func buildRepairObservation(root, path, diff string) (llm.Message, bool) {
 		return llm.Message{}, false
 	}
 
+	// 1a. Empty target: there is NO text for a SEARCH block to match, so the generic
+	//     "make your SEARCH match the contents exactly" instruction below is
+	//     unsatisfiable — and a weak model loops re-reading the empty file trying to
+	//     find something to match (the canonical flail, [[kloo-edit-silent-noop]]).
+	//     Tell it the file is empty and to use write_file instead, before rendering
+	//     the (impossible) match instruction.
+	if strings.TrimSpace(content) == "" {
+		msg := fmt.Sprintf("tool edit_file could not apply to %s: the file is EMPTY (0 meaningful bytes), "+
+			"so there is no text for a SEARCH block to match. Do NOT use edit_file SEARCH/REPLACE on an "+
+			"empty file — call write_file with the full intended contents of %s instead.\n", path, path)
+		return llm.Message{Role: llm.RoleUser, Content: msg}, true
+	}
+
 	// 2. Re-parse the model's diff with the SAME parser the tool uses (no fork).
 	blocks, err := edit.ParseFlexible(diff)
 	if err != nil || len(blocks) == 0 {

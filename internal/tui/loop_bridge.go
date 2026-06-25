@@ -468,6 +468,12 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 		msg.Detail = string(rep.Budget.Kind) + " (" + rep.Budget.Observed + "/" + rep.Budget.Limit + ")"
 	case rep.Churn != nil:
 		msg.Detail = string(rep.Churn.Kind)
+		if art := strings.TrimSpace(rep.Churn.Artifact); art != "" {
+			if i := strings.IndexByte(art, '\n'); i >= 0 {
+				art = art[:i]
+			}
+			msg.Detail += " (" + art + ")"
+		}
 	}
 	return msg
 }
