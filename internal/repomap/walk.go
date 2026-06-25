@@ -16,12 +16,25 @@ import (
 	"strings"
 )
 
-// hardSkipDirs are never descended into, regardless of .gitignore.
+// hardSkipDirs are never descended into, regardless of .gitignore. These are
+// VCS metadata, dependency trees, and build/cache output — none contain
+// hand-written source the repo map should rank, and a single build can drop
+// thousands of generated files (e.g. an Ionic build writes ~1.4k files into www/
+// and ~400 into .angular/) that would otherwise flood the map and balloon the
+// prompt every turn. They stay reachable via read_file/list_dir. Gitignored build
+// output is also skipped (nested .gitignore, below); this list is the backstop for
+// a project whose .gitignore doesn't cover it — or, as in the Ionic case, lives in
+// a SUBDIR whose .gitignore the root walk wouldn't otherwise reach.
 var hardSkipDirs = map[string]bool{
-	".git":         true,
-	"node_modules": true,
-	"dist":         true,
-	"bin":          true,
+	// VCS + dependencies.
+	".git": true, "node_modules": true, "vendor": true,
+	"__pycache__": true, ".venv": true, "venv": true,
+	// Generic build output.
+	"dist": true, "build": true, "out": true, "bin": true, "target": true, "coverage": true,
+	// Framework build output / caches.
+	"www": true, ".angular": true, ".next": true, ".nuxt": true, ".svelte-kit": true,
+	".output": true, ".cache": true, ".turbo": true, ".parcel-cache": true, ".vite": true,
+	".gradle": true, ".pytest_cache": true, ".mypy_cache": true,
 }
 
 // maxMappedFileBytes bounds the size of a file the repo map will consider. Source
@@ -43,24 +56,38 @@ type Node struct {
 }
 
 // Walk enumerates the repo rooted at root into a deterministically ordered slice
-// of Nodes (lexicographic by Path). It hard-skips .git/node_modules/dist/bin,
-// honours the repo's .gitignore (pure-Go matching — never shells out to git),
-// and does not follow symlinks (so it can never escape the workspace via a
-// symlinked directory). root is expected to be the canonical workspace root
-// (e.g. tools.Workspace.Root()).
+// of Nodes (lexicographic by Path). It hard-skips the dirs in hardSkipDirs,
+// honours .gitignore at EVERY level (the root's and any nested one, pure-Go
+// matching — never shells out to git), and does not follow symlinks (so it can
+// never escape the workspace via a symlinked directory). root is expected to be
+// the canonical workspace root (e.g. tools.Workspace.Root()).
 func Walk(root string) ([]Node, error) {
-	ig, err := loadGitignore(root)
-	if err != nil {
-		return nil, err
-	}
-
 	var nodes []Node
-	err = walkDir(root, root, ig, &nodes)
-	if err != nil {
+	if err := walkDir(root, root, nil, &nodes); err != nil {
 		return nil, err
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Path < nodes[j].Path })
 	return nodes, nil
+}
+
+// scopedIgnore is one .gitignore and the directory its patterns are relative to.
+// Like git, a .gitignore applies to its own directory subtree, matched against the
+// path RELATIVE to that directory — so a project in a subdir (e.g. myTabsApp/)
+// gets its own /www, /.angular ignores honoured even when the walk root is a
+// parent with no .gitignore of its own.
+type scopedIgnore struct {
+	base string // absolute dir the patterns are relative to
+	ig   *gitignore
+}
+
+// ignored reports whether abs is excluded by any .gitignore in scope.
+func ignored(stack []scopedIgnore, abs string, isDir bool) bool {
+	for _, s := range stack {
+		if s.ig.match(relSlash(s.base, abs), isDir) {
+			return true
+		}
+	}
+	return false
 }
 
 // Files returns just the file Nodes from a walk result (preserving order).
@@ -74,7 +101,16 @@ func Files(nodes []Node) []Node {
 	return out
 }
 
-func walkDir(root, dir string, ig *gitignore, out *[]Node) error {
+func walkDir(root, dir string, stack []scopedIgnore, out *[]Node) error {
+	// Push this directory's .gitignore (if any) onto the stack — its patterns apply
+	// to everything below here. The full-slice copy (cap == len) means appending
+	// can't clobber a sibling subtree's view of the stack.
+	if ig, err := loadGitignore(dir); err != nil {
+		return err
+	} else if len(ig.patterns) > 0 {
+		stack = append(stack[:len(stack):len(stack)], scopedIgnore{base: dir, ig: ig})
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -94,17 +130,17 @@ func walkDir(root, dir string, ig *gitignore, out *[]Node) error {
 			if hardSkipDirs[name] {
 				continue
 			}
-			if ig.match(rel, true) {
+			if ignored(stack, abs, true) {
 				continue
 			}
 			*out = append(*out, Node{Path: rel, IsDir: true})
-			if err := walkDir(root, abs, ig, out); err != nil {
+			if err := walkDir(root, abs, stack, out); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if ig.match(rel, false) {
+		if ignored(stack, abs, false) {
 			continue
 		}
 		info, err := e.Info()
@@ -149,9 +185,10 @@ type ignorePattern struct {
 	dirOnly  bool   // had a trailing '/': matches directories only
 }
 
-// loadGitignore reads <root>/.gitignore if present (a missing file is fine).
-func loadGitignore(root string) (*gitignore, error) {
-	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+// loadGitignore reads <dir>/.gitignore if present (a missing file is fine). It is
+// called once per directory during the walk so nested .gitignores are honoured.
+func loadGitignore(dir string) (*gitignore, error) {
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &gitignore{}, nil
