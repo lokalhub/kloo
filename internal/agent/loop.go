@@ -201,7 +201,7 @@ func isEditTool(name string) bool {
 
 // isReadOnlyTool reports whether a tool only inspects (no mutation, no shell).
 func isReadOnlyTool(name string) bool {
-	return name == tools.NameReadFile || name == tools.NameListDir
+	return name == tools.NameReadFile || name == tools.NameListDir || name == tools.NameReadDir
 }
 
 // stallLimit is the effective stall backstop threshold.

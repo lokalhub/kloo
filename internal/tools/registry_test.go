@@ -31,7 +31,7 @@ func TestDefaultRegistryTools(t *testing.T) {
 		got = append(got, tl.Name())
 	}
 	sort.Strings(got)
-	want := []string{"edit_file", "finish", "list_dir", "read_file", "run_command", "write_file"}
+	want := []string{"edit_file", "finish", "list_dir", "read_dir", "read_file", "run_command", "write_file"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools %v, want %d", len(got), got, len(want))
 	}

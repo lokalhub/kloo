@@ -64,7 +64,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:        defaultSystemPrompt,
+		System:        defaultSystemPrompt + agentsInstructions(cwd, writerLogf(out)),
 		StallRounds:   cfg.ChurnRounds,
 		Model:         cfg.Model,
 		Temperature:   cfg.Temperature,

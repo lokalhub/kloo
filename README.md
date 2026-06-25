@@ -36,7 +36,15 @@ unverified (finish stops it, but no run is marked success). See
 To keep a small-context model (e.g. 8k) on-task while it auto-traverses the
 codebase, kloo rebuilds the prompt each turn — pinning the goal, the current file
 (re-read fresh), and the last verify result, while folding old exploration into a
-running summary. **[docs/memory.md](docs/memory.md)** has the diagrams.
+running summary. **[docs/memory.md](docs/memory.md)** has the diagrams. The model
+reads on demand with `read_file`, `list_dir`, and **`read_dir`** — the last bulk-
+reads a whole folder in one call (skip-aware, bounded), so a big-context model can
+ingest an area at once instead of many round-trips.
+
+If your repo has an **`AGENTS.md`** (or `CLAUDE.md`), kloo loads it into the system
+prompt and follows it every turn — checked in the launch directory *and* immediate
+subdirectories, so a project that lives in a subdir (`./myApp`) still has its rules
+applied.
 
 kloo also remembers the conversation **across runs and restarts**, per workspace,
 so follow-ups ("what's the issue?", "continue") resume with context. Sessions live

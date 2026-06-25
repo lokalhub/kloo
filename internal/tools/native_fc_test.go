@@ -29,8 +29,8 @@ func TestNativeBuildRequest(t *testing.T) {
 	reg := DefaultRegistry(ws)
 	req := NativeFCAdapter{}.BuildRequest(llm.ChatRequest{Model: "test-model"}, reg)
 
-	if len(req.Tools) != 6 {
-		t.Fatalf("want 6 tools attached, got %d", len(req.Tools))
+	if len(req.Tools) != 7 {
+		t.Fatalf("want 7 tools attached, got %d", len(req.Tools))
 	}
 	// The tools param must serialise to valid OpenAI JSON with name + parameters.
 	raw, err := json.Marshal(req.Tools)

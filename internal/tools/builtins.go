@@ -131,6 +131,7 @@ func (t editFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r := NewRegistry()
 	r.Register(readFileTool{ws})
+	r.Register(readDirTool{ws})
 	r.Register(editFileTool{ws})
 	r.Register(writeFileTool{ws})
 	r.Register(listDirTool{ws})

@@ -359,6 +359,15 @@ func toolEvent(call tools.Call, res tools.Result) toolEventMsg {
 		return toolEventMsg{Name: "read_file", Summary: pathSummary(call, res.Output, "line", "lines")}
 	case "list_dir":
 		return toolEventMsg{Name: "list_dir", Summary: pathSummary(call, res.Output, "entry", "entries")}
+	case "read_dir":
+		// Bulk folder read: show "<path> · N files" (N parsed from the result head
+		// "read N file(s) …"), not the whole concatenated dump.
+		n := "?"
+		if f := strings.Fields(res.Output); len(f) >= 2 && f[0] == "read" {
+			n = f[1]
+		}
+		p := str(call.Args["path"])
+		return toolEventMsg{Name: "read_dir", Path: p, Summary: p + "  · " + n + " files"}
 	default:
 		return toolEventMsg{Name: call.Name, Summary: res.Output}
 	}
