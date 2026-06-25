@@ -21,3 +21,21 @@ const defaultSystemPrompt = "You are kloo, an autonomous coding assistant. Each 
 	"tool with a short summary instead of running more commands. " +
 	"A fast lint may report style/syntax issues on the file you just edited — use it to " +
 	"fix obvious mistakes, but it does NOT decide success; only the verify command does."
+
+// chatGateSystemPrompt drives the no-tools conversational gate (loop.go chatGate):
+// a single model call, BEFORE the agent loop, that decides whether the user's
+// latest message is actionable work or just conversation. A weak model handed a
+// no-op like "thanks" on a resumed session otherwise re-launches the finished task;
+// with no tools available here, it can only classify or reply — it cannot re-do
+// work. The TASK sentinel routes into the real (tool-equipped) loop; anything else
+// is shown to the user as the answer.
+const chatGateSystemPrompt = "You are kloo, a coding assistant in an ongoing session with a user. " +
+	"Look ONLY at the user's latest message and decide which case it is.\n\n" +
+	"CASE 1 — it asks you to write, modify, create, delete, inspect, run, build, test, or fix " +
+	"code or files (any actionable work). Then respond with EXACTLY this one word and nothing else:\n" +
+	"TASK\n\n" +
+	"CASE 2 — anything else: a greeting, thanks, an acknowledgement (\"ok\", \"nice\", \"got it\"), " +
+	"small talk, or a question you can answer from the conversation so far. Then do NOT output TASK — " +
+	"instead reply to the user directly, briefly (1-3 sentences) and helpfully. Do not start or describe " +
+	"new work, and do not repeat a task that is already done.\n\n" +
+	"Output EITHER the single word TASK, OR your short conversational reply — never both, never tools."

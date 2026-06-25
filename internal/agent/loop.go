@@ -49,9 +49,14 @@ type Loop struct {
 	Root          string // workspace root for the repo map (empty ⇒ skip map)
 	ContextTokens int    // per-step repo-map token budget
 	System        string // system prompt
-	Model         string
-	Temperature   float64
-	Now           func() time.Time // injectable clock (defaults to time.Now)
+	// ChatSystem, when non-empty, enables the conversational gate: ONE no-tools
+	// model call before the agent loop that classifies the user's message as an
+	// actionable task (→ run the loop) or conversation (→ reply directly, no run).
+	// Empty ⇒ disabled (headless/benchmark, where every input is a real task).
+	ChatSystem  string
+	Model       string
+	Temperature float64
+	Now         func() time.Time // injectable clock (defaults to time.Now)
 	// SessionHistory is the conversation from PRIOR runs in the same session (the
 	// TUI reuses one Loop across submissions). It is seeded into working memory as
 	// the oldest tail, so a follow-up ("what's the issue?", "now do the other
@@ -318,6 +323,25 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		return rep, nil
+	}
+
+	// Conversational gate: a no-tools turn that answers chit-chat / acknowledgments
+	// directly instead of launching tool-driven work. A weak model otherwise re-does
+	// the finished task on a vague input like "thanks" (the system prompt telling it
+	// to just finish isn't enough). Only a TASK verdict falls through to the loop;
+	// anything else is replied to and stops as a calm ReasonAnswered. Disabled when
+	// ChatSystem is empty (headless/benchmark). A gate error fails OPEN — we run the
+	// loop rather than block real work on a classifier hiccup.
+	if l.ChatSystem != "" && ctx.Err() == nil {
+		reply, conversational, usage := l.chatGate(ctx, task)
+		l.Budget.AddTokens(usage.TotalTokens)
+		if conversational {
+			if l.OnDelta != nil {
+				l.OnDelta(reply)
+			}
+			convo = append(convo, llm.Message{Role: llm.RoleAssistant, Content: reply})
+			return finish(ReasonAnswered, nil, nil, nil)
+		}
 	}
 
 	for {
@@ -899,6 +923,49 @@ var errEditRejected = errors.New("agent: edit rejected (approve-each)")
 // corrective re-prompt) — a conversational answer, not a failure. The loop turns it
 // into a calm ReasonAnswered stop instead of ReasonError.
 var ErrNoToolCall = errors.New("agent: model replied without a tool call (conversational)")
+
+// chatSentinel is the exact token the gate model emits for an actionable task, so
+// the loop proceeds. Anything else is a conversational reply shown to the user.
+const chatSentinel = "TASK"
+
+// chatGate classifies the user's message with ONE no-tools model call. A real
+// coding request returns ("", false) so Run proceeds into the agent loop; anything
+// conversational returns (reply, true) — the model's natural reply, generated WITH
+// the session context but WITHOUT any tools, so a weak model can't mistake the
+// message for "redo the work". Cheap by design: system + prior-run recap + the
+// message, NO repo map. It is NON-streaming on purpose — a "TASK" verdict must
+// never flash on the user's screen; the conversational reply is surfaced by the
+// caller (via OnDelta) only once classification is known. Any error fails OPEN
+// (returns false) so a classifier hiccup never blocks real work.
+func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage) {
+	msgs := []llm.Message{{Role: llm.RoleSystem, Content: l.ChatSystem}}
+	msgs = append(msgs, l.SessionHistory...)
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: task})
+
+	resp, err := l.Client.Complete(ctx, llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature})
+	if err != nil {
+		return "", false, llm.Usage{} // fail open: run the loop normally
+	}
+	msg := assistantMessage(resp)
+	usage = estimateUsage(resp.Usage, msgs, msg)
+	text := strings.TrimSpace(msg.Content)
+	if text == "" || isTaskVerdict(text) {
+		return "", false, usage
+	}
+	return text, true, usage
+}
+
+// isTaskVerdict reports whether the gate reply is the TASK sentinel. Lenient: the
+// first whitespace-separated token, stripped of surrounding punctuation and
+// upper-cased, equals TASK — tolerating "TASK", "TASK.", "Task:".
+func isTaskVerdict(text string) bool {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.ToUpper(strings.Trim(fields[0], ".,!?:;\"'`()[]"))
+	return first == chatSentinel
+}
 
 // llmRetries / retryBaseDelay are the effective retry knobs (mirror the stallLimit
 // 0-⇒-default seam; a NEGATIVE LLMRetries disables retry entirely).
