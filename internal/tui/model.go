@@ -235,7 +235,7 @@ func (m Model) resize(w, h int) (tea.Model, tea.Cmd) {
 		m.vp.Height = vpHeight
 	}
 	atBottom := m.vp.AtBottom()
-	m.vp.SetContent(m.renderTranscript())
+	m.vp.SetContent(m.transcriptContent())
 	if atBottom { // sticky bottom: a resize must not yank a scrolled-up user back down
 		m.vp.GotoBottom()
 	}
@@ -285,7 +285,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// cached viewport content immediately, mirroring resize.
 		m.expanded = !m.expanded
 		if m.vpReady {
-			m.vp.SetContent(m.renderTranscript())
+			m.vp.SetContent(m.transcriptContent())
 		}
 		return m, nil
 	}

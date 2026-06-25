@@ -99,7 +99,7 @@ func (m Model) refreshViewport() Model {
 		// bottom. If they scrolled up to read earlier output, new content must not
 		// yank them back down (that was the "can't scroll back" bug).
 		atBottom := m.vp.AtBottom()
-		m.vp.SetContent(m.renderTranscript())
+		m.vp.SetContent(m.transcriptContent())
 		if atBottom {
 			m.vp.GotoBottom()
 		}

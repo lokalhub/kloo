@@ -61,6 +61,22 @@ func (m Model) renderTranscript() string {
 	return strings.Join(blocks, "\n\n")
 }
 
+// transcriptContent is the viewport body, BOTTOM-anchored: when the transcript is
+// shorter than the viewport, blank lines are prepended so the newest content sits
+// just ABOVE the input (chat-style), instead of stranded at the top with a big gap
+// below. Once the content fills the viewport, the pad is zero and it scrolls
+// normally. Use this everywhere the viewport content is set.
+func (m Model) transcriptContent() string {
+	body := m.renderTranscript()
+	if !m.vpReady {
+		return body
+	}
+	if pad := m.vp.Height - lipgloss.Height(body); pad > 0 {
+		return strings.Repeat("\n", pad) + body
+	}
+	return body
+}
+
 // renderInput renders the bordered input region with slash hints to the right.
 func (m Model) renderInput() string {
 	box := lipgloss.NewStyle().
