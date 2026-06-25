@@ -113,6 +113,7 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL (or supplied by `--provider`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
+| `--ctx` | `8000` | Per-step context window — set it to match your server's `-c`. Needed for a llama-swap/Ollama **alias** (`snappy`, `smart`) the bundled defaults can't size by model id; otherwise kloo over-compacts to 8k on a 32k server. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
 | `--lint` | _(auto-detected)_ | Override the fast **advisory** lint command run on edited files after each edit (see below); auto-detected from the project when unset. |
@@ -129,7 +130,7 @@ coding models (Qwen2.5-Coder, Qwen3-Coder, Devstral, DeepSeek…), so they run w
 sensible `toolFormat`/`temperature`/`maxContextTokens` **without a hand-written
 profile** — your profile/env/flags always win, and unknown models are unchanged.
 `toolFormat` also accepts `"auto"` (a safe alias for unset/auto-select).
-Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, and
+Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, `KLOO_CONTEXT_TOKENS` (= `--ctx`), and
 `KLOO_API_KEY` (bearer token for hosted endpoints; falls back to
 `OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `KLOO_LINT=<cmd>`
 overrides the advisory lint command and `KLOO_NO_LINT=1` disables it; `NO_COLOR`

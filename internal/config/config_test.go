@@ -648,3 +648,21 @@ func TestResolveMCPExpansion(t *testing.T) {
 		t.Errorf("header names should remain literal, got %v", s.Headers)
 	}
 }
+
+// TestResolveContextTokensOverride: --ctx / KLOO_CONTEXT_TOKENS override the
+// window above profile/bundled/built-in; flag beats env; unset ⇒ default.
+func TestResolveContextTokensOverride(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "none.json")
+	if got, _ := Resolve(Flags{MaxContextTokens: ip(32768)}, envFunc(nil), missing); got.MaxContextTokens != 32768 {
+		t.Errorf("flag --ctx = %d, want 32768", got.MaxContextTokens)
+	}
+	if got, _ := Resolve(Flags{}, envFunc(map[string]string{EnvContextTokens: "16384"}), missing); got.MaxContextTokens != 16384 {
+		t.Errorf("env KLOO_CONTEXT_TOKENS = %d, want 16384", got.MaxContextTokens)
+	}
+	if got, _ := Resolve(Flags{MaxContextTokens: ip(4096)}, envFunc(map[string]string{EnvContextTokens: "16384"}), missing); got.MaxContextTokens != 4096 {
+		t.Errorf("flag should beat env, got %d", got.MaxContextTokens)
+	}
+	if got, _ := Resolve(Flags{}, envFunc(nil), missing); got.MaxContextTokens != DefaultMaxContextTokens {
+		t.Errorf("unset = %d, want default %d", got.MaxContextTokens, DefaultMaxContextTokens)
+	}
+}

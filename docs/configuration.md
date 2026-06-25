@@ -42,6 +42,7 @@ churn detection as the primary guard).
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. Set directly, or via `--provider` (a provider's `endpoint` wins over this default but loses to an explicit `--endpoint`/`KLOO_ENDPOINT`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps. Also seeded by `--effort` (fast 50 · medium 500 · heavy 1000); an explicit `--max-steps` overrides the tier. |
+| `--ctx` | `8000` | Per-step context window (`maxContextTokens`). Set it to match your server's `-c`/`num_ctx`. **Needed for a llama-swap/Ollama alias** (`snappy`, `smart`) — the bundled per-model defaults key on real model ids, so an alias falls to the conservative 8000 and kloo over-compacts on a larger server. Overrides profile/bundled/built-in. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
@@ -55,6 +56,7 @@ churn detection as the primary guard).
 | `KLOO_ENDPOINT` | OpenAI-compatible base URL (same as `--endpoint`). |
 | `KLOO_MODEL` | Model name / alias (same as `--model`). |
 | `KLOO_PROVIDER` | Named provider from the profile's `providers` block (same as `--provider`). |
+| `KLOO_CONTEXT_TOKENS` | Per-step context window (same as `--ctx`). |
 | `KLOO_EFFORT` | Effort tier (same as `--effort`). |
 | `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); not needed for a local llama.cpp / Ollama server, which has no auth. |
 | `OPENAI_API_KEY` | Fallback bearer token used only when `KLOO_API_KEY` is unset. |

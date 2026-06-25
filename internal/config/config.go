@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -73,6 +74,10 @@ const (
 	// EnvNoLint disables the fast advisory lint step when "1"/"true" (case-insensitive),
 	// mirroring the --no-lint flag. The --lint/--no-lint flags override both env vars.
 	EnvNoLint = "KLOO_NO_LINT"
+	// EnvContextTokens sets the per-step context window (same as --ctx). Useful for a
+	// llama-swap/Ollama ALIAS the bundled defaults can't match by id (e.g. "snappy"),
+	// so the window matches the server's real -c without editing a profile.
+	EnvContextTokens = "KLOO_CONTEXT_TOKENS"
 )
 
 // ErrProfileParse wraps a malformed profile JSON file. A *missing* profile file
@@ -147,6 +152,9 @@ type Flags struct {
 	MaxSteps    *int
 	Mode        *string
 	Effort      *string
+	// MaxContextTokens (--ctx) overrides the per-step context window above the
+	// profile/bundled/built-in defaults. nil ⇒ not set on the CLI.
+	MaxContextTokens *int
 	// NoMCP, when non-nil, forces MCP on/off above env+profile (true ⇒ disabled).
 	// The cobra --no-mcp flag is wired in Phase 03; this field is the resolve seam.
 	NoMCP *bool
@@ -384,6 +392,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if v := getenv(EnvMCP); v == "0" || strings.EqualFold(v, "false") {
 		cfg.MCPDisabled = true
 	}
+	if v := getenv(EnvContextTokens); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.MaxContextTokens = n
+		}
+	}
 	if v := getenv(EnvAPIKey); v != "" {
 		cfg.APIKey = v // explicit env override beats a provider-supplied key
 	} else if cfg.APIKey == "" {
@@ -404,6 +417,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.MaxSteps != nil {
 		cfg.MaxSteps = *flags.MaxSteps
+	}
+	if flags.MaxContextTokens != nil {
+		cfg.MaxContextTokens = *flags.MaxContextTokens
 	}
 	if flags.Mode != nil {
 		cfg.Mode = *flags.Mode

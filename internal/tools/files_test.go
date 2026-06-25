@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -273,4 +274,29 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestReadFileEmptyReturnsMarker: an empty (or whitespace-only) file yields an
+// explicit "(empty)" observation, not a blank one — so a small model doesn't loop
+// re-reading it ("let me check the content…").
+func TestReadFileEmptyReturnsMarker(t *testing.T) {
+	ws, root := wsAt(t)
+	for _, f := range []struct{ name, body string }{{"empty.scss", ""}, {"blank.scss", "\n  \n\t"}} {
+		if err := os.WriteFile(filepath.Join(root, f.name), []byte(f.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := (readFileTool{ws}).Invoke(context.Background(), Call{Name: NameReadFile, Args: map[string]any{"path": f.name}})
+		if err != nil {
+			t.Fatalf("%s: %v", f.name, err)
+		}
+		if !strings.Contains(res.Output, "empty") {
+			t.Errorf("%s should yield an explicit empty marker, got %q", f.name, res.Output)
+		}
+	}
+	// A non-empty file is returned verbatim.
+	_ = os.WriteFile(filepath.Join(root, "real.txt"), []byte("hello"), 0o644)
+	res, _ := (readFileTool{ws}).Invoke(context.Background(), Call{Name: NameReadFile, Args: map[string]any{"path": "real.txt"}})
+	if res.Output != "hello" {
+		t.Errorf("non-empty file = %q, want verbatim", res.Output)
+	}
 }
