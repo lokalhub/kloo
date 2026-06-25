@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -104,10 +105,21 @@ type Loop struct {
 	//   - OnProgress: a per-turn progress snapshot (step + budget counters).
 	//   - OnBeforeEdit: called before dispatching an edit tool; returning false
 	//     skips the edit (the approve-each "reject" path). nil ⇒ always apply.
+	//   - OnRetry: a transient model-call failure is about to be retried after a
+	//     wait (so a UI can show "model timed out, retrying 1/2…"). nil ⇒ silent.
 	OnDelta      func(content string)
 	OnTool       func(call tools.Call, res tools.Result, err error)
 	OnProgress   func(step, maxSteps, tokens, maxTokens int)
 	OnBeforeEdit func(call tools.Call) bool
+	OnRetry      func(attempt, max int, err error, wait time.Duration)
+
+	// LLMRetries is how many EXTRA model-call attempts to make after the first when
+	// a call fails transiently (endpoint timeout, cold model load, 5xx, dropped
+	// connection). 0 ⇒ DefaultLLMRetries. A negative value disables retry.
+	LLMRetries int
+	// RetryBaseDelay is the first backoff wait; it doubles each attempt. 0 ⇒
+	// DefaultRetryBaseDelay. (Tests set it tiny to stay fast.)
+	RetryBaseDelay time.Duration
 }
 
 func (l *Loop) onState(s State) {
@@ -126,6 +138,17 @@ const DefaultMaxConversation = 30
 // small (a handful of turns) so a spinning model is caught quickly, yet large
 // enough to let the model read a few files before its first edit without tripping.
 const DefaultStallRounds = 3
+
+// DefaultLLMRetries / DefaultRetryBaseDelay bound the transient-failure retry on
+// model calls. Local endpoints (llama.cpp/llama-swap) routinely fail one call
+// transiently — a cold model load or a slow prefill trips the stream idle timeout,
+// or the connection drops — and a single such failure should NOT discard a long
+// run. We retry a couple of times with exponential backoff before surfacing the
+// error. See [[kloo-completion-termination]].
+const (
+	DefaultLLMRetries     = 2
+	DefaultRetryBaseDelay = 2 * time.Second
+)
 
 // DefaultMaxRepairAttempts is the per-target repair-enrichment cap when
 // MaxRepairAttempts is unset. Two enriched observations give the model the file's
@@ -877,18 +900,98 @@ var errEditRejected = errors.New("agent: edit rejected (approve-each)")
 // into a calm ReasonAnswered stop instead of ReasonError.
 var ErrNoToolCall = errors.New("agent: model replied without a tool call (conversational)")
 
-// complete runs one model call, streaming (forwarding deltas to OnDelta) when a
-// delta hook is set, else non-streaming.
-func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-	if l.OnDelta == nil {
-		return l.Client.Complete(ctx, req)
+// llmRetries / retryBaseDelay are the effective retry knobs (mirror the stallLimit
+// 0-⇒-default seam; a NEGATIVE LLMRetries disables retry entirely).
+func (l *Loop) llmRetries() int {
+	if l.LLMRetries != 0 {
+		return l.LLMRetries
 	}
-	return l.Client.Stream(ctx, req, func(d llm.Delta) error {
-		if d.Content != "" {
-			l.OnDelta(d.Content)
+	return DefaultLLMRetries
+}
+
+func (l *Loop) retryBaseDelay() time.Duration {
+	if l.RetryBaseDelay > 0 {
+		return l.RetryBaseDelay
+	}
+	return DefaultRetryBaseDelay
+}
+
+// complete runs one model call, streaming (forwarding deltas to OnDelta) when a
+// delta hook is set, else non-streaming. A TRANSIENT failure (endpoint timeout,
+// cold model load, 5xx, dropped connection) is retried up to llmRetries() times
+// with exponential backoff, so one flaky call doesn't throw away a long run. It is
+// NOT retried when: the parent ctx is done (interrupt / wall-clock budget), the
+// error is deterministic (4xx, auth, parse), or a stream already emitted tokens —
+// retrying then would duplicate the visible output.
+func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	attempts := max(1, l.llmRetries()+1) // a negative LLMRetries disables retry (1 try)
+	var (
+		resp llm.ChatResponse
+		err  error
+	)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		emitted := false
+		if l.OnDelta == nil {
+			resp, err = l.Client.Complete(ctx, req)
+		} else {
+			resp, err = l.Client.Stream(ctx, req, func(d llm.Delta) error {
+				if d.Content != "" {
+					emitted = true
+					l.OnDelta(d.Content)
+				}
+				return nil
+			})
 		}
-		return nil
-	})
+		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !isRetryableLLMError(err) {
+			return resp, err
+		}
+		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
+		if l.OnRetry != nil {
+			l.OnRetry(attempt, attempts-1, err, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return resp, err
+		case <-time.After(wait):
+		}
+	}
+	return resp, err
+}
+
+// isRetryableLLMError reports whether a failed model call is a TRANSIENT endpoint
+// hiccup worth retrying — versus a deterministic error (4xx auth/bad-request,
+// parse) that a retry would only repeat. The parent-ctx guard lives in the caller,
+// so a context.DeadlineExceeded reaching here is the request's OWN timeout (slow
+// prefill / cold load), which is retryable.
+func isRetryableLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The classic local-endpoint hiccups: no token in time (cold load / slow
+	// prefill) and a stream that ended before [DONE] (dropped connection).
+	if errors.Is(err, llm.ErrStreamIdle) || errors.Is(err, llm.ErrStreamIncomplete) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Transport-level i/o timeouts.
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return true
+	}
+	// Connection reset/refused/EOF mid-flight — a server that's restarting or a
+	// llama-swap mid model-swap. (no-such-host is a config error, NOT matched.)
+	low := strings.ToLower(err.Error())
+	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe"} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	// Upstream 5xx / 429 / 408 are server-side transient; other 4xx are not.
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500 || apiErr.StatusCode == 408 || apiErr.StatusCode == 429
+	}
+	return false
 }
 
 func assistantMessage(resp llm.ChatResponse) llm.Message {

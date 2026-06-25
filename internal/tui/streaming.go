@@ -29,6 +29,10 @@ func stripToolMarkup(s string) string {
 // callback, bridged into the program via tea.Program.Send).
 type streamDeltaMsg struct{ Content string }
 
+// noticeMsg is a transient one-line status note (e.g. a model-call retry) shown as
+// a dim info line, so a flaky endpoint that's being retried isn't a silent stall.
+type noticeMsg struct{ text string }
+
 // streamDoneMsg marks the end of a stream; Content is the fully accumulated
 // message (which, by construction, equals the concatenated deltas).
 type streamDoneMsg struct {
