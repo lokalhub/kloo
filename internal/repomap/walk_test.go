@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -126,4 +127,81 @@ func TestWalkNodesCarryMetadata(t *testing.T) {
 // hasPrefixSeg reports whether path has seg as its first path segment.
 func hasPrefixSeg(path, seg string) bool {
 	return path == seg || len(path) > len(seg) && path[:len(seg)+1] == seg+"/"
+}
+
+// TestWalkNestedGitignore: a .gitignore in a SUBDIR is honoured (git semantics),
+// matched relative to that subdir — so a project nested under a root with no
+// .gitignore of its own still excludes its build output. This is the Ionic case:
+// kloo's root is a parent dir, the Angular project (and its /www, /.angular
+// ignores) lives one level down.
+func TestWalkNestedGitignore(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "app")
+	mustWrite(t, filepath.Join(app, ".gitignore"), "/www\n/.angular/cache\n")
+	mustWrite(t, filepath.Join(app, "src", "main.ts"), "export const x = 1\n")
+	mustWrite(t, filepath.Join(app, "www", "bundle.js"), "console.log(1)\n")
+	mustWrite(t, filepath.Join(app, ".angular", "cache", "x.json"), "{}\n")
+
+	got := paths(mustWalk(t, root))
+	for _, p := range got {
+		if contains(p, "www/") || contains(p, ".angular/") {
+			t.Errorf("nested .gitignore not honoured: build output %q should be skipped\nall: %v", p, got)
+		}
+	}
+	if !hasPath(got, "app/src/main.ts") {
+		t.Errorf("real source under the nested project should be mapped, got %v", got)
+	}
+}
+
+// TestWalkHardSkipsBuildDirs: build/cache dirs are skipped by NAME even with no
+// .gitignore anywhere (the backstop), so a fresh build can't flood the map.
+func TestWalkHardSkipsBuildDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "main.go"), "package x\n")
+	for _, d := range []string{"www", ".angular", "node_modules", "dist", "build", "target", ".next"} {
+		mustWrite(t, filepath.Join(root, d, "junk.js"), "x\n")
+	}
+	got := paths(mustWalk(t, root))
+	for _, p := range got {
+		for _, d := range []string{"www/", ".angular/", "node_modules/", "dist/", "build/", "target/", ".next/"} {
+			if contains(p, d) {
+				t.Errorf("hard-skip dir leaked into map: %q", p)
+			}
+		}
+	}
+	if !hasPath(got, "main.go") {
+		t.Errorf("source should still be mapped, got %v", got)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWalk(t *testing.T, root string) []Node {
+	t.Helper()
+	nodes, err := Walk(root)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	return nodes
+}
+
+func hasPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(s, sub string) bool {
+	return len(sub) > 0 && filepath.ToSlash(s) != "" && strings.Contains(s, sub)
 }

@@ -94,6 +94,17 @@ Fractions (fixed in `internal/agent/memory.go`): repo map `0.35`, pins+tail
 `0.35`, compaction trigger `0.70`. The running summary takes the slack up to the
 `1.0 ×` hard ceiling.
 
+**What the repo map walks** (`internal/repomap/walk.go`): your source — never the
+noise. It hard-skips dependency trees and build/cache output by name
+(`node_modules`, `vendor`, `dist`, `build`, `out`, `target`, `www`, `.angular`,
+`.next`, `.nuxt`, `.svelte-kit`, `.cache`, `coverage`, …) and honours `.gitignore`
+at **every** level, not just the root — so a project nested in a subdirectory still
+has its own ignores respected. This matters right after a build: an Ionic `npm run
+build` writes ~1.4k files into `www/` and ~400 into `.angular/`; without skipping
+them the map would flood with compiled bundles and balloon the prompt every turn.
+Files over 1 MiB are skipped too (no useful symbols, and they'd be read whole) —
+all still reachable via `read_file`/`list_dir`.
+
 You can watch compaction happen live: the **`⟲N` counter in the TUI header** is
 the cumulative number of compactions this run.
 
