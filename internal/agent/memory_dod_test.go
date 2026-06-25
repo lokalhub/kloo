@@ -75,12 +75,13 @@ func dodLoop(t *testing.T, root string, srv *llmtest.Server, mem WorkingMemory) 
 		t.Fatal(err)
 	}
 	return &Loop{
-		Client:        llm.New(srv.URL+"/v1", "test-model"),
-		Adapter:       tools.NativeFCAdapter{},
-		Registry:      tools.DefaultRegistry(ws),
-		Verifier:      NewCommandVerifier(ws, "grep -qx right answer.txt"),
-		Budget:        NewBudget(config.Config{MaxSteps: 100, MaxTokens: 5_000_000}, time.Now),
-		Churn:         NewChurnDetector(1000), // high: the repeated red verify must not halt this long read-heavy run
+		Client:             llm.New(srv.URL+"/v1", "test-model"),
+		Adapter:            tools.NativeFCAdapter{},
+		Registry:           tools.DefaultRegistry(ws),
+		Verifier:           NewCommandVerifier(ws, "grep -qx right answer.txt"),
+		Budget:             NewBudget(config.Config{MaxSteps: 100, MaxTokens: 5_000_000}, time.Now),
+		Churn:              NewChurnDetector(1000),         // high: the repeated red verify must not halt this long read-heavy run
+		ExploreNudgeRounds: 1000, ExploreAbortRounds: 1000, // this DoD stress test reads MANY files on purpose; don't trip the exploration rail
 		Root:          root,
 		ContextTokens: dodWindow,
 		System:        "you are kloo, fix the failing check",
