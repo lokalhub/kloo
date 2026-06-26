@@ -6,7 +6,58 @@ import (
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/tools"
 )
+
+// runFailsTool is a run_command stub that ALWAYS exits non-zero (no Go error — a
+// failing command is captured in Result.ExitCode, like the real tool), to exercise
+// the failure-recovery branch of the promise rail.
+type runFailsTool struct{}
+
+func (runFailsTool) Name() string        { return "run_command" }
+func (runFailsTool) Description() string { return "fails" }
+func (runFailsTool) Schema() tools.ParamSchema {
+	return tools.ParamSchema{Properties: map[string]tools.Property{"command": {Type: "string"}}, Required: []string{"command"}}
+}
+func (runFailsTool) Invoke(ctx context.Context, c tools.Call) (tools.Result, error) {
+	return tools.Result{ExitCode: 1, Stderr: "npm ERR! missing script: start"}, nil
+}
+
+// TestPromiseRailRecoversAfterFailingCommand: a single failing run_command (exit 1)
+// followed by a tool-free prose reply must NOT silently stop the run as `answered`
+// ("a wrong command would stop it"). The failure arms the rail even without promise
+// language, so the model is nudged to recover and acts again.
+func TestPromiseRailRecoversAfterFailingCommand(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"run_command", map[string]any{"command": "npm start"}})}, // fails (exit 1)
+		llmtest.Mock{Body: proseResp(t, "The simulation did not start; npm start is not configured.")},    // gives up in prose (no promise words)
+		llmtest.Mock{Body: proseResp(t, "The simulation did not start; npm start is not configured.")},    // act() re-prompt: still prose → ErrNoToolCall → recovery nudge
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "package.json"}})},   // recovers (acts)
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "inspected scripts"}})},
+	)
+	loop, _ := newLoop(t, srv, nil, &stubBudget{tripAt: 100}, &stubChurn{})
+	reg := tools.NewRegistry()
+	reg.Register(runFailsTool{})
+	reg.Register(recordTool{name: "read_file", calls: new([]tools.Call)})
+	loop.Registry = reg
+
+	rep, err := loop.Run(context.Background(), "run the simulation")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason == ReasonAnswered {
+		t.Fatalf("reason = answered — a failing command must not stop the run; the rail should nudge recovery")
+	}
+	var nudged bool
+	for _, m := range rep.Transcript {
+		if strings.Contains(m.Content, "command FAILED") {
+			nudged = true
+		}
+	}
+	if !nudged {
+		t.Error("expected the failure-recovery nudge after the failing command")
+	}
+}
 
 // TestPromiseRailRescuesNarratedAction: the model ends a turn by NARRATING a next
 // action ("Let me run the worker simulation") with no tool call — the pattern that
