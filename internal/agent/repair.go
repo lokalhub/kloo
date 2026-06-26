@@ -115,7 +115,11 @@ func buildRepairObservation(root, path, diff string) (llm.Message, bool) {
 // cramming several changes between one pair), and tells the model to RETRY with a
 // corrected call instead of apologizing and stopping — which weak/reasoner models
 // (e.g. gpt-oss) tend to do. No file read needed: the block shape is the problem.
-func buildMalformedCorrection(path string) llm.Message {
+// maxMalformedContent caps how much of the file the malformed nudge inlines, so a
+// large file doesn't balloon the nudge past the window.
+const maxMalformedContent = 24 * 1024
+
+func buildMalformedCorrection(root, path string) llm.Message {
 	var b strings.Builder
 	fmt.Fprintf(&b, "tool edit_file could not apply to %s: the SEARCH/REPLACE block was MALFORMED.\n\n", path)
 	b.WriteString("A block must be EXACTLY these three marker lines, once each, in this order:\n")
@@ -123,8 +127,34 @@ func buildMalformedCorrection(path string) llm.Message {
 	b.WriteString("Fix the format:\n")
 	b.WriteString("- Do NOT omit the ======= divider, and do NOT use >>>>>>> REPLACE in its place.\n")
 	b.WriteString("- Use <<<<<<< SEARCH and >>>>>>> REPLACE exactly ONCE each per block — never repeat them inside one block.\n")
-	b.WriteString("- For SEVERAL changes, send SEPARATE blocks (each with its own three markers), or call edit_file once per change — never cram multiple changes between one pair of markers.\n\n")
-	b.WriteString("Re-issue the edit_file call now with a corrected block. Do not apologize or stop.")
+	b.WriteString("- For SEVERAL changes, send SEPARATE blocks (each with its own three markers), or call edit_file once per change — never cram multiple changes between one pair of markers.\n")
+	b.WriteString("- Copy the SEARCH lines BYTE-FOR-BYTE from the actual file below — correct boundaries, do not cut off mid-line.\n")
+
+	// Re-read the file so the model can anchor its SEARCH to the REAL text — botched
+	// boundaries (not just bad markers) are a common cause of a malformed/no-match
+	// loop, and format guidance alone can't fix that. Falls back to format-only if the
+	// file is unreadable (oversize/missing/jail escape).
+	if ws, err := tools.NewWorkspace(root); err == nil {
+		if content, rerr := tools.ReadFile(ws, path); rerr == nil {
+			if strings.TrimSpace(content) == "" {
+				fmt.Fprintf(&b, "\nNote: %s is currently EMPTY — use write_file with the full intended contents instead of edit_file.\n", path)
+			} else {
+				shown, note := content, ""
+				if len(shown) > maxMalformedContent {
+					shown, note = shown[:maxMalformedContent], "\n…[truncated; the file is large — SEARCH a smaller, exact slice]\n"
+				}
+				fmt.Fprintf(&b, "\nActual current contents of %s (copy your SEARCH lines from here, exactly):\n----- BEGIN %s -----\n", path, path)
+				b.WriteString(shown)
+				if !strings.HasSuffix(shown, "\n") {
+					b.WriteString("\n")
+				}
+				b.WriteString(note)
+				fmt.Fprintf(&b, "----- END %s -----\n", path)
+			}
+		}
+	}
+
+	b.WriteString("\nRe-issue the edit_file call now with a corrected block. Do not apologize or stop.")
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
 }
 

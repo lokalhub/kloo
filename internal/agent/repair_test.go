@@ -115,3 +115,27 @@ func TestBuildRepairObservation_MultiBlock(t *testing.T) {
 		t.Errorf("observation should include the actual content\n---\n%s", msg.Content)
 	}
 }
+
+// O5 — malformed nudge now inlines the file's actual content so the model can
+// anchor its SEARCH to real text (botched boundaries, not just bad markers).
+func TestBuildMalformedCorrection_IncludesFileContent(t *testing.T) {
+	root, path := writeTemp(t, "login.page.ts", "@Component({\n  styles: `x`,\n})\nexport class LoginPage {}\n")
+	msg := buildMalformedCorrection(root, path)
+	for _, want := range []string{
+		"MALFORMED", "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE", // format guidance
+		"Actual current contents", "export class LoginPage {}", "BYTE-FOR-BYTE", // the inlined file
+	} {
+		if !strings.Contains(msg.Content, want) {
+			t.Errorf("malformed nudge missing %q\n---\n%s", want, msg.Content)
+		}
+	}
+	if msg.Role != llm.RoleUser {
+		t.Errorf("role = %q, want user", msg.Role)
+	}
+
+	// Empty target → tell it to write_file instead.
+	root2, path2 := writeTemp(t, "empty.ts", "")
+	if got := buildMalformedCorrection(root2, path2).Content; !strings.Contains(got, "EMPTY") || !strings.Contains(got, "write_file") {
+		t.Errorf("empty-file malformed nudge should suggest write_file: %q", got)
+	}
+}

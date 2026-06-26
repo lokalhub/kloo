@@ -537,7 +537,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// Malformed block SHAPE (bad/duplicated/missing markers): nudge with the
 				// exact grammar so the model retries with a correct call instead of
 				// apologizing and stopping (the gpt-oss failure mode).
-				obs = buildMalformedCorrection(path)
+				obs = buildMalformedCorrection(l.Root, path)
 				repairAttempts[path]++
 			case isRepairableEditFailure(derr) && repairAttempts[path] < l.repairLimit():
 				if rep, okRep := buildRepairObservation(l.Root, path, str(call.Args["diff"])); okRep {
