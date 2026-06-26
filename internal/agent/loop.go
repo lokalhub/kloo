@@ -386,10 +386,13 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		editFailStreak int
 
 		// Promised-but-didn't-act rail state: how many times the model ended a turn by
-		// NARRATING a next action ("let me run X") with no tool call. Reset when it
-		// actually emits a call. Catches a model that talks about acting instead of
-		// acting, which the answered-stop would otherwise accept as a finished reply.
-		promiseNudges int
+		// NARRATING a next action ("let me run X") with no tool call — OR gave up in prose
+		// right after a FAILING action (lastActionFailed). Reset only by a SUCCESSFUL
+		// action, so a model that keeps failing-then-explaining is bounded. Catches a
+		// model that talks/explains instead of acting, which the answered-stop would
+		// otherwise accept as a finished reply (e.g. "a wrong command stops the run").
+		promiseNudges    int
+		lastActionFailed bool
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -475,9 +478,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// a model that only ever narrates (never acts) still stops as answered; the
 				// counter resets the moment it emits a real call (below), so distinct
 				// promise episodes each get one rescue.
-				if promisesToAct(msg.Content) && promiseNudges < l.promiseNudgeLimit() {
+				if (promisesToAct(msg.Content) || lastActionFailed) && promiseNudges < l.promiseNudgeLimit() {
 					promiseNudges++
-					convo = append(convo, msg, promiseToActCorrective())
+					convo = append(convo, msg, promiseToActCorrective(lastActionFailed))
 					continue
 				}
 				// Conversational reply (prose, no tool call): the answer is already
@@ -488,7 +491,6 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		}
 		l.Budget.AddTokens(usage.TotalTokens)
 		convo = append(convo, msg)
-		promiseNudges = 0 // the model emitted a real tool call → reset the promise-rail budget
 		for _, ig := range ignored {
 			ignoredAll = append(ignoredAll, ig.Name)
 		}
@@ -545,6 +547,19 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
 		}
+
+		// Promise-rail progress signal: an action SUCCEEDED when it neither errored nor
+		// (for run_command) exited non-zero. A successful action is real progress and
+		// resets the promised-but-didn't-act / failure-recovery nudge budget; a FAILED
+		// one arms lastActionFailed, so if the model then gives up in prose next turn it
+		// is nudged to recover instead of the run silently stopping as answered (the
+		// "a wrong command stops the run" gap). Read tools report ExitCode 0, so only a
+		// run_command non-zero exit or a real dispatch error counts as a failure here.
+		lastActionFailed = derr != nil || result.ExitCode != 0
+		if !lastActionFailed {
+			promiseNudges = 0
+		}
+
 		if isEditTool(call.Name) {
 			if derr == nil {
 				edited = true // a real change landed this run
@@ -1077,16 +1092,25 @@ func exploreCorrective(n int) llm.Message {
 			"something, reply with ONE short question and NO tool call so they can answer.", n)}
 }
 
-// promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail:
-// the model narrated a next action but called no tool, so nothing ran. It tells the
-// model to ACT this turn (emit the call) or to call finish if truly done — rather
-// than describe another step, which the answered-stop would accept as a final reply.
-func promiseToActCorrective() llm.Message {
-	return llm.Message{Role: llm.RoleUser, Content: "You described the next action in prose but did NOT call a tool, so nothing actually ran. " +
-		"Do not narrate what you will do — DO it now: emit the tool call this turn (e.g. run_command to run a command, " +
-		"read_file/search to inspect, edit_file/write_file to change code). If the task is genuinely complete or you are " +
-		"blocked, call finish with a short summary instead of describing more steps. If you need the user to decide " +
-		"something, ask ONE short question and call no tool."}
+// promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail.
+// When lastFailed, the model gave up in prose right after a FAILING action — tell it
+// the failure is not "done" and to recover. Otherwise it merely narrated a next step
+// without emitting the call. Both end with: act now, or call finish if truly done —
+// never accept a tool-free explanation as a finished reply.
+func promiseToActCorrective(lastFailed bool) llm.Message {
+	var b strings.Builder
+	if lastFailed {
+		b.WriteString("Your last command FAILED (non-zero exit) — that is NOT success and the task is not done. " +
+			"Read the error in the previous output, then ACT this turn to recover: fix the cause and run a DIFFERENT " +
+			"command, or try another approach. ")
+	} else {
+		b.WriteString("You described the next action in prose but did NOT call a tool, so nothing actually ran. " +
+			"Do not narrate what you will do — DO it now: emit the tool call this turn (run_command to run a command, " +
+			"read_file/search to inspect, edit_file/write_file to change code). ")
+	}
+	b.WriteString("Only call finish if the task is genuinely complete or you are truly blocked (say why). " +
+		"If you need the user to decide something, ask ONE short question and call no tool.")
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
 }
 
 // promiseVerbs are the action-announcing phrases a model emits right before it SHOULD

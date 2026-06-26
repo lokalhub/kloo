@@ -11,6 +11,24 @@ What you need to run kloo, and the two ways to point it at a model.
 | A git repo in the working dir | Checkpoint + rollback snapshot the tree with `git stash create` before edits and restore on abort. | **Strongly recommended.** Without a repo, checkpoint/rollback is disabled (`ErrNotGitRepo`) — the loop still runs, but a bad run can't be auto-reverted. |
 | A recognised project (or `--verify`) | A real build/test exit code is the loop's only success signal. kloo auto-detects the project's command; pass `--verify` to override it or to cover an unrecognised project. | See [The verify command is the spec](#the-verify-command-is-the-spec). |
 
+### Building from source & the version stamp
+
+Use **`make binary`** to build a local kloo — it stamps the version via ldflags, so
+`kloo --version` reports e.g. `kloo v0.9.25-dev (db360e6, …)` (the latest tag +
+`-dev`, the short commit, and the build date). A plain **`go build`** / **`go install`**
+has no ldflags and reports a bare **`kloo dev (none, unknown)`** — the binary is fine,
+only the version label is unset.
+
+```bash
+make binary          # → bin/kloo, version-stamped from the git tag
+./bin/kloo --version # kloo v0.9.25-dev (<commit>, <date>)
+```
+
+If you keep `~/.local/bin/kloo` symlinked to `bin/kloo`, re-run `make binary` (not a
+bare `go build`) after pulling so the version reflects the release — and **relaunch the
+TUI**, since a running session holds the old binary. Release binaries from goreleaser
+carry the exact tag (no `-dev`).
+
 ## Option A — local model
 
 The default. kloo ships pointed at `http://127.0.0.1:8080/v1` (the llama.cpp
