@@ -107,6 +107,11 @@ type Loop struct {
 	// edit between) before the run halts as churn. 0 ⇒ DefaultEditFailLimit.
 	EditFailLimit int
 
+	// PromiseNudgeLimit is how many times a turn that narrates a next action with no
+	// tool call is nudged to actually emit the call before the run accepts the calm
+	// answered-stop. 0 falls back to DefaultPromiseNudgeLimit.
+	PromiseNudgeLimit int
+
 	// OnState, if set, is called as the machine enters each state — a test seam
 	// for asserting the act→apply→verify→decide→stop sequence.
 	OnState func(State)
@@ -207,6 +212,13 @@ const (
 // [[kloo-churn-flail-gap]].
 const DefaultEditFailLimit = 5
 
+// DefaultPromiseNudgeLimit bounds the promised-but-didn't-act rail: how many times a
+// turn that NARRATES a next action ("let me run X") with no tool call is nudged to
+// actually emit the call before the run accepts the calm answered-stop. The counter
+// resets the moment the model emits a real call, so it bounds only consecutive
+// all-talk turns — a model that acts between promises is never cut off.
+const DefaultPromiseNudgeLimit = 3
+
 // editTools are the tool names that mutate the tree (trigger a lazy checkpoint).
 func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
@@ -271,6 +283,13 @@ func (l *Loop) editFailLimit() int {
 		return l.EditFailLimit
 	}
 	return DefaultEditFailLimit
+}
+
+func (l *Loop) promiseNudgeLimit() int {
+	if l.PromiseNudgeLimit > 0 {
+		return l.PromiseNudgeLimit
+	}
+	return DefaultPromiseNudgeLimit
 }
 
 // isRepairableEditFailure reports whether an edit failure is fixable by the model
@@ -365,6 +384,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
 		editFailStreak int
+
+		// Promised-but-didn't-act rail state: how many times the model ended a turn by
+		// NARRATING a next action ("let me run X") with no tool call. Reset when it
+		// actually emits a call. Catches a model that talks about acting instead of
+		// acting, which the answered-stop would otherwise accept as a finished reply.
+		promiseNudges int
 	)
 
 	// finish builds the report and rolls back on any non-success terminal path.
@@ -441,15 +466,29 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				return finish(ReasonInterrupted, nil, nil, nil)
 			}
 			if errors.Is(err, ErrNoToolCall) {
+				l.Budget.AddTokens(usage.TotalTokens)
+				// Promised-but-didn't-act rail: the model narrated a NEXT action ("let me
+				// run X", "I'll check Y") but emitted no tool call, so nothing ran — the
+				// pattern behind a run that keeps stopping as `answered` mid-task. Rather
+				// than accept that announcement as a finished reply, nudge ONCE per episode
+				// to actually emit the call, then continue. Bounded by promiseNudgeLimit so
+				// a model that only ever narrates (never acts) still stops as answered; the
+				// counter resets the moment it emits a real call (below), so distinct
+				// promise episodes each get one rescue.
+				if promisesToAct(msg.Content) && promiseNudges < l.promiseNudgeLimit() {
+					promiseNudges++
+					convo = append(convo, msg, promiseToActCorrective())
+					continue
+				}
 				// Conversational reply (prose, no tool call): the answer is already
 				// streamed to the transcript — stop calmly rather than error/churn.
-				l.Budget.AddTokens(usage.TotalTokens)
 				return finish(ReasonAnswered, nil, nil, nil)
 			}
 			return finish(ReasonError, err, nil, nil)
 		}
 		l.Budget.AddTokens(usage.TotalTokens)
 		convo = append(convo, msg)
+		promiseNudges = 0 // the model emitted a real tool call → reset the promise-rail budget
 		for _, ig := range ignored {
 			ignoredAll = append(ignoredAll, ig.Name)
 		}
@@ -1036,6 +1075,50 @@ func exploreCorrective(n int) llm.Message {
 			"context now — STOP reading and ACT: make the edit the task requires (edit_file/"+
 			"write_file) or run the needed command. If you genuinely need the user to clarify "+
 			"something, reply with ONE short question and NO tool call so they can answer.", n)}
+}
+
+// promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail:
+// the model narrated a next action but called no tool, so nothing ran. It tells the
+// model to ACT this turn (emit the call) or to call finish if truly done — rather
+// than describe another step, which the answered-stop would accept as a final reply.
+func promiseToActCorrective() llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: "You described the next action in prose but did NOT call a tool, so nothing actually ran. " +
+		"Do not narrate what you will do — DO it now: emit the tool call this turn (e.g. run_command to run a command, " +
+		"read_file/search to inspect, edit_file/write_file to change code). If the task is genuinely complete or you are " +
+		"blocked, call finish with a short summary instead of describing more steps. If you need the user to decide " +
+		"something, ask ONE short question and call no tool."}
+}
+
+// promiseVerbs are the action-announcing phrases a model emits right before it SHOULD
+// call a tool. They are matched (lower-cased, substring) on a no-tool-call reply by
+// promisesToAct. Deliberately action-verb-anchored ("let me run", not bare "let me")
+// so a genuine conversational closer like "let me know if…" is NOT mis-read as a
+// promise to act.
+var promiseVerbs = []string{
+	"let me run", "let me check", "let me try", "let me look", "let me examine",
+	"let me see", "let me execute", "let me test", "let me install", "let me verify",
+	"let me read", "let me search", "let me list", "let me inspect", "let me explore",
+	"let me start", "let me first", "let me fix", "let me update", "let me create",
+	"let me add", "let me find", "let me open", "let me build", "let me actually",
+	"let's run", "let's check", "let's try", "let's see", "let's start",
+	"i'll run", "i'll check", "i'll try", "i'll look", "i'll start", "i'll fix",
+	"i will run", "i will check", "i'm going to", "i am going to",
+	"going to run", "going to check", "try running", "now let me", "now i'll",
+	"next, let me", "next i'll", "next, i'll",
+}
+
+// promisesToAct reports whether a no-tool-call reply READS like the model announced a
+// next action ("let me run X") rather than delivering a final answer. Used by the
+// promised-but-didn't-act rail to nudge the model to actually emit the call before
+// the run accepts the calm answered-stop.
+func promisesToAct(content string) bool {
+	s := strings.ToLower(content)
+	for _, p := range promiseVerbs {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // failingOutput returns the combined output to compare for churn, or "" if the
