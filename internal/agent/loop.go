@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -360,6 +361,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// each task clean.
 		repairAttempts = map[string]int{}
 
+		// knownFiles are paths whose CONTENT the model has seen this run — read_file'd,
+		// successfully edit_file'd, or successfully write_file'd. The write_file clobber
+		// guard uses it to refuse a BLIND overwrite of an existing non-empty file the
+		// model never read (which silently destroyed a real config in the wild).
+		knownFiles = map[string]bool{}
+
 		// Stall backstop state: a no-progress counter (resets on any progress) that
 		// catches a model spinning on read-only/no-op commands without calling finish.
 		stall       int
@@ -538,14 +545,31 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			result tools.Result
 			derr   error
 		)
-		if isEditTool(call.Name) && l.OnBeforeEdit != nil && !l.OnBeforeEdit(call) {
+		switch {
+		case isEditTool(call.Name) && l.OnBeforeEdit != nil && !l.OnBeforeEdit(call):
 			// approve-each rejected this edit: skip the apply, record it.
 			derr = errEditRejected
-		} else {
+		case call.Name == tools.NameWriteFile && l.wouldClobberUnread(str(call.Args["path"]), str(call.Args["content"]), knownFiles):
+			// Clobber guard: write_file would REPLACE an existing non-empty file the model
+			// never read this run — a blind overwrite that has silently destroyed real
+			// config. Refuse the apply and nudge the model to read-then-edit instead.
+			derr = errWriteClobber
+		default:
 			result, derr = l.Registry.Dispatch(ctx, call)
 		}
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
+		}
+
+		// Track files whose CONTENT the model has now seen (read/edited/written OK), so a
+		// later write_file to one of them is an informed overwrite, not a blind clobber.
+		if derr == nil {
+			switch call.Name {
+			case tools.NameReadFile, tools.NameEditFile, tools.NameWriteFile:
+				if p := str(call.Args["path"]); p != "" {
+					knownFiles[p] = true
+				}
+			}
 		}
 
 		// Promise-rail progress signal: an action SUCCEEDED when it neither errored nor
@@ -599,6 +623,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					repairAttempts[path]++
 				}
 			}
+		}
+		if call.Name == tools.NameWriteFile && errors.Is(derr, errWriteClobber) {
+			// Replace the bare error with a guidance nudge: read the file first, then make
+			// a surgical edit_file — or write_file again only to truly replace all of it.
+			obs = buildClobberCorrection(l.Root, str(call.Args["path"]))
 		}
 		convo = append(convo, obs)
 
@@ -1156,6 +1185,64 @@ func failingOutput(v VerifyResult) string {
 
 // errEditRejected marks an edit the approve-each dial rejected (skipped).
 var errEditRejected = errors.New("agent: edit rejected (approve-each)")
+
+// errWriteClobber marks a write_file the clobber guard refused: it would shrink a
+// substantial existing file the model never read this run (a blind overwrite).
+var errWriteClobber = errors.New("agent: write_file would clobber an unread file")
+
+// clobberMinBytes is the size at/above which an existing file is "substantial" enough
+// to guard from a blind shrinking overwrite. Below it, a file is cheap to recreate and
+// routinely (re)written, so guarding it would be noise; the real data-loss case in the
+// wild was a ~2 KiB config replaced by a ~250-byte fabricated stub.
+const clobberMinBytes = 512
+
+// wouldClobberUnread reports whether a write_file to path would BLINDLY destroy unseen
+// content: the target exists, is SUBSTANTIAL (≥ clobberMinBytes), the model has not
+// read it this run (path ∉ known), AND the new content is SMALLER than what is there
+// (a net shrink). A missing/empty/small file, a same-or-larger rewrite, a directory,
+// an unresolved jail path, or an already-known file is NOT guarded — writing is fine.
+func (l *Loop) wouldClobberUnread(path, newContent string, known map[string]bool) bool {
+	if path == "" || known[path] {
+		return false
+	}
+	ws, err := tools.NewWorkspace(l.Root)
+	if err != nil {
+		return false
+	}
+	abs, err := ws.Resolve(path)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(abs)
+	if err != nil || fi.IsDir() {
+		return false // missing/new file or a dir ⇒ not a clobber
+	}
+	return fi.Size() >= clobberMinBytes && int64(len(newContent)) < fi.Size()
+}
+
+// buildClobberCorrection is the model-facing nudge when the clobber guard refuses a
+// write_file: read the existing file first, then make a surgical edit_file — or
+// write_file again only if a full replacement is truly intended. It names the file
+// and its size so the model sees what it was about to destroy.
+func buildClobberCorrection(root, path string) llm.Message {
+	size := int64(-1)
+	if ws, err := tools.NewWorkspace(root); err == nil {
+		if abs, rerr := ws.Resolve(path); rerr == nil {
+			if fi, serr := os.Stat(abs); serr == nil {
+				size = fi.Size()
+			}
+		}
+	}
+	where := path
+	if size >= 0 {
+		where = fmt.Sprintf("%s (%d bytes)", path, size)
+	}
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"write_file was REFUSED: it would REPLACE the existing file %s with LESS content, and you have NOT read it "+
+			"this run — a blind shrinking overwrite can destroy content you never saw. First call read_file %s to see "+
+			"what is there, then make the change with edit_file (a surgical SEARCH/REPLACE). Only call write_file on %s "+
+			"again if you genuinely intend to replace its ENTIRE contents, having read it first.", where, path, path)}
+}
 
 // ErrNoToolCall signals that the model replied in prose with no tool call (after the
 // corrective re-prompt) — a conversational answer, not a failure. The loop turns it

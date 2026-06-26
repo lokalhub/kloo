@@ -31,12 +31,12 @@
                                                                                         
                                                                                         
                                                                                         
-                                                                                        
 ● assistant                                                                             
   Plan                                                                                  
   I'll rename the three tabs. Run npm run build.                                        
   • edit tab1                                                                           
   • edit tab2                                                                           
+
 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │> type a task…                                           /add /model /mode /stop /diff  │

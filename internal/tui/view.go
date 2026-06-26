@@ -9,7 +9,7 @@ import (
 // Region heights (border lines included).
 const (
 	headerHeight   = 3 // bordered status line
-	activityHeight = 1 // thinking/spinner line, ABOVE the input (Claude-style)
+	activityHeight = 2 // thinking/spinner line + a blank spacer below it, ABOVE the input (Claude-style)
 	inputHeight    = 3 // bordered input line
 	hintHeight     = 1 // interrupt / dial hint line
 )
@@ -32,10 +32,7 @@ func (m Model) renderTranscriptRegion() string {
 	if m.vpReady {
 		return m.vp.View()
 	}
-	h := m.height - headerHeight - activityHeight - inputHeight - hintHeight
-	if h < 1 {
-		h = 1
-	}
+	h := max(m.height-headerHeight-activityHeight-inputHeight-hintHeight, 1)
 	return strings.Repeat("\n", h-1)
 }
 
@@ -96,13 +93,15 @@ func (m Model) renderInput() string {
 // renderHint renders the line under the input: the animated thinking line while
 // a run is active (verbs.go), otherwise the interrupt + permission-dial hint.
 // renderActivityLine is the Claude-style working line shown ABOVE the input while
-// a run is active (verb + spinner + activity + tokens). Blank when idle so the
-// layout height stays stable.
+// a run is active (verb + spinner + activity + tokens). It reserves activityHeight
+// (2) lines: the thinking line plus a trailing blank spacer, so the thinking display
+// isn't cramped against the input border. Idle returns two blank lines, keeping the
+// region height stable so the viewport math (model.go) never shifts.
 func (m Model) renderActivityLine() string {
 	if m.running {
-		return truncate(m.renderThinking(), m.width)
+		return truncate(m.renderThinking(), m.width) + "\n" // thinking line + blank spacer
 	}
-	return ""
+	return "\n" // two blank lines (stable height) when idle
 }
 
 func (m Model) renderHint() string {
