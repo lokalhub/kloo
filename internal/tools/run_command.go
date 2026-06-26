@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,7 @@ type RunCommandTool struct {
 	timeout   time.Duration
 	maxOutput int
 	bg        *BackgroundManager // nil ⇒ background mode disabled
+	allowEnv  []string           // extra env var NAMES passed through from kloo's env (--allow-env)
 }
 
 // RunCommandOption configures a RunCommandTool.
@@ -67,6 +69,16 @@ func WithMaxOutput(n int) RunCommandOption {
 // background=true returns an error.
 func WithBackground(bg *BackgroundManager) RunCommandOption {
 	return func(t *RunCommandTool) { t.bg = bg }
+}
+
+// WithAllowedEnv adds extra env var NAMES (from kloo's own environment) to the
+// otherwise least-privilege env handed to executed commands — the deliberate,
+// user-granted escape hatch for a trusted deploy/CI step that needs a specific
+// secret (e.g. an admin password or CF token) without leaking the whole environment
+// or baking the value into a prompt. Only names the user passes (--allow-env) and
+// that are actually set in kloo's env are forwarded.
+func WithAllowedEnv(names []string) RunCommandOption {
+	return func(t *RunCommandTool) { t.allowEnv = names }
 }
 
 // NewRunCommandTool builds the run_command tool jailed to ws.
@@ -119,7 +131,7 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 		if t.bg == nil {
 			return Result{}, errors.New("tools: background mode is not enabled for run_command")
 		}
-		id, err := t.bg.Start(cwd, controlledEnv(), command)
+		id, err := t.bg.Start(cwd, controlledEnv(t.allowEnv), command)
 		if err != nil {
 			return Result{}, fmt.Errorf("tools: failed to start background command: %w", err)
 		}
@@ -138,7 +150,7 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 
 	cmd := exec.CommandContext(runCtx, "sh", "-c", command)
 	cmd.Dir = cwd
-	cmd.Env = controlledEnv()
+	cmd.Env = controlledEnv(t.allowEnv)
 	setProcGroup(cmd) // unix: own process group so we can kill the child tree
 
 	// Override the default context-kill to kill the whole process GROUP, not just
@@ -198,12 +210,28 @@ var nonInteractiveEnv = []string{
 }
 
 // controlledEnv builds the allowlisted environment for executed commands, plus the
-// non-interactive signals so a prompting command can't hang the loop.
-func controlledEnv() []string {
-	env := make([]string, 0, len(envAllowlist)+len(nonInteractiveEnv))
-	for _, k := range envAllowlist {
+// non-interactive signals so a prompting command can't hang the loop. extra names
+// (from --allow-env) are forwarded from kloo's env when set — the user-granted
+// passthrough for a trusted deploy secret; an unset or already-allowlisted name is a
+// no-op.
+func controlledEnv(extra []string) []string {
+	env := make([]string, 0, len(envAllowlist)+len(extra)+len(nonInteractiveEnv))
+	seen := make(map[string]bool, len(envAllowlist)+len(extra))
+	add := func(k string) {
+		if seen[k] {
+			return
+		}
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
+			seen[k] = true
+		}
+	}
+	for _, k := range envAllowlist {
+		add(k)
+	}
+	for _, k := range extra {
+		if k = strings.TrimSpace(k); k != "" {
+			add(k)
 		}
 	}
 	return append(env, nonInteractiveEnv...)

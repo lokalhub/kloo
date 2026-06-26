@@ -141,6 +141,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagNoLint      bool
 		flagCtx         int
 		flagAllowedDirs []string
+		flagAllowEnv    []string
 	)
 
 	cmd := &cobra.Command{
@@ -191,6 +192,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("allowed-dirs") {
 				flags.AllowedImportDirs = flagAllowedDirs
+			}
+			if fs.Changed("allow-env") {
+				flags.AllowedEnv = flagAllowEnv
 			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
@@ -245,6 +249,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagLint, "lint", "", "override kloo's auto-detected fast lint command (advisory; runs on edited files after each edit)")
 	f.BoolVar(&flagNoLint, "no-lint", false, "disable the fast advisory lint step (lint is on by default when a linter is detected)")
 	f.StringSliceVar(&flagAllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
+	f.StringSliceVar(&flagAllowEnv, "allow-env", nil, "env var NAMES to forward from kloo's env into run_command (repeatable/comma-separated) — the trusted-secret passthrough for a deploy/CI step; default exposes only PATH/HOME/…")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

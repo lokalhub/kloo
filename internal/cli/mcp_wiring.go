@@ -25,7 +25,7 @@ import (
 // MCP types it touches are mcp.Manager and mcp.ConfigFromEntries (the converter that
 // keeps internal/config from importing the SDK).
 func wireMCP(ctx context.Context, cfg config.Config, ws tools.Workspace, logf func(string, ...any)) (*tools.Registry, func() error) {
-	reg := tools.DefaultRegistry(ws)
+	reg := tools.DefaultRegistry(ws, tools.WithAllowedEnv(cfg.AllowedEnv))
 	if cfg.MCPDisabled {
 		return reg, func() error { return nil }
 	}

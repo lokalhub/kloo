@@ -125,6 +125,11 @@ type Config struct {
 	// are confined to the workspace jail. This is read-only and load-time only: it
 	// widens AGENTS.md import resolution, never the model's runtime file tools.
 	AllowedImportDirs []string
+	// AllowedEnv are extra env var NAMES (--allow-env) forwarded from kloo's own
+	// environment into run_command's otherwise least-privilege env — the user-granted
+	// passthrough for a trusted deploy/CI secret (e.g. an admin password or CF token).
+	// Empty ⇒ only the fixed allowlist (PATH/HOME/…) is exposed.
+	AllowedEnv []string
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -166,6 +171,8 @@ type Flags struct {
 	// AllowedImportDirs (--allowed-dirs) whitelists dirs outside the workspace that
 	// an AGENTS.md `@import` may read from. nil ⇒ not set on the CLI.
 	AllowedImportDirs []string
+	// AllowedEnv (--allow-env) names env vars forwarded into run_command. nil ⇒ unset.
+	AllowedEnv []string
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
@@ -437,6 +444,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.AllowedImportDirs != nil { // CLI-only (--allowed-dirs); never from profile
 		cfg.AllowedImportDirs = flags.AllowedImportDirs
+	}
+	if flags.AllowedEnv != nil { // CLI-only (--allow-env); never from profile
+		cfg.AllowedEnv = flags.AllowedEnv
 	}
 
 	return cfg, nil
