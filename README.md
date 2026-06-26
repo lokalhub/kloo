@@ -43,6 +43,14 @@ skip-aware (deps/build dirs + `.gitignore`) and bounded — so `search` to locat
 `read_dir` the area → `edit_file` is the find-read-change loop, fast even for a
 big-context model.
 
+For UI/e2e work the agent can **bring up its own stack**: `run_command` with
+`background: true` starts a long-running process (a dev server, worker sim, watcher)
+**detached** and returns an id immediately, instead of blocking until it exits;
+**`command_output`** then reads that process's new output (to wait until it is ready)
+and stops it. Anything started this way is **auto-stopped when the run ends**, so a
+server never leaks across runs. This is what lets kloo build → serve → run e2e →
+report on its own.
+
 If your repo has an **`AGENTS.md`**, kloo loads it into the system prompt and
 follows it every turn — checked in the launch directory *and* immediate
 subdirectories, so a project that lives in a subdir (`./myApp`) still has its rules

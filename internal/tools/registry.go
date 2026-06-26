@@ -104,6 +104,16 @@ type Tool interface {
 type Registry struct {
 	order []string
 	tools map[string]Tool
+	bg    *BackgroundManager // long-running commands started this run; nil ⇒ none
+}
+
+// StopBackground kills every background command started through this registry. The
+// loop calls it on run termination so a server the agent started never leaks past
+// the run. Safe on a nil registry / when no background manager is wired.
+func (r *Registry) StopBackground() {
+	if r != nil && r.bg != nil {
+		r.bg.StopAll()
+	}
 }
 
 // NewRegistry returns an empty registry.
