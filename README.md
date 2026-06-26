@@ -46,7 +46,10 @@ big-context model.
 If your repo has an **`AGENTS.md`**, kloo loads it into the system prompt and
 follows it every turn — checked in the launch directory *and* immediate
 subdirectories, so a project that lives in a subdir (`./myApp`) still has its rules
-applied.
+applied. An `AGENTS.md` can **`@import`** other files (shared convention docs, deep
+project rules) so their content is pinned every turn too — by default within the
+workspace, or from outside it with `--allowed-dirs`. See
+**[docs/configuration.md](docs/configuration.md#project-instructions-agentsmd)**.
 
 kloo also remembers the conversation **across runs and restarts**, per workspace,
 so follow-ups ("what's the issue?", "continue") resume with context. Sessions live

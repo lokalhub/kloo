@@ -120,6 +120,11 @@ type Config struct {
 	// MCPDisabled globally disables MCP (env KLOO_MCP / --no-mcp). When true the
 	// cli wiring skips connecting any server.
 	MCPDisabled bool
+	// AllowedImportDirs are extra directories OUTSIDE the workspace root that an
+	// AGENTS.md `@import` directive may read from (--allowed-dirs). Empty ⇒ imports
+	// are confined to the workspace jail. This is read-only and load-time only: it
+	// widens AGENTS.md import resolution, never the model's runtime file tools.
+	AllowedImportDirs []string
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -158,6 +163,9 @@ type Flags struct {
 	// NoMCP, when non-nil, forces MCP on/off above env+profile (true ⇒ disabled).
 	// The cobra --no-mcp flag is wired in Phase 03; this field is the resolve seam.
 	NoMCP *bool
+	// AllowedImportDirs (--allowed-dirs) whitelists dirs outside the workspace that
+	// an AGENTS.md `@import` may read from. nil ⇒ not set on the CLI.
+	AllowedImportDirs []string
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
@@ -426,6 +434,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.NoMCP != nil { // flag wins over env+profile
 		cfg.MCPDisabled = *flags.NoMCP
+	}
+	if flags.AllowedImportDirs != nil { // CLI-only (--allowed-dirs); never from profile
+		cfg.AllowedImportDirs = flags.AllowedImportDirs
 	}
 
 	return cfg, nil
