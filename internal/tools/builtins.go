@@ -130,13 +130,16 @@ func (t editFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 // to ws. opts configure run_command (timeout, output bound).
 func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r := NewRegistry()
+	bg := NewBackgroundManager()
+	r.bg = bg
 	r.Register(readFileTool{ws})
 	r.Register(readDirTool{ws})
 	r.Register(searchTool{ws})
 	r.Register(editFileTool{ws})
 	r.Register(writeFileTool{ws})
 	r.Register(listDirTool{ws})
-	r.Register(NewRunCommandTool(ws, opts...))
-	r.Register(finishTool{}) // explicit terminator; the loop intercepts it
+	r.Register(NewRunCommandTool(ws, append(opts, WithBackground(bg))...))
+	r.Register(commandOutputTool{bg}) // read/stop background commands
+	r.Register(finishTool{})          // explicit terminator; the loop intercepts it
 	return r
 }

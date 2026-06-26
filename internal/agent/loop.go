@@ -405,6 +405,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
 		l.onState(StateStop)
+		l.Registry.StopBackground() // kill any background servers this run started (no leaks across runs)
 		st := l.Budget.Stats()
 		compactions := 0
 		if l.Memory != nil {

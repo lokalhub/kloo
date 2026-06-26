@@ -46,6 +46,7 @@ type RunCommandTool struct {
 	ws        Workspace
 	timeout   time.Duration
 	maxOutput int
+	bg        *BackgroundManager // nil ⇒ background mode disabled
 }
 
 // RunCommandOption configures a RunCommandTool.
@@ -61,6 +62,13 @@ func WithMaxOutput(n int) RunCommandOption {
 	return func(t *RunCommandTool) { t.maxOutput = n }
 }
 
+// WithBackground enables run_command background=true, routing detached commands to
+// the shared BackgroundManager (a server the agent keeps running). Without it,
+// background=true returns an error.
+func WithBackground(bg *BackgroundManager) RunCommandOption {
+	return func(t *RunCommandTool) { t.bg = bg }
+}
+
 // NewRunCommandTool builds the run_command tool jailed to ws.
 func NewRunCommandTool(ws Workspace, opts ...RunCommandOption) RunCommandTool {
 	t := RunCommandTool{ws: ws, timeout: defaultCommandTimeout, maxOutput: defaultMaxOutput}
@@ -72,14 +80,15 @@ func NewRunCommandTool(ws Workspace, opts ...RunCommandOption) RunCommandTool {
 
 func (t RunCommandTool) Name() string { return NameRunCommand }
 func (t RunCommandTool) Description() string {
-	return "Run a shell command in the workspace and capture stdout, stderr, and the exit code. Use this to build, test, or inspect the project. The exit code is the source of truth."
+	return "Run a shell command in the workspace and capture stdout, stderr, and the exit code. Use this to build, test, or inspect the project. The exit code is the source of truth. For a LONG-RUNNING process you must keep running (a dev server, worker sim, watcher), set background=true: it returns immediately with an id; then use command_output to check it is ready and to stop it."
 }
 func (t RunCommandTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
 			"command":         {Type: "string", Description: "The shell command to run."},
-			"timeout_seconds": {Type: "number", Description: "Optional timeout in seconds (default applies otherwise)."},
+			"timeout_seconds": {Type: "number", Description: "Optional timeout in seconds (default applies otherwise). Ignored when background=true."},
 			"cwd":             {Type: "string", Description: "Optional workspace-relative working directory (defaults to the workspace root)."},
+			"background":      {Type: "boolean", Description: "Run the command DETACHED and return immediately — for a long-running server/watcher. Read its output and stop it with command_output. Auto-stopped when the run ends."},
 		},
 		Required: []string{"command"},
 	}
@@ -102,6 +111,21 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 			return Result{}, err // ErrPathEscape surfaces unchanged
 		}
 		cwd = resolved
+	}
+
+	// Background mode: launch detached and return immediately, leaving the process
+	// running so the agent can build/test against it (a server it must keep up).
+	if argBool(c.Args, "background") {
+		if t.bg == nil {
+			return Result{}, errors.New("tools: background mode is not enabled for run_command")
+		}
+		id, err := t.bg.Start(cwd, controlledEnv(), command)
+		if err != nil {
+			return Result{}, fmt.Errorf("tools: failed to start background command: %w", err)
+		}
+		return Result{Output: fmt.Sprintf(
+			"started background command %s: %s\nIt is running detached. Use command_output with id=%q to read its output (e.g. to check a server is ready), and command_output id=%q stop=true to stop it. It is auto-stopped when this run ends.",
+			id, command, id, id)}, nil
 	}
 
 	timeout := t.timeout
