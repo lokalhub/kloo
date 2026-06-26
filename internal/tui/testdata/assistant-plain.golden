@@ -33,10 +33,10 @@
                                                                                         
                                                                                         
                                                                                         
-                                                                                        
 ● assistant                                                                             
   Just plain prose with no markers at all.                                              
   Second line here.                                                                     
+
 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │> type a task…                                           /add /model /mode /stop /diff  │
