@@ -36,7 +36,7 @@ func statusOf(m *BackgroundManager, id string) string {
 // read incrementally while it runs, and Stop kills it.
 func TestBackgroundStartReadStop(t *testing.T) {
 	m := NewBackgroundManager()
-	id, err := m.Start(t.TempDir(), controlledEnv(), "echo ready; for i in 1 2 3; do echo line$i; sleep 0.05; done; sleep 30")
+	id, err := m.Start(t.TempDir(), controlledEnv(nil), "echo ready; for i in 1 2 3; do echo line$i; sleep 0.05; done; sleep 30")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestBackgroundStartReadStop(t *testing.T) {
 // log again.
 func TestBackgroundIncrementalReads(t *testing.T) {
 	m := NewBackgroundManager()
-	id, err := m.Start(t.TempDir(), controlledEnv(), "echo first; sleep 0.3; echo second; sleep 30")
+	id, err := m.Start(t.TempDir(), controlledEnv(nil), "echo first; sleep 0.3; echo second; sleep 30")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -97,8 +97,8 @@ func TestBackgroundIncrementalReads(t *testing.T) {
 // cleanup so a server never leaks).
 func TestBackgroundStopAll(t *testing.T) {
 	m := NewBackgroundManager()
-	id1, _ := m.Start(t.TempDir(), controlledEnv(), "sleep 60")
-	id2, _ := m.Start(t.TempDir(), controlledEnv(), "sleep 60")
+	id1, _ := m.Start(t.TempDir(), controlledEnv(nil), "sleep 60")
+	id2, _ := m.Start(t.TempDir(), controlledEnv(nil), "sleep 60")
 	m.StopAll()
 	for _, id := range []string{id1, id2} {
 		exited := false
