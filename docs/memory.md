@@ -117,6 +117,11 @@ fresh current-file + verify) are what keep it anchored. To help further:
 - **Scope the task** and give ordered steps so it doesn't over-explore.
 - **`/add` the files that matter** — pinned files go into the system prompt every
   turn, immune to compaction.
+- **Put standing rules in `AGENTS.md`** (or `@import` them) — like `/add`, the
+  `AGENTS.md` block lives in the system prompt and is never compacted, so a
+  convention doc read once via `read_file` (which *does* get summarized away) stays
+  put when imported instead. See
+  [configuration.md](configuration.md#project-instructions-agentsmd).
 - **Raise `maxContextTokens`** if your model serves more than 8k — compaction only
   kicks in when needed, so a bigger window just means less summarizing.
 

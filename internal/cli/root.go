@@ -124,22 +124,23 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	deps.withDefaults()
 
 	var (
-		flagModel    string
-		flagProvider string
-		flagEndpoint string
-		flagMode     string
-		flagProfile  string
-		flagMaxSteps int
-		flagTemp     float64
-		flagVerify   string
-		flagHeadless bool
-		flagEffort   string
-		flagNewSess  bool
-		flagResume   string
-		flagNoMCP    bool
-		flagLint     string
-		flagNoLint   bool
-		flagCtx      int
+		flagModel       string
+		flagProvider    string
+		flagEndpoint    string
+		flagMode        string
+		flagProfile     string
+		flagMaxSteps    int
+		flagTemp        float64
+		flagVerify      string
+		flagHeadless    bool
+		flagEffort      string
+		flagNewSess     bool
+		flagResume      string
+		flagNoMCP       bool
+		flagLint        string
+		flagNoLint      bool
+		flagCtx         int
+		flagAllowedDirs []string
 	)
 
 	cmd := &cobra.Command{
@@ -187,6 +188,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("no-mcp") {
 				flags.NoMCP = &flagNoMCP // flag beats KLOO_MCP env and the profile
+			}
+			if fs.Changed("allowed-dirs") {
+				flags.AllowedImportDirs = flagAllowedDirs
 			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
@@ -240,6 +244,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagNoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
 	f.StringVar(&flagLint, "lint", "", "override kloo's auto-detected fast lint command (advisory; runs on edited files after each edit)")
 	f.BoolVar(&flagNoLint, "no-lint", false, "disable the fast advisory lint step (lint is on by default when a linter is detected)")
+	f.StringSliceVar(&flagAllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

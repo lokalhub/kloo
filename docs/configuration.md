@@ -47,6 +47,7 @@ churn detection as the primary guard).
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
 | `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
+| `--allowed-dirs` | _(unset)_ | Directories **outside** the workspace that an `AGENTS.md` [`@import`](#project-instructions-agentsmd) may read from. Repeatable or comma-separated. Read-only and load-time only — it never widens the model's file tools. |
 | `--profile` | _(unset)_ | Path to `profiles.json`; defaults to `~/.config/kloo/profiles.json`. |
 
 ## Environment variables
@@ -122,6 +123,85 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 
 A headless run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
+
+## Project instructions (`AGENTS.md`)
+
+If your repo has an **`AGENTS.md`** (the open agent-instructions convention), kloo
+loads it into the **system prompt** and applies it **every turn**. Unlike a file you
+`read_file`, the system prompt is never compacted — so `AGENTS.md` content is
+*pinned*: the model can't "forget" it on a long run. kloo looks in the **launch
+directory and each immediate subdirectory** (skipping `node_modules`, `dist`,
+`build`, `www`, … and dot-dirs), so a project that lives in `./myApp` still has its
+rules applied. All discovered files are stacked and labelled with their path.
+
+### `@import` — pull in other files
+
+An `AGENTS.md` can pull another file's content in, pinned the same way, with an
+import directive on its own line:
+
+```md
+# AGENTS.md
+Follow the shared conventions:
+@import lokal/agents/common/conventions/ui.md
+@import lokal/agents/common/conventions/api.md
+```
+
+- **Syntax.** `@import <path>` (the rest of the line is the path), or a bare
+  `@<path>` when the path is a single token and looks like a path (contains `/` or
+  `.`). A bare non-path-like word on its own line (e.g. `@channel`) is left as prose.
+- **Paths with spaces.** Use the explicit form, or quote the path:
+  `@import "my docs/ui rules.md"`, `@import 'my docs/ui rules.md'`, or bare
+  `@"my docs/ui rules.md"`.
+- **Resolution.** Relative to the importing `AGENTS.md`'s own directory (or an
+  absolute path). The content is expanded **in place**, labelled `### imported: <path>`.
+- **Not recursive.** An imported file's own `@lines` stay literal — this sidesteps
+  cycles. (Import the files you need directly from `AGENTS.md`.)
+- **Jailed by default.** A path is read only if it resolves **inside the workspace**;
+  one that escapes is skipped with a log line — unless its directory is whitelisted
+  with `--allowed-dirs` (below).
+- A missing/empty/oversize import is skipped (logged), never fatal. Each import is
+  read up to 256 KiB; the total instructions budget still applies (below).
+
+### `--allowed-dirs` — import from outside the workspace
+
+When the file you want to import lives **outside** the workspace (e.g. a shared
+convention library beside the project, not under it), whitelist its directory:
+
+```bash
+# launched inside the project; conventions are a sibling tree
+kloo --allowed-dirs ../../../lokal/agents/common/conventions
+```
+
+with, in the project's `AGENTS.md`:
+
+```md
+@import ../../../lokal/agents/common/conventions/ui.md
+```
+
+- **Syntax.** Repeatable or comma-separated:
+  `--allowed-dirs a,b` or `--allowed-dirs a --allowed-dirs b`. Each entry is a
+  **directory** (any import resolving inside it, or a subdir, is permitted).
+- Relative paths resolve against the launch cwd; absolute paths work too; symlinks
+  are resolved before the containment check.
+- A directory whose path contains a comma must use the **repeated-flag** form (the
+  comma form splits on `,`); a path with spaces needs shell quoting.
+- This is **read-only and load-time only**: it widens `@import` resolution, never
+  the model's `read_file`/`edit_file`/`run_command`, which stay jailed to the
+  workspace.
+
+> Tip: if you launch kloo at a parent that already contains the shared tree (e.g. a
+> monorepo root), the conventions are *inside* the workspace and you don't need
+> `--allowed-dirs` at all — just `@import path/under/the/workspace.md`.
+
+### Instructions budget
+
+The pinned `AGENTS.md` block (including any `@import`-ed content) is re-sent on
+**every** turn and never compacted, so it's deliberately bounded: **~3% of the
+context window** (`maxContextTokens`), clamped to a **16 KiB floor** (so small
+models keep a usable minimum) and a **64 KiB ceiling** (so a huge window can't pin a
+giant rulebook every turn). Past the budget, the instructions are truncated with a
+`…[truncated]` marker. On an 8k window that's the 16 KiB floor; on a 256k+ window
+it's the 64 KiB ceiling.
 
 ## Bundled per-model defaults
 
