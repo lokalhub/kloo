@@ -152,7 +152,13 @@ func parseSSE(ctx context.Context, body io.Reader, onDelta func(Delta) error) (C
 			}
 			acc.absorbDelta(*ch.Delta)
 			if onDelta != nil {
-				if err := onDelta(*ch.Delta); err != nil {
+				d := *ch.Delta
+				// Show a thinking model's reasoning live (else the UI looks frozen for
+				// hundreds of thinking tokens); the final fallback still owns assembly.
+				if d.Content == "" && d.ReasoningContent != "" {
+					d.Content = d.ReasoningContent
+				}
+				if err := onDelta(d); err != nil {
 					return true, err
 				}
 			}
@@ -217,6 +223,7 @@ type accumulator struct {
 	created      int64
 	role         string
 	content      strings.Builder
+	reasoning    strings.Builder // thinking model's reasoning_content (folded into content if content is empty)
 	toolCalls    []ToolCall
 	indexPos     map[int]int // delta tool-call index -> position in toolCalls
 	finishReason string
@@ -244,6 +251,7 @@ func (a *accumulator) absorbDelta(d Delta) {
 		a.role = d.Role
 	}
 	a.content.WriteString(d.Content)
+	a.reasoning.WriteString(d.ReasoningContent)
 	for _, tc := range d.ToolCalls {
 		pos, ok := a.indexPos[tc.Index]
 		if !ok {
@@ -267,7 +275,8 @@ func (a *accumulator) absorbDelta(d Delta) {
 
 // response materialises the accumulated state into a ChatResponse.
 func (a *accumulator) response() ChatResponse {
-	msg := Message{Role: a.role, Content: a.content.String()}
+	msg := Message{Role: a.role, Content: a.content.String(), ReasoningContent: a.reasoning.String()}
+	msg.FinalizeReasoning() // fold reasoning into content when a thinking model left content blank
 	if len(a.toolCalls) > 0 {
 		// Drop the streaming-only Index from the assembled (non-streaming) calls.
 		calls := make([]ToolCall, len(a.toolCalls))

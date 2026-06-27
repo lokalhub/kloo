@@ -156,6 +156,10 @@ func TestPromisesToAct(t *testing.T) {
 		"Now let me examine a few more files",
 		"I'm going to try running it",
 		"let's see what happens",
+		"I'll build and upload the bundle",                    // broadened verb
+		"Let me start by running the deploy",                  // "start by"
+		"I'll deploy the new version",                         // "i'll deploy"
+		"Here is the command:\n```bash\nlokal mp deploy\n```", // fenced code block, no tool call
 	}
 	for _, s := range yes {
 		if !promisesToAct(s) {

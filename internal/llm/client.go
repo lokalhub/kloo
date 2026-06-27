@@ -125,6 +125,11 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (ChatResponse, e
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return ChatResponse{}, fmt.Errorf("llm: decode response: %w", err)
 	}
+	// Reasoning-content fallback: a thinking model may leave content empty and put its
+	// output in reasoning_content — fold it back so the loop never sees a blank turn.
+	for i := range resp.Choices {
+		resp.Choices[i].Message.FinalizeReasoning()
+	}
 	return resp, nil
 }
 

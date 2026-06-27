@@ -142,6 +142,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagCtx         int
 		flagAllowedDirs []string
 		flagAllowEnv    []string
+		flagJSON        bool
 	)
 
 	cmd := &cobra.Command{
@@ -195,6 +196,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("allow-env") {
 				flags.AllowedEnv = flagAllowEnv
+			}
+			if fs.Changed("json") {
+				flags.JSONSummary = &flagJSON
 			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
@@ -250,6 +254,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagNoLint, "no-lint", false, "disable the fast advisory lint step (lint is on by default when a linter is detected)")
 	f.StringSliceVar(&flagAllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
 	f.StringSliceVar(&flagAllowEnv, "allow-env", nil, "env var NAMES to forward from kloo's env into run_command (repeatable/comma-separated) — the trusted-secret passthrough for a deploy/CI step; default exposes only PATH/HOME/…")
+	f.BoolVar(&flagJSON, "json", false, "in --headless, emit a compact machine-readable JSON result line at the end (model/reason/steps/tokens/tokens-per-sec/verify/error) for benchmarking")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd

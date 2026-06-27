@@ -5,6 +5,8 @@
 // OpenAI-compatible endpoint.
 package llm
 
+import "strings"
+
 // Role constants for chat messages.
 const (
 	RoleSystem    = "system"
@@ -49,12 +51,29 @@ type StreamOptions struct {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
+	// ReasoningContent carries a thinking model's chain-of-thought when the backend
+	// exposes it as a separate field (GLM-4.5 / DeepSeek-R1 / Qwen-thinking via
+	// llama.cpp/vLLM commonly put the actual output HERE while content is empty).
+	// FinalizeReasoning folds it into Content so the loop never treats such a turn as
+	// blank. Sent back to the endpoint omitted (it's a response-only field).
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// Name optionally identifies the author (tool name for tool messages, etc.).
 	Name string `json:"name,omitempty"`
 	// ToolCalls is set on an assistant message that calls tools.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID links a tool-result message back to the assistant's call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// FinalizeReasoning applies the reasoning_content fallback: when Content is blank but
+// ReasoningContent is not (a thinking model that emitted its output as reasoning, no
+// tool call in content), promote the reasoning to Content so kloo's text-fallback
+// parsers see the model's actual output instead of an empty turn. No-op when Content
+// already has text.
+func (m *Message) FinalizeReasoning() {
+	if strings.TrimSpace(m.Content) == "" && strings.TrimSpace(m.ReasoningContent) != "" {
+		m.Content = m.ReasoningContent
+	}
 }
 
 // Tool describes a callable function offered to the model (request side).
@@ -109,9 +128,10 @@ type Choice struct {
 
 // Delta is the incremental content/tool-call fragment in a streaming chunk.
 type Delta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"` // thinking models stream CoT here
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // Usage is the token accounting block.
