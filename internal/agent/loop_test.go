@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,6 +76,30 @@ type recordTool struct {
 	calls *[]tools.Call
 }
 
+type recordingLLM struct {
+	completeReqs []llm.ChatRequest
+	streamReqs   []llm.ChatRequest
+	streamDeltas []llm.Delta
+	resp         llm.ChatResponse
+}
+
+func (c *recordingLLM) Complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.completeReqs = append(c.completeReqs, req)
+	return c.resp, nil
+}
+
+func (c *recordingLLM) Stream(ctx context.Context, req llm.ChatRequest, onDelta func(llm.Delta) error) (llm.ChatResponse, error) {
+	c.streamReqs = append(c.streamReqs, req)
+	for _, d := range c.streamDeltas {
+		if onDelta != nil {
+			if err := onDelta(d); err != nil {
+				return llm.ChatResponse{}, err
+			}
+		}
+	}
+	return c.resp, nil
+}
+
 func (t recordTool) Name() string        { return t.name }
 func (t recordTool) Description() string { return "record" }
 func (t recordTool) Schema() tools.ParamSchema {
@@ -131,6 +156,8 @@ func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDet
 		Verifier: v,
 		Budget:   b,
 		Churn:    c,
+		Endpoint: srv.URL + "/v1",
+		Model:    "test-model",
 		System:   "you are kloo",
 	}, &calls
 }
@@ -150,6 +177,18 @@ func proseResp(t *testing.T, text string) string {
 	}
 	b, _ := json.Marshal(resp)
 	return string(b)
+}
+
+func toolResponse(calls ...tcSpec) llm.ChatResponse {
+	var tcs []llm.ToolCall
+	for i, c := range calls {
+		ab, _ := json.Marshal(c.args)
+		tcs = append(tcs, llm.ToolCall{ID: fmt.Sprintf("c%d", i), Type: "function", Function: llm.FunctionCall{Name: c.name, Arguments: string(ab)}})
+	}
+	return llm.ChatResponse{
+		Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: tcs}}},
+		Usage:   llm.Usage{TotalTokens: 1},
+	}
 }
 
 // newRealEditLoop builds a loop wired to the mocked server and a REAL tool
@@ -178,6 +217,8 @@ func newRealEditLoop(t *testing.T, srv *llmtest.Server, fileName, content string
 		Budget:   b,
 		Churn:    c,
 		Root:     canon,
+		Endpoint: srv.URL + "/v1",
+		Model:    "test-model",
 		System:   "you are kloo",
 	}, canon
 }
@@ -579,5 +620,234 @@ func TestLoopCleanEditNoRepairObservation(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
 		t.Errorf("answer.txt = %q, want %q", got, "right\n")
+	}
+}
+
+func TestLoopNoThinkReachesChatRequests(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(recordTool{name: "read_file", calls: &[]tools.Call{}})
+	resp := toolResponse(tcSpec{"read_file", map[string]any{"path": "README.md"}})
+
+	t.Run("non-streaming act", func(t *testing.T) {
+		client := &recordingLLM{resp: resp}
+		loop := &Loop{
+			Client:      client,
+			Adapter:     tools.NativeFCAdapter{},
+			Registry:    reg,
+			Budget:      &stubBudget{},
+			Churn:       &stubChurn{},
+			System:      "you are kloo",
+			Model:       "test-model",
+			Temperature: 0.1,
+			NoThink:     true,
+		}
+		if _, _, _, _, err := loop.act(context.Background(), "read", []llm.Message{{Role: llm.RoleUser, Content: "read"}}, VerifyResult{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(client.completeReqs) != 1 || client.completeReqs[0].ReasoningEffort != "none" {
+			t.Fatalf("no-think missing from non-streaming request: %+v", client.completeReqs)
+		}
+	})
+
+	t.Run("streaming act", func(t *testing.T) {
+		client := &recordingLLM{resp: resp}
+		loop := &Loop{
+			Client:      client,
+			Adapter:     tools.NativeFCAdapter{},
+			Registry:    reg,
+			Budget:      &stubBudget{},
+			Churn:       &stubChurn{},
+			System:      "you are kloo",
+			Model:       "test-model",
+			Temperature: 0.1,
+			NoThink:     true,
+			OnDelta:     func(string) {},
+		}
+		if _, _, _, _, err := loop.act(context.Background(), "read", []llm.Message{{Role: llm.RoleUser, Content: "read"}}, VerifyResult{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(client.streamReqs) != 1 || client.streamReqs[0].ReasoningEffort != "none" {
+			t.Fatalf("no-think missing from streaming request: %+v", client.streamReqs)
+		}
+	})
+
+	t.Run("chat gate", func(t *testing.T) {
+		client := &recordingLLM{resp: llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "TASK"}}}}}
+		loop := &Loop{
+			Client:      client,
+			ChatSystem:  "classify",
+			Model:       "test-model",
+			Temperature: 0.1,
+			NoThink:     true,
+		}
+		loop.chatGate(context.Background(), "do work")
+		if len(client.completeReqs) != 1 || client.completeReqs[0].ReasoningEffort != "none" {
+			t.Fatalf("no-think missing from chat-gate request: %+v", client.completeReqs)
+		}
+	})
+
+	t.Run("retry prompt", func(t *testing.T) {
+		client := &recordingLLM{resp: llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "plain prose"}}}}}
+		loop := &Loop{
+			Client:      client,
+			Adapter:     tools.NativeFCAdapter{},
+			Registry:    reg,
+			Budget:      &stubBudget{},
+			Churn:       &stubChurn{},
+			System:      "you are kloo",
+			Model:       "test-model",
+			Temperature: 0.1,
+			NoThink:     true,
+		}
+		_, _, _, _, err := loop.act(context.Background(), "read", []llm.Message{{Role: llm.RoleUser, Content: "read"}}, VerifyResult{}, "")
+		if !errors.Is(err, ErrNoToolCall) {
+			t.Fatalf("act err = %v, want ErrNoToolCall after retry", err)
+		}
+		if len(client.completeReqs) != 2 {
+			t.Fatalf("expected initial + retry requests, got %d", len(client.completeReqs))
+		}
+		for i, req := range client.completeReqs {
+			if req.ReasoningEffort != "none" {
+				t.Fatalf("no-think missing from request %d: %+v", i, req)
+			}
+		}
+	})
+}
+
+func TestLoopRunawayThinkingProducesRecoverableError(t *testing.T) {
+	longReasoning := strings.Repeat("thinking ", 300)
+	client := &recordingLLM{resp: llm.ChatResponse{Choices: []llm.Choice{{
+		Message: llm.Message{
+			Role:                llm.RoleAssistant,
+			Content:             longReasoning,
+			ReasoningContent:    longReasoning,
+			RawContent:          "",
+			RawReasoningContent: longReasoning,
+			FinishReason:        "stop",
+		},
+		FinishReason: "stop",
+	}}}}
+	loop := &Loop{
+		Client:      client,
+		Adapter:     tools.NativeFCAdapter{},
+		Registry:    tools.NewRegistry(),
+		Budget:      &stubBudget{},
+		Churn:       &stubChurn{},
+		System:      "you are kloo",
+		Model:       "test-model",
+		Temperature: 0.1,
+	}
+
+	rep, err := loop.Run(context.Background(), "do work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reason != ReasonError || rep.Err == nil {
+		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
+	}
+	if msg := rep.Err.Error(); !strings.Contains(msg, "reasoning chars") || !strings.Contains(msg, "--no-think") || !strings.Contains(msg, "output budget") {
+		t.Fatalf("recoverable error missing guidance: %q", msg)
+	}
+}
+
+func TestLoopRunawayThinkingDoesNotStreamReasoningText(t *testing.T) {
+	longReasoning := strings.Repeat("thinking ", 300)
+	client := &recordingLLM{
+		streamDeltas: []llm.Delta{{Role: llm.RoleAssistant, ReasoningContent: longReasoning}},
+		resp: llm.ChatResponse{Choices: []llm.Choice{{
+			Message: llm.Message{
+				Role:                llm.RoleAssistant,
+				Content:             longReasoning,
+				ReasoningContent:    longReasoning,
+				RawContent:          "",
+				RawReasoningContent: longReasoning,
+				FinishReason:        "length",
+			},
+			FinishReason: "length",
+		}}},
+	}
+	var streamed strings.Builder
+	loop := &Loop{
+		Client:      client,
+		Adapter:     tools.NativeFCAdapter{},
+		Registry:    tools.NewRegistry(),
+		Budget:      &stubBudget{},
+		Churn:       &stubChurn{},
+		System:      "you are kloo",
+		Model:       "test-model",
+		Temperature: 0.1,
+		OnDelta:     func(s string) { streamed.WriteString(s) },
+	}
+
+	rep, err := loop.Run(context.Background(), "do work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reason != ReasonError || rep.Err == nil {
+		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
+	}
+	if streamed.String() != "" {
+		t.Fatalf("raw reasoning should not stream to renderer, got %q", streamed.String())
+	}
+}
+
+func TestLoopLengthFinishWithEmptyContentProducesRecoverableError(t *testing.T) {
+	client := &recordingLLM{resp: llm.ChatResponse{Choices: []llm.Choice{{
+		Message:      llm.Message{Role: llm.RoleAssistant, FinishReason: "length"},
+		FinishReason: "length",
+	}}}}
+	loop := &Loop{
+		Client:      client,
+		Adapter:     tools.NativeFCAdapter{},
+		Registry:    tools.NewRegistry(),
+		Budget:      &stubBudget{},
+		Churn:       &stubChurn{},
+		System:      "you are kloo",
+		Model:       "test-model",
+		Temperature: 0.1,
+	}
+
+	rep, err := loop.Run(context.Background(), "do work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reason != ReasonError || rep.Err == nil {
+		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
+	}
+	if msg := rep.Err.Error(); !strings.Contains(msg, "0 reasoning chars") || !strings.Contains(msg, "--no-think") {
+		t.Fatalf("length recoverable error missing guidance/count: %q", msg)
+	}
+}
+
+func TestLoopShortReasoningFallbackRemainsAnswered(t *testing.T) {
+	reasoning := "fallback answer"
+	client := &recordingLLM{resp: llm.ChatResponse{Choices: []llm.Choice{{
+		Message: llm.Message{
+			Role:                llm.RoleAssistant,
+			Content:             reasoning,
+			ReasoningContent:    reasoning,
+			RawContent:          "",
+			RawReasoningContent: reasoning,
+			FinishReason:        "stop",
+		},
+		FinishReason: "stop",
+	}}}}
+	loop := &Loop{
+		Client:      client,
+		Adapter:     tools.NativeFCAdapter{},
+		Registry:    tools.NewRegistry(),
+		Budget:      &stubBudget{},
+		Churn:       &stubChurn{},
+		System:      "you are kloo",
+		Model:       "test-model",
+		Temperature: 0.1,
+	}
+
+	rep, err := loop.Run(context.Background(), "answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reason != ReasonAnswered || rep.Err != nil {
+		t.Fatalf("short reasoning fallback should remain answered, got %q/%v", rep.Reason, rep.Err)
 	}
 }

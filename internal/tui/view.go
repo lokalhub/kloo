@@ -22,15 +22,27 @@ func (m Model) View() string {
 	header := m.renderHeader()
 	transcript := m.renderTranscriptRegion()
 	activity := m.renderActivityLine()
+	picker := m.renderModelPicker()
 	input := m.renderInput()
 	hint := m.renderHint()
-	return strings.Join([]string{header, transcript, activity, input, hint}, "\n")
+	parts := []string{header, transcript, activity}
+	if picker != "" {
+		parts = append(parts, picker)
+	}
+	parts = append(parts, input, hint)
+	return strings.Join(parts, "\n")
 }
 
 // renderTranscriptRegion renders the scroll region (viewport when ready).
 func (m Model) renderTranscriptRegion() string {
 	if m.vpReady {
-		return m.vp.View()
+		vp := m.vp
+		if m.picker != nil {
+			if h := vp.Height - lipgloss.Height(m.renderModelPicker()); h > 1 {
+				vp.Height = h
+			}
+		}
+		return vp.View()
 	}
 	h := max(m.height-headerHeight-activityHeight-inputHeight-hintHeight, 1)
 	return strings.Repeat("\n", h-1)

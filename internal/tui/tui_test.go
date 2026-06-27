@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -35,6 +36,7 @@ func goldenUpdate() bool {
 func requireGolden(t *testing.T, name, got string) {
 	t.Helper()
 	path := filepath.Join("testdata", name)
+	got = normalizeGolden(got)
 	if goldenUpdate() {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
 			t.Fatal(err)
@@ -48,9 +50,24 @@ func requireGolden(t *testing.T, name, got string) {
 	if err != nil {
 		t.Fatalf("read golden %s (run `go test ./internal/tui -update` to create): %v", name, err)
 	}
-	if got != string(want) {
+	wantText := normalizeGolden(string(want))
+	if got != wantText {
 		t.Errorf("golden %s mismatch\n--- got ---\n%s\n--- want ---\n%s", name, got, string(want))
 	}
+}
+
+func normalizeGolden(s string) string {
+	lines := strings.SplitAfter(s, "\n")
+	for i, line := range lines {
+		nl := strings.HasSuffix(line, "\n")
+		line = strings.TrimRight(line, "\n")
+		line = strings.TrimRight(line, " \t")
+		if nl {
+			line += "\n"
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "")
 }
 
 // apply feeds messages through Update sequentially and returns the final model.

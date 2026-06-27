@@ -1,0 +1,24 @@
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ kloo dev  test-model                                       step 0/40 · 0/8k tok · auto │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│Select model for next run                                             type to filter    │
+│> openai/gpt-4.1-mini                                                                   │
+│  1047k ctx · provider current · live                                                   │
+│  deepseek/deepseek-v4-flash                                                            │
+│  128k ctx · provider or · alias dsv4                                                   │
+│  deepseek-ai/DeepSeek-V4-Flash                                                         │
+│  64k ctx · provider together · alias dsv4                                              │
+│↑/↓ move  Enter select  Esc cancel                                                      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│> type a task…                                           /add /model /mode /stop /diff  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,15 @@ func TestLoopDoesNotRetryDeterministicError(t *testing.T) {
 	if n := len(srv.Requests()); n != 1 {
 		t.Errorf("requests = %d, want 1 (no retry on a deterministic 400)", n)
 	}
+	if rep.Err == nil {
+		t.Fatal("expected enriched report error")
+	}
+	msg := rep.Err.Error()
+	for _, want := range []string{srv.URL + "/v1", "test-model", "bad request"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("enriched error missing %q: %s", want, msg)
+		}
+	}
 }
 
 // TestLoopRetriesExhaustThenError: when every attempt fails transiently, the loop
@@ -79,6 +89,36 @@ func TestLoopRetriesExhaustThenError(t *testing.T) {
 	}
 	if n := len(srv.Requests()); n != 3 {
 		t.Errorf("requests = %d, want 3 (first + 2 retries)", n)
+	}
+	if rep.Err == nil || !strings.Contains(rep.Err.Error(), "endpoint="+srv.URL+"/v1") || !strings.Contains(rep.Err.Error(), "model=test-model") || !strings.Contains(rep.Err.Error(), "loading") {
+		t.Fatalf("exhausted retry error should include endpoint/model/body, got %v", rep.Err)
+	}
+}
+
+func TestLoopConnectionFailureIncludesEndpointAndModelNoSecret(t *testing.T) {
+	dead := llmtest.DeadURL(t) + "/v1"
+	srv := llmtest.JSON(t, toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "unused"}}))
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.Client = llm.New(dead, "secret-model", llm.WithAPIKey("super-secret-key"))
+	loop.Endpoint = dead
+	loop.Model = "secret-model"
+	loop.LLMRetries = -1
+
+	rep, err := loop.Run(context.Background(), "connect")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonError || rep.Err == nil {
+		t.Fatalf("reason/err = %q/%v, want error", rep.Reason, rep.Err)
+	}
+	msg := rep.Err.Error()
+	for _, want := range []string{dead, "secret-model", "connection"} {
+		if !strings.Contains(strings.ToLower(msg), strings.ToLower(want)) {
+			t.Fatalf("connection error missing %q: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "super-secret-key") {
+		t.Fatalf("error leaked API key: %s", msg)
 	}
 }
 

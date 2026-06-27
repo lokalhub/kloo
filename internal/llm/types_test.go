@@ -53,6 +53,25 @@ func TestRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChatRequestNoThinkSerialization(t *testing.T) {
+	plain, err := json.Marshal(ChatRequest{Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := asMap(t, plain)["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort should be omitted by default: %s", plain)
+	}
+
+	req := ChatRequest{Model: "test-model", ReasoningEffort: "none"}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := asMap(t, body)["reasoning_effort"]; got != "none" {
+		t.Fatalf("reasoning_effort = %v, want none; body=%s", got, body)
+	}
+}
+
 // TestResponseRoundTrip: a plain assistant completion round-trips.
 func TestResponseRoundTrip(t *testing.T) {
 	fixture := readFixture(t, "response.json")

@@ -55,8 +55,10 @@ type Loop struct {
 	// actionable task (→ run the loop) or conversation (→ reply directly, no run).
 	// Empty ⇒ disabled (headless/benchmark, where every input is a real task).
 	ChatSystem  string
+	Endpoint    string
 	Model       string
 	Temperature float64
+	NoThink     bool
 	Now         func() time.Time // injectable clock (defaults to time.Now)
 	// SessionHistory is the conversation from PRIOR runs in the same session (the
 	// TUI reuses one Loop across submissions). It is seeded into working memory as
@@ -440,8 +442,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// ChatSystem is empty (headless/benchmark). A gate error fails OPEN — we run the
 	// loop rather than block real work on a classifier hiccup.
 	if l.ChatSystem != "" && ctx.Err() == nil {
-		reply, conversational, usage := l.chatGate(ctx, task)
+		reply, conversational, usage, gateErr := l.chatGate(ctx, task)
 		l.Budget.AddTokens(usage.TotalTokens)
+		if gateErr != nil {
+			return finish(ReasonError, gateErr, nil, nil)
+		}
 		if conversational {
 			if l.OnDelta != nil {
 				l.OnDelta(reply)
@@ -853,11 +858,11 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	}
 
 	msgs := append([]llm.Message{sys}, hist...)
-	req := l.Adapter.BuildRequest(llm.ChatRequest{
+	req := l.withThinkingControl(l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,
 		Messages:    msgs,
 		Temperature: l.Temperature,
-	}, l.Registry)
+	}, l.Registry))
 
 	resp, err := l.complete(ctx, req)
 	if err != nil {
@@ -868,16 +873,26 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	calls, perr := l.Adapter.ParseAll(msg)
 
 	if perr != nil || len(calls) == 0 {
+		if perr == nil {
+			if err := runawayThinkingError(msg); err != nil {
+				return tools.Call{}, nil, usage, msg, err
+			}
+		}
 		// One corrective re-prompt (the anti-spiral rail, mirrored from P02).
 		corrective := llm.Message{Role: llm.RoleUser, Content: l.Adapter.Corrective(perr)}
 		retryMsgs := append(append([]llm.Message{}, msgs...), msg, corrective)
-		resp2, err2 := l.complete(ctx, llm.ChatRequest{Model: l.Model, Messages: retryMsgs, Temperature: l.Temperature})
+		resp2, err2 := l.complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: retryMsgs, Temperature: l.Temperature}))
 		if err2 != nil {
 			return tools.Call{}, nil, usage, msg, err2
 		}
 		msg2 := assistantMessage(resp2)
 		usage2 := estimateUsage(resp2.Usage, retryMsgs, msg2)
 		calls, perr = l.Adapter.ParseAll(msg2)
+		if perr == nil && len(calls) == 0 {
+			if err := runawayThinkingError(msg2); err != nil {
+				return tools.Call{}, nil, addUsage(usage, usage2), msg2, err
+			}
+		}
 		if perr != nil {
 			// A MALFORMED tool call after the nudge is a real error (the model tried to
 			// act but botched the format).
@@ -1271,22 +1286,25 @@ const chatSentinel = "TASK"
 // never flash on the user's screen; the conversational reply is surfaced by the
 // caller (via OnDelta) only once classification is known. Any error fails OPEN
 // (returns false) so a classifier hiccup never blocks real work.
-func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage) {
+func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage, gateErr error) {
 	msgs := []llm.Message{{Role: llm.RoleSystem, Content: l.ChatSystem}}
 	msgs = append(msgs, l.SessionHistory...)
 	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: task})
 
-	resp, err := l.Client.Complete(ctx, llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature})
+	resp, err := l.Client.Complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature}))
 	if err != nil {
-		return "", false, llm.Usage{} // fail open: run the loop normally
+		return "", false, llm.Usage{}, nil // fail open: run the loop normally
 	}
 	msg := assistantMessage(resp)
 	usage = estimateUsage(resp.Usage, msgs, msg)
+	if err := runawayThinkingError(msg); err != nil {
+		return "", false, usage, err
+	}
 	text := strings.TrimSpace(msg.Content)
 	if text == "" || isTaskVerdict(text) {
-		return "", false, usage
+		return "", false, usage, nil
 	}
-	return text, true, usage
+	return text, true, usage, nil
 }
 
 // isTaskVerdict reports whether the gate reply is the TASK sentinel. Lenient: the
@@ -1344,7 +1362,7 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 			})
 		}
 		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !isRetryableLLMError(err) {
-			return resp, err
+			return resp, l.modelCallError(err)
 		}
 		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
 		if l.OnRetry != nil {
@@ -1356,7 +1374,28 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		case <-time.After(wait):
 		}
 	}
-	return resp, err
+	return resp, l.modelCallError(err)
+}
+
+func (l *Loop) withThinkingControl(req llm.ChatRequest) llm.ChatRequest {
+	if l.NoThink {
+		req.ReasoningEffort = "none"
+	}
+	return req
+}
+
+func (l *Loop) modelCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	parts := []string{"agent: model call failed"}
+	if strings.TrimSpace(l.Endpoint) != "" {
+		parts = append(parts, "endpoint="+l.Endpoint)
+	}
+	if strings.TrimSpace(l.Model) != "" {
+		parts = append(parts, "model="+l.Model)
+	}
+	return fmt.Errorf("%s: %w", strings.Join(parts, " "), err)
 }
 
 // isRetryableLLMError reports whether a failed model call is a TRANSIENT endpoint
@@ -1399,7 +1438,35 @@ func assistantMessage(resp llm.ChatResponse) llm.Message {
 	if len(resp.Choices) == 0 {
 		return llm.Message{Role: llm.RoleAssistant}
 	}
-	return resp.Choices[0].Message
+	msg := resp.Choices[0].Message
+	if msg.FinishReason == "" {
+		msg.FinishReason = resp.Choices[0].FinishReason
+	}
+	return msg
+}
+
+const runawayReasoningChars = 2000
+
+func runawayThinkingError(msg llm.Message) error {
+	if len(msg.ToolCalls) > 0 {
+		return nil
+	}
+	rawReasoning := msg.RawReasoningContent
+	if rawReasoning == "" {
+		rawReasoning = msg.ReasoningContent
+	}
+	rawContent := msg.RawContent
+	if rawContent == "" && rawReasoning == "" {
+		rawContent = msg.Content
+	}
+	if strings.TrimSpace(rawContent) != "" {
+		return nil
+	}
+	reasoningChars := len([]rune(rawReasoning))
+	if reasoningChars >= runawayReasoningChars || msg.FinishReason == "length" {
+		return fmt.Errorf("model produced %d reasoning chars but no usable content; disable thinking (--no-think) or raise the output budget", reasoningChars)
+	}
+	return nil
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {

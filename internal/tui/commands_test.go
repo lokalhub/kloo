@@ -1,9 +1,16 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // typeAndEnter types a line into the input and presses Enter.
@@ -22,8 +29,8 @@ func TestSlashModelTakesEffect(t *testing.T) {
 	}
 }
 
-// kloo is BYO-endpoint: /model accepts any name the server understands, with no
-// allowlist (the endpoint, not kloo, decides what's valid).
+// kloo is BYO-endpoint in task 00-03: /model <name> accepts any name and task
+// 00-04 will wire alias/raw-id runtime validation.
 func TestSlashModelAcceptsAnyName(t *testing.T) {
 	m := typeAndEnter(newSized(), "/model deepseek/deepseek-v4-flash")
 	if m.modelName != "deepseek/deepseek-v4-flash" || m.status.model != "deepseek/deepseek-v4-flash" {
@@ -31,6 +38,451 @@ func TestSlashModelAcceptsAnyName(t *testing.T) {
 	}
 	if !contains(m.View(), "model: deepseek/deepseek-v4-flash") {
 		t.Errorf("expected confirmation of the model switch:\n%s", m.View())
+	}
+}
+
+type fakeModelLister struct {
+	models []llm.ModelInfo
+	err    error
+}
+
+func (f fakeModelLister) Models(context.Context) ([]llm.ModelInfo, error) {
+	return f.models, f.err
+}
+
+type endpointModelClient struct {
+	models []llm.ModelInfo
+}
+
+func (c endpointModelClient) Models(context.Context) ([]llm.ModelInfo, error) {
+	return c.models, nil
+}
+
+func (c endpointModelClient) Complete(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+
+func (c endpointModelClient) Stream(context.Context, llm.ChatRequest, func(llm.Delta) error) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+
+func modelCatalog() []ModelOption {
+	return []ModelOption{
+		{ID: "deepseek/deepseek-v4-flash", ContextLength: 128000, Provider: "or", Source: "alias dsv4"},
+		{ID: "deepseek-ai/DeepSeek-V4-Flash", ContextLength: 64000, Provider: "together", Source: "alias dsv4"},
+	}
+}
+
+func TestSlashModelsPrintsLiveModelsAndAliases(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "openai/gpt-4.1-mini", ContextLength: 1047000},
+		}},
+		Models: modelCatalog(),
+	}), tw, th)
+
+	m = typeAndEnter(m, "/models")
+	v := m.View()
+	for _, want := range []string{
+		"models:",
+		"openai/gpt-4.1-mini",
+		"1047k ctx",
+		"deepseek/deepseek-v4-flash",
+		"128k ctx",
+		"or",
+		"alias dsv4",
+		"together",
+	} {
+		if !contains(v, want) {
+			t.Errorf("/models output missing %q:\n%s", want, v)
+		}
+	}
+}
+
+func TestSlashModelsPrintsAliasesWhenLiveFetchFails(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		ModelList: fakeModelLister{err: errors.New("upstream down")},
+		Models:    modelCatalog(),
+	}), tw, th)
+
+	m = typeAndEnter(m, "/models")
+	v := m.View()
+	if !contains(v, "live models unavailable: upstream down") {
+		t.Errorf("/models should show live-fetch warning:\n%s", v)
+	}
+	if !contains(v, "deepseek/deepseek-v4-flash") || !contains(v, "alias dsv4") {
+		t.Errorf("/models should still show aliases after live failure:\n%s", v)
+	}
+}
+
+func TestBareSlashModelOpensPickerOverlay(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "openai/gpt-4.1-mini", ContextLength: 1047000},
+		}},
+		Models: modelCatalog(),
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model")
+	if m.picker == nil {
+		t.Fatal("bare /model did not open picker")
+	}
+	v := m.View()
+	for _, want := range []string{
+		"Select model for next run",
+		"type to filter",
+		"deepseek/deepseek-v4-flash",
+		"128k ctx",
+		"provider or",
+		"alias dsv4",
+		"openai/gpt-4.1-mini",
+		"provider current",
+		"live",
+		"Enter select",
+		"Esc cancel",
+	} {
+		if !contains(v, want) {
+			t.Errorf("picker render missing %q:\n%s", want, v)
+		}
+	}
+	requireGolden(t, "model-picker.golden", v)
+}
+
+func TestModelPickerTypingFiltersAndDoesNotEditTaskInput(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		Models:    modelCatalog(),
+	}), tw, th)
+	m = typeAndEnter(m, "/model")
+	m = apply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("together")})
+
+	if m.input.Value() != "" {
+		t.Fatalf("picker typing should not update task input, got %q", m.input.Value())
+	}
+	if m.picker == nil || m.picker.filter != "together" {
+		t.Fatalf("picker filter = %#v", m.picker)
+	}
+	v := m.View()
+	if !contains(v, "filter: together") || !contains(v, "deepseek-ai/DeepSeek-V4-Flash") {
+		t.Errorf("picker should show filtered together row:\n%s", v)
+	}
+	if contains(v, "deepseek/deepseek-v4-flash") {
+		t.Errorf("picker should hide non-matching row after filter:\n%s", v)
+	}
+}
+
+func TestModelPickerUpDownEnterSelectsItem(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		Models: []ModelOption{
+			{ID: "alpha-model", ContextLength: 1000, Provider: "a", Source: "alias alpha"},
+			{ID: "beta-model", ContextLength: 2000, Provider: "b", Source: "alias beta"},
+		},
+	}), tw, th)
+	m = typeAndEnter(m, "/model")
+	m = apply(m, tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.picker.list.SelectedItem().(modelPickerItem).ID; got != "beta-model" {
+		t.Fatalf("down selected %q, want beta-model", got)
+	}
+	m = apply(m, tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.picker.list.SelectedItem().(modelPickerItem).ID; got != "alpha-model" {
+		t.Fatalf("up selected %q, want alpha-model", got)
+	}
+	m = apply(m, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.picker != nil {
+		t.Fatal("enter should close picker")
+	}
+	if m.modelName != "beta-model" || m.status.model != "beta-model" {
+		t.Errorf("enter should select highlighted model, got model=%q status=%q", m.modelName, m.status.model)
+	}
+	if !contains(m.View(), "model: beta-model") {
+		t.Errorf("selection should route to /model confirmation:\n%s", m.View())
+	}
+}
+
+func TestModelPickerEscCancelsAndLeavesModelUnchanged(t *testing.T) {
+	m := sized(New(Config{
+		Model:     "test-model",
+		MaxSteps:  40,
+		MaxTokens: 8000,
+		Models:    modelCatalog(),
+	}), tw, th)
+	m = typeAndEnter(m, "/model")
+	m = apply(m, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.picker != nil {
+		t.Fatal("esc should close picker")
+	}
+	if m.modelName != "test-model" || m.status.model != "test-model" {
+		t.Errorf("cancel should leave model unchanged, got model=%q status=%q", m.modelName, m.status.model)
+	}
+	if !contains(m.View(), "model picker cancelled") {
+		t.Errorf("cancel should be visible:\n%s", m.View())
+	}
+}
+
+func TestSlashModelAliasAppliesResolvedRuntimeConfig(t *testing.T) {
+	t.Setenv("KLOO_TEST_PROVIDER_KEY", "provider-secret")
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"apiKey": "${KLOO_TEST_PROVIDER_KEY}",
+				"models": {
+					"dsv4": {"model": "deepseek-chat", "toolFormat": "xml", "temperature": 0.35, "maxContextTokens": 128000}
+				}
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := sized(New(Config{
+		Model:         "test-model",
+		Endpoint:      "http://local/v1",
+		ContextTokens: 8000,
+		ToolFormat:    "native",
+		ProfilePath:   profile,
+		Getenv:        os.Getenv,
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model dsv4")
+	if m.runtime.Provider != "or" || m.runtime.Endpoint != "https://openrouter.ai/api/v1" || m.runtime.APIKey != "provider-secret" {
+		t.Errorf("alias provider runtime wrong: %+v", m.runtime)
+	}
+	if m.runtime.Model != "deepseek-chat" || m.runtime.ContextTokens != 128000 || m.runtime.Temperature != 0.35 || m.runtime.ToolFormat != "xml" {
+		t.Errorf("alias model runtime wrong: %+v", m.runtime)
+	}
+	if m.modelName != "deepseek-chat" || !contains(m.View(), "model: or/deepseek-chat (alias dsv4)") || !contains(m.View(), "or/deepseek-chat") {
+		t.Errorf("alias switch not visible/applied:\n%s", m.View())
+	}
+}
+
+func TestSlashModelAliasPreservesExplicitNoThinkForNextRun(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {
+			"remote": {
+				"endpoint": "https://remote.example/v1",
+				"models": {
+					"r": {"model": "remote-selected", "toolFormat": "xml", "maxContextTokens": 64000}
+				}
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := &runtimeRecordingRunner{got: make(chan RuntimeConfig, 1)}
+	m := sized(New(Config{
+		Model:         "local-model",
+		Endpoint:      "http://local/v1",
+		ContextTokens: 8000,
+		ToolFormat:    "native",
+		NoThink:       true,
+		NoThinkLocked: true,
+		ProfilePath:   profile,
+		Getenv:        func(string) string { return "" },
+		Runner:        rec,
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model r")
+	tm, cmd := m.Update(submitTaskMsg{task: "run"})
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("submit produced no command")
+	}
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c != nil {
+				c()
+			}
+		}
+	}
+	select {
+	case got := <-rec.got:
+		if got.Model != "remote-selected" || !got.NoThink {
+			t.Fatalf("alias switch should preserve explicit no-think for next run, got %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.Start was not invoked")
+	}
+}
+
+func TestModelPickerDuplicateAliasSelectsHighlightedProvider(t *testing.T) {
+	t.Setenv("KLOO_TEST_ALPHA_KEY", "alpha-secret")
+	t.Setenv("KLOO_TEST_ZULU_KEY", "zulu-secret")
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {
+			"alpha": {
+				"endpoint": "https://alpha.example/v1",
+				"apiKey": "${KLOO_TEST_ALPHA_KEY}",
+				"models": {
+					"dsv4": {"model": "alpha-model", "toolFormat": "native", "temperature": 0.11, "maxContextTokens": 11000}
+				}
+			},
+			"zulu": {
+				"endpoint": "https://zulu.example/v1",
+				"apiKey": "${KLOO_TEST_ZULU_KEY}",
+				"models": {
+					"dsv4": {"model": "zulu-model", "toolFormat": "xml", "temperature": 0.44, "maxContextTokens": 44000}
+				}
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := sized(New(Config{
+		Model:       "test-model",
+		ProfilePath: profile,
+		Getenv:      os.Getenv,
+		Models: []ModelOption{
+			{ID: "alpha-model", ContextLength: 11000, Provider: "alpha", Source: "alias dsv4", Alias: "dsv4"},
+			{ID: "zulu-model", ContextLength: 44000, Provider: "zulu", Source: "alias dsv4", Alias: "dsv4"},
+		},
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model")
+	m = apply(m, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.runtime.Provider != "zulu" || m.runtime.Endpoint != "https://zulu.example/v1" || m.runtime.APIKey != "zulu-secret" {
+		t.Fatalf("selected duplicate alias should preserve zulu provider runtime, got %+v", m.runtime)
+	}
+	if m.runtime.Model != "zulu-model" || m.runtime.ContextTokens != 44000 || m.runtime.Temperature != 0.44 || m.runtime.ToolFormat != "xml" {
+		t.Fatalf("selected duplicate alias should use zulu model tuning, got %+v", m.runtime)
+	}
+	if !contains(m.View(), "selected model: zulu/zulu-model (alias dsv4)") || !contains(m.View(), "zulu/zulu-model") {
+		t.Fatalf("selected duplicate alias should show zulu provider/model:\n%s", m.View())
+	}
+}
+
+func TestSlashModelsAfterAliasSwitchUsesSelectedProviderClient(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {
+			"remote": {
+				"endpoint": "https://remote.example/v1",
+				"apiKey": "remote-key",
+				"models": {
+					"r": {"model": "remote-selected", "toolFormat": "xml", "maxContextTokens": 64000}
+				}
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := []string{}
+	newClient := func(endpoint, model, apiKey string) llm.LLMClient {
+		calls = append(calls, endpoint+"|"+model+"|"+apiKey)
+		switch endpoint {
+		case "https://remote.example/v1":
+			return endpointModelClient{models: []llm.ModelInfo{{ID: "remote-live-model", ContextLength: 64000}}}
+		default:
+			return endpointModelClient{models: []llm.ModelInfo{{ID: "local-live-model", ContextLength: 8000}}}
+		}
+	}
+	m := sized(New(Config{
+		Model:         "local-model",
+		Endpoint:      "http://local/v1",
+		APIKey:        "local-key",
+		ContextTokens: 8000,
+		ToolFormat:    "native",
+		ProfilePath:   profile,
+		Getenv:        func(string) string { return "" },
+		NewClient:     newClient,
+	}), tw, th)
+
+	m = typeAndEnter(m, "/models")
+	if !contains(m.View(), "local-live-model") {
+		t.Fatalf("initial /models should use local runtime client:\n%s", m.View())
+	}
+	m = typeAndEnter(m, "/model r")
+	m = typeAndEnter(m, "/models")
+	v := m.View()
+	if !contains(v, "remote-live-model") {
+		t.Fatalf("/models after alias switch should use selected provider client:\n%s", v)
+	}
+	if contains(v, "local-live-model · 8k ctx · live\n\nmodels:") {
+		t.Fatalf("post-switch /models should not fetch from the stale local endpoint:\n%s", v)
+	}
+	wantCall := "https://remote.example/v1|remote-selected|remote-key"
+	seen := false
+	for _, call := range calls {
+		if call == wantCall {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("runtime client factory was not called for selected provider; calls=%v", calls)
+	}
+}
+
+func TestSlashModelRawIDKeepsEndpointAndUsesLiveContext(t *testing.T) {
+	m := sized(New(Config{
+		Model:         "test-model",
+		Endpoint:      "http://local/v1",
+		APIKey:        "local-key",
+		ContextTokens: 8000,
+		ToolFormat:    "native",
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "raw-model-id", ContextLength: 32768},
+		}},
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model raw-model-id")
+	if m.runtime.Endpoint != "http://local/v1" || m.runtime.APIKey != "local-key" {
+		t.Errorf("raw id switch should keep endpoint/key: %+v", m.runtime)
+	}
+	if m.runtime.Model != "raw-model-id" || m.runtime.ContextTokens != 32768 {
+		t.Errorf("raw id switch should update model/context: %+v", m.runtime)
+	}
+}
+
+func TestSlashModelRawIDWarnsWhenLiveListMisses(t *testing.T) {
+	m := sized(New(Config{
+		Model:         "test-model",
+		Endpoint:      "http://local/v1",
+		ContextTokens: 8000,
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "other-model", ContextLength: 32768},
+		}},
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model unknown-model")
+	if m.runtime.Model != "unknown-model" {
+		t.Errorf("raw miss should still switch model: %+v", m.runtime)
+	}
+	if !contains(m.View(), "warning: model unknown-model not found in live model list; switching anyway") {
+		t.Errorf("raw miss should show warning:\n%s", m.View())
+	}
+}
+
+func TestSlashModelRawIDWarnsWhenLiveListIsEmpty(t *testing.T) {
+	m := sized(New(Config{
+		Model:         "test-model",
+		Endpoint:      "http://local/v1",
+		ContextTokens: 8000,
+		ModelList:     fakeModelLister{models: []llm.ModelInfo{}},
+	}), tw, th)
+
+	m = typeAndEnter(m, "/model unknown-model")
+	if m.runtime.Model != "unknown-model" {
+		t.Errorf("raw miss should still switch model: %+v", m.runtime)
+	}
+	if !contains(m.View(), "warning: model unknown-model not found in live model list; switching anyway") {
+		t.Errorf("empty live list miss should show warning:\n%s", m.View())
 	}
 }
 

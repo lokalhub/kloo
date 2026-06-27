@@ -89,6 +89,56 @@ func TestCompleteNon2xx(t *testing.T) {
 	}
 }
 
+func TestCompleteNon2xxBodyIsBoundedTail(t *testing.T) {
+	body := "START-" + strings.Repeat("x", maxAPIErrorBodyBytes+512) + "-TAIL"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, body, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL+"/v1", "test-model")
+	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if !strings.Contains(apiErr.Body, "upstream body truncated") {
+		t.Fatalf("large body should be marked truncated, got %q", apiErr.Body[:min(len(apiErr.Body), 120)])
+	}
+	if strings.Contains(apiErr.Body, "START-") {
+		t.Fatalf("bounded body should keep the tail, not the head")
+	}
+	if !strings.Contains(apiErr.Body, "-TAIL") {
+		t.Fatalf("bounded body should preserve useful tail context")
+	}
+	if len(apiErr.Body) > maxAPIErrorBodyBytes+256 {
+		t.Fatalf("bounded body too large: len=%d", len(apiErr.Body))
+	}
+}
+
+func TestCompleteNon2xxRedactsAPIKeyFromBodyAndError(t *testing.T) {
+	const key = "sk-test-complete-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"upstream echoed Authorization: `+r.Header.Get("Authorization")+`"}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL+"/v1", "test-model", WithAPIKey(key))
+	_, err := client.Complete(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	for _, got := range []string{apiErr.Body, err.Error()} {
+		if strings.Contains(got, key) {
+			t.Fatalf("API key leaked in error body/string: %q", got)
+		}
+		if !strings.Contains(got, "Bearer [REDACTED]") {
+			t.Fatalf("redacted bearer marker missing: %q", got)
+		}
+	}
+}
+
 // TestCompleteContextCancel: cancelling the context aborts the in-flight request.
 func TestCompleteContextCancel(t *testing.T) {
 	release := make(chan struct{})

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lokalhub/kloo/internal/agent"
+	"github.com/lokalhub/kloo/internal/config"
 	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/session"
 	"github.com/lokalhub/kloo/internal/tools"
@@ -24,7 +26,7 @@ type blockingRunner struct {
 	release chan struct{}
 }
 
-func (r *blockingRunner) Start(ctx context.Context, task, model string, mode Mode, files []string) {
+func (r *blockingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
 	r.starts++
 	<-r.release
 }
@@ -33,8 +35,46 @@ func (r *blockingRunner) Start(ctx context.Context, task, model string, mode Mod
 // can read it without racing the run goroutine).
 type recordingRunner struct{ got chan string }
 
-func (r *recordingRunner) Start(ctx context.Context, task, model string, mode Mode, files []string) {
-	r.got <- model
+func (r *recordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
+	r.got <- runtime.Model
+}
+
+type runtimeRecordingRunner struct{ got chan RuntimeConfig }
+
+func (r *runtimeRecordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
+	r.got <- runtime
+}
+
+type runtimeClient struct {
+	endpoint string
+	model    string
+	apiKey   string
+}
+
+func (c *runtimeClient) Complete(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+
+func (c *runtimeClient) Stream(context.Context, llm.ChatRequest, func(llm.Delta) error) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+
+type proseClient struct{}
+
+func (proseClient) Complete(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+	return llm.ChatResponse{
+		Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}}},
+		Usage:   llm.Usage{TotalTokens: 7},
+	}, nil
+}
+
+func (proseClient) Stream(ctx context.Context, req llm.ChatRequest, onDelta func(llm.Delta) error) (llm.ChatResponse, error) {
+	if onDelta != nil {
+		if err := onDelta(llm.Delta{Role: llm.RoleAssistant, Content: "done"}); err != nil {
+			return llm.ChatResponse{}, err
+		}
+	}
+	return proseClient{}.Complete(ctx, req)
 }
 
 // TestSlashModelAppliesToNextRun guards the fix: /model must change the model the
@@ -71,6 +111,111 @@ func TestSlashModelAppliesToNextRun(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner.Start was not invoked")
+	}
+}
+
+func TestLoopRunnerAppliesRuntimeConfig(t *testing.T) {
+	loop := &agent.Loop{
+		Client:        &runtimeClient{},
+		Adapter:       tools.NativeFCAdapter{},
+		Model:         "old-model",
+		ContextTokens: 8000,
+		Temperature:   0.1,
+	}
+	r := &LoopRunner{loop: loop}
+
+	r.applyRuntime(RuntimeConfig{
+		Endpoint:      "https://example.test/v1",
+		APIKey:        "runtime-key",
+		Model:         "new-model",
+		ContextTokens: 128000,
+		Temperature:   0.35,
+		ToolFormat:    "xml",
+		NoThink:       true,
+		NewClient: func(endpoint, model, apiKey string) llm.LLMClient {
+			return &runtimeClient{endpoint: endpoint, model: model, apiKey: apiKey}
+		},
+	})
+
+	if loop.Model != "new-model" || loop.ContextTokens != 128000 || loop.Temperature != 0.35 {
+		t.Errorf("loop scalar runtime not applied: model=%q ctx=%d temp=%v", loop.Model, loop.ContextTokens, loop.Temperature)
+	}
+	client, ok := loop.Client.(*runtimeClient)
+	if !ok {
+		t.Fatalf("loop.Client = %T, want *runtimeClient", loop.Client)
+	}
+	if client.endpoint != "https://example.test/v1" || client.model != "new-model" || client.apiKey != "runtime-key" {
+		t.Errorf("client factory args wrong: %+v", client)
+	}
+	if got := fmt.Sprintf("%T", loop.Adapter); got != "tools.XMLAdapter" {
+		t.Errorf("adapter = %s, want tools.XMLAdapter", got)
+	}
+	if !loop.NoThink {
+		t.Errorf("loop NoThink should be applied from runtime")
+	}
+	if loop.Endpoint != "https://example.test/v1" {
+		t.Errorf("loop endpoint = %q, want runtime endpoint", loop.Endpoint)
+	}
+}
+
+func TestLoopRunnerStatusWriterAndFailureNotice(t *testing.T) {
+	root := t.TempDir()
+	ws, err := tools.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{MaxSteps: 5, MaxContextTokens: 8000, ChurnRounds: 3}
+	loop := &agent.Loop{
+		Client:        proseClient{},
+		Adapter:       tools.NativeFCAdapter{},
+		Registry:      tools.NewRegistry(),
+		Budget:        agent.NewBudget(cfg, nil),
+		Churn:         agent.NewChurnDetector(3),
+		Root:          root,
+		ContextTokens: 8000,
+		System:        "you are kloo",
+	}
+	var msgs []tea.Msg
+	var gotRuntime RuntimeConfig
+	var gotRep *agent.Report
+	r := NewLoopRunner(loop, ws, 0).WithStatusWriter(func(runtime RuntimeConfig, rep *agent.Report, elapsed time.Duration) error {
+		gotRuntime = runtime
+		gotRep = rep
+		return errors.New("permission denied")
+	})
+	r.setSend(func(m tea.Msg) { msgs = append(msgs, m) })
+
+	runtime := RuntimeConfig{
+		Endpoint:      "https://example.test/v1",
+		Model:         "new-model",
+		ContextTokens: 16000,
+		Temperature:   0.2,
+		ToolFormat:    "native",
+		NewClient: func(endpoint, model, apiKey string) llm.LLMClient {
+			return proseClient{}
+		},
+	}
+	r.Start(context.Background(), "answer", runtime, ModeAuto, nil)
+
+	if gotRuntime.Endpoint != runtime.Endpoint || gotRuntime.Model != runtime.Model {
+		t.Fatalf("status writer got runtime %+v, want %+v", gotRuntime, runtime)
+	}
+	if gotRep == nil || gotRep.Reason != agent.ReasonAnswered {
+		t.Fatalf("status writer got rep %+v, want answered report", gotRep)
+	}
+	var sawNotice, sawReport bool
+	for _, msg := range msgs {
+		switch m := msg.(type) {
+		case noticeMsg:
+			if strings.Contains(m.text, "status file write failed") && strings.Contains(m.text, "permission denied") {
+				sawNotice = true
+			}
+		case reportMsg:
+			sawReport = true
+		}
+	}
+	if !sawNotice || !sawReport {
+		t.Fatalf("messages should include status failure notice and terminal report, got %#v", msgs)
 	}
 }
 

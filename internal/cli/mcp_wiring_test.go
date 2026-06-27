@@ -92,7 +92,7 @@ func TestNoMCPFlagAndEnvPrecedence(t *testing.T) {
 			var gotDisabled bool
 			deps := Deps{
 				Getenv: func(k string) string { return tc.env[k] },
-				LaunchTUI: func(cfg config.Config, _ string, _ lintOpts, _ SessionOpts) error {
+				LaunchTUI: func(cfg config.Config, _ string, _ lintOpts, _ SessionOpts, _ string, _ func(string) string) error {
 					gotDisabled = cfg.MCPDisabled
 					return nil
 				},

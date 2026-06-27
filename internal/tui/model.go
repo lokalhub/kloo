@@ -17,6 +17,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/session"
 )
 
@@ -77,6 +79,12 @@ type Model struct {
 	// model name + context files (slash commands).
 	modelName    string
 	contextFiles []string
+	modelLister  ModelLister
+	modelOptions []ModelOption
+	picker       *modelPicker
+	runtime      RuntimeConfig
+	profilePath  string
+	getenv       func(string) string
 
 	// pendingDiffs accumulates edit cards for the /diff command.
 	pendingDiffs []editCardItem
@@ -104,6 +112,20 @@ type Config struct {
 	Runner    Runner     // optional: launches a real run on task submit
 	Source    TaskSource // optional: defaults to the keyboard source
 	Banner    string     // optional: a startup notice shown in the transcript (e.g. "resumed session …")
+	ModelList ModelLister
+	Models    []ModelOption
+	Provider  string
+	Endpoint  string
+	APIKey    string
+	// Runtime knobs applied to the next run and updated by /model switches.
+	ContextTokens int
+	Temperature   float64
+	ToolFormat    string
+	NoThink       bool
+	NoThinkLocked bool
+	ProfilePath   string
+	Getenv        func(string) string
+	NewClient     func(endpoint, model, apiKey string) llm.LLMClient
 	// History is the prior conversation to replay on resume (compact display items
 	// from the saved session). Rendered above the banner so a resumed session shows
 	// what happened before, not just a one-line notice. Empty for a fresh session.
@@ -121,6 +143,36 @@ func New(cfg Config) Model {
 	if modelName == "" {
 		modelName = "local"
 	}
+	getenv := cfg.Getenv
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	useNewClient := cfg.NewClient != nil
+	newClient := cfg.NewClient
+	if newClient == nil {
+		newClient = func(endpoint, model, apiKey string) llm.LLMClient {
+			return llm.New(endpoint, model, llm.WithAPIKey(apiKey))
+		}
+	}
+	runtime := RuntimeConfig{
+		Provider:      cfg.Provider,
+		Endpoint:      cfg.Endpoint,
+		APIKey:        cfg.APIKey,
+		Model:         modelName,
+		ContextTokens: cfg.ContextTokens,
+		Temperature:   cfg.Temperature,
+		ToolFormat:    cfg.ToolFormat,
+		NoThink:       cfg.NoThink,
+		NoThinkLocked: cfg.NoThinkLocked,
+		NewClient:     newClient,
+		UseNewClient:  useNewClient,
+	}
+	if runtime.ContextTokens == 0 {
+		runtime.ContextTokens = config.DefaultMaxContextTokens
+	}
+	if runtime.ToolFormat == "" {
+		runtime.ToolFormat = config.DefaultToolFormat
+	}
 
 	m := Model{
 		input:     in,
@@ -131,11 +183,17 @@ func New(cfg Config) Model {
 		status: statusData{
 			effort:    cfg.Effort,
 			model:     modelName,
+			provider:  cfg.Provider,
 			maxSteps:  cfg.MaxSteps,
 			maxTokens: cfg.MaxTokens,
 			mode:      ModeAuto,
 		},
-		runner: cfg.Runner,
+		runner:       cfg.Runner,
+		modelLister:  cfg.ModelList,
+		modelOptions: append([]ModelOption{}, cfg.Models...),
+		runtime:      runtime,
+		profilePath:  cfg.ProfilePath,
+		getenv:       getenv,
 	}
 	m.source = cfg.Source
 	if m.source == nil {
@@ -245,6 +303,9 @@ func (m Model) resize(w, h int) (tea.Model, tea.Cmd) {
 // handleKey handles key input. The idle-vs-running distinction (Esc/Ctrl-C) is
 // in interrupt.go; slash submission is in commands.go.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.picker != nil {
+		return m.handleModelPickerKey(msg)
+	}
 	// Interrupt / quit keys are mode-sensitive (interrupt.go).
 	if handled, nm, cmd := m.handleInterruptKeys(msg); handled {
 		return nm, cmd

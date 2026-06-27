@@ -16,6 +16,7 @@ func envFunc(m map[string]string) func(string) string {
 func strp(s string) *string { return &s }
 func fp(f float64) *float64 { return &f }
 func ip(i int) *int         { return &i }
+func bp(b bool) *bool       { return &b }
 
 // writeProfile writes a profile JSON to a temp file and returns its path.
 func writeProfile(t *testing.T, body string) string {
@@ -141,8 +142,45 @@ func TestResolve(t *testing.T) {
 			},
 		},
 		{
+			name:        "profile-no-think-applied",
+			profileBody: `{"local":{"noThink":true}}`,
+			want: Config{
+				Endpoint:            DefaultEndpoint,
+				Model:               DefaultModel,
+				Temperature:         DefaultTemperature,
+				MaxSteps:            DefaultMaxSteps,
+				Mode:                DefaultMode,
+				ToolFormat:          DefaultToolFormat,
+				Effort:              DefaultEffort,
+				MaxContextTokens:    DefaultMaxContextTokens,
+				MaxTokens:           DefaultMaxTokens,
+				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
+				ChurnRounds:         DefaultChurnRounds,
+				NoThink:             true,
+			},
+		},
+		{
+			name:        "flag-no-think-overrides-profile",
+			flags:       Flags{NoThink: bp(false)},
+			profileBody: `{"local":{"noThink":true}}`,
+			want: Config{
+				Endpoint:            DefaultEndpoint,
+				Model:               DefaultModel,
+				Temperature:         DefaultTemperature,
+				MaxSteps:            DefaultMaxSteps,
+				Mode:                DefaultMode,
+				ToolFormat:          DefaultToolFormat,
+				Effort:              DefaultEffort,
+				MaxContextTokens:    DefaultMaxContextTokens,
+				MaxTokens:           DefaultMaxTokens,
+				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
+				ChurnRounds:         DefaultChurnRounds,
+				NoThinkExplicit:     true,
+			},
+		},
+		{
 			name:  "all-flags-set",
-			flags: Flags{Endpoint: strp("http://e/v1"), Model: strp("m"), Temperature: fp(0.9), MaxSteps: ip(7), Mode: strp("manual")},
+			flags: Flags{Endpoint: strp("http://e/v1"), Model: strp("m"), Temperature: fp(0.9), MaxSteps: ip(7), Mode: strp("manual"), JSONOnly: bp(true), StatusFile: strp("/tmp/kloo-status.json")},
 			want: Config{
 				Endpoint:            "http://e/v1",
 				Model:               "m",
@@ -155,6 +193,8 @@ func TestResolve(t *testing.T) {
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
+				JSONOnly:            true,
+				StatusFile:          "/tmp/kloo-status.json",
 			},
 		},
 	}
@@ -376,7 +416,7 @@ func TestResolveProvider(t *testing.T) {
 				"endpoint": "https://openrouter.ai/api/v1",
 				"apiKey": "${KLOO_TEST_OR_KEY}",
 				"models": {
-					"dsv4": {"model": "deepseek/deepseek-v4-flash", "toolFormat": "native", "temperature": 0.2, "maxContextTokens": 128000}
+						"dsv4": {"model": "deepseek/deepseek-v4-flash", "toolFormat": "native", "temperature": 0.2, "maxContextTokens": 128000, "noThink": true}
 				}
 			},
 			"together": {
@@ -397,7 +437,7 @@ func TestResolveProvider(t *testing.T) {
 	if got.Provider != "or" || got.Endpoint != "https://openrouter.ai/api/v1" || got.APIKey != "or-secret" {
 		t.Errorf("provider or: endpoint/key wrong: %+v", got)
 	}
-	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "native" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 {
+	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "native" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 || !got.NoThink {
 		t.Errorf("alias dsv4 under or not resolved: %+v", got)
 	}
 
@@ -433,6 +473,149 @@ func TestResolveProvider(t *testing.T) {
 	}
 	if got.Endpoint != "http://local/v1" || got.Model != "deepseek/deepseek-v4-flash" || got.APIKey != "or-secret" {
 		t.Errorf("env provider + endpoint flag override: %+v", got)
+	}
+}
+
+func TestResolveModelAlias(t *testing.T) {
+	t.Setenv("KLOO_TEST_OR_KEY", "or-secret")
+	t.Setenv("KLOO_TEST_TG_KEY", "tg-secret")
+	prof := writeProfile(t, `{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"apiKey": "${KLOO_TEST_OR_KEY}",
+				"models": {
+					"dsv4": {
+						"model": "deepseek/deepseek-v4-flash",
+						"toolFormat": "xml",
+						"temperature": 0.2,
+						"maxContextTokens": 128000
+					}
+				}
+			},
+			"together": {
+				"endpoint": "https://api.together.xyz/v1",
+				"apiKey": "${KLOO_TEST_TG_KEY}",
+				"models": {
+					"other": {"model": "deepseek-ai/DeepSeek-V4-Flash"}
+				}
+			}
+		}
+	}`)
+
+	got, ok := ResolveModelAlias("dsv4", prof, envFunc(nil))
+	if !ok {
+		t.Fatal("ResolveModelAlias returned ok=false")
+	}
+	if got.Provider != "or" || got.Endpoint != "https://openrouter.ai/api/v1" || got.APIKey != "or-secret" {
+		t.Errorf("provider endpoint/key wrong: %+v", got)
+	}
+	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "xml" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 {
+		t.Errorf("alias model/tuning wrong: %+v", got)
+	}
+	if got.MaxSteps != DefaultMaxSteps || got.Mode != DefaultMode || got.Effort != DefaultEffort {
+		t.Errorf("default runtime fields wrong: %+v", got)
+	}
+}
+
+func TestResolveModelAliasDuplicateAliasUsesSortedProviderName(t *testing.T) {
+	prof := writeProfile(t, `{
+		"providers": {
+			"zulu": {
+				"endpoint": "https://z.example/v1",
+				"models": {"dupe": {"model": "z-model"}}
+			},
+			"alpha": {
+				"endpoint": "https://a.example/v1",
+				"models": {"dupe": {"model": "a-model"}}
+			}
+		}
+	}`)
+
+	got, ok := ResolveModelAlias("dupe", prof, envFunc(nil))
+	if !ok {
+		t.Fatal("ResolveModelAlias returned ok=false")
+	}
+	if got.Provider != "alpha" || got.Model != "a-model" || got.Endpoint != "https://a.example/v1" {
+		t.Errorf("duplicate alias should choose sorted provider name alpha, got %+v", got)
+	}
+}
+
+func TestResolveModelAliasAPIKeyOverrideAndFallback(t *testing.T) {
+	profWithKey := writeProfile(t, `{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"apiKey": "profile-key",
+				"models": {"dsv4": {"model": "deepseek-chat"}}
+			}
+		}
+	}`)
+	got, ok := ResolveModelAlias("dsv4", profWithKey, envFunc(map[string]string{EnvAPIKey: "env-key", EnvAPIKeyOpenAI: "openai-key"}))
+	if !ok {
+		t.Fatal("ResolveModelAlias returned ok=false")
+	}
+	if got.APIKey != "env-key" {
+		t.Errorf("KLOO_API_KEY should beat provider key, got %q", got.APIKey)
+	}
+
+	profNoKey := writeProfile(t, `{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"models": {"dsv4": {"model": "deepseek-chat"}}
+			}
+		}
+	}`)
+	got, ok = ResolveModelAlias("dsv4", profNoKey, envFunc(map[string]string{EnvAPIKeyOpenAI: "openai-key"}))
+	if !ok {
+		t.Fatal("ResolveModelAlias returned ok=false")
+	}
+	if got.APIKey != "openai-key" {
+		t.Errorf("OPENAI_API_KEY fallback should apply when no provider/KLOO key, got %q", got.APIKey)
+	}
+}
+
+func TestResolveModelAliasMissingAndMalformed(t *testing.T) {
+	if got, ok := ResolveModelAlias("missing", filepath.Join(t.TempDir(), "none.json"), envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
+		t.Errorf("missing profile = %+v, %v; want zero false", got, ok)
+	}
+
+	prof := writeProfile(t, `{"providers":{"or":{"models":{"known":{"model":"m"}}}}}`)
+	if got, ok := ResolveModelAlias("missing", prof, envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
+		t.Errorf("missing alias = %+v, %v; want zero false", got, ok)
+	}
+
+	bad := writeProfile(t, `{"providers": {bad json}`)
+	if got, ok := ResolveModelAlias("known", bad, envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
+		t.Errorf("malformed profile = %+v, %v; want zero false", got, ok)
+	}
+}
+
+func TestResolveModelAliasBundledDefaultsBeforeAliasTuning(t *testing.T) {
+	prof := writeProfile(t, `{
+		"providers": {
+			"or": {
+				"endpoint": "https://openrouter.ai/api/v1",
+				"models": {
+					"ds": {"model": "deepseek-chat", "temperature": 0.35}
+				}
+			}
+		}
+	}`)
+
+	got, ok := ResolveModelAlias("ds", prof, envFunc(nil))
+	if !ok {
+		t.Fatal("ResolveModelAlias returned ok=false")
+	}
+	if got.Model != "deepseek-chat" {
+		t.Fatalf("model = %q, want deepseek-chat", got.Model)
+	}
+	if got.ToolFormat != "native" || got.MaxContextTokens != 32768 {
+		t.Errorf("bundled deepseek defaults should apply for unset fields: %+v", got)
+	}
+	if got.Temperature != 0.35 {
+		t.Errorf("alias tuning should override bundled temperature, got %+v", got)
 	}
 }
 

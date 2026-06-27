@@ -38,9 +38,10 @@ type LoopRunner struct {
 	// store + sess persist that conversation to disk so it also survives a restart
 	// (resume). Both nil ⇒ in-memory only (tests, or a workspace store that failed
 	// to init); the in-session carry still works.
-	store *session.Store
-	sess  *session.Session
-	now   func() time.Time // injectable clock for persistence timestamps
+	store        *session.Store
+	sess         *session.Session
+	now          func() time.Time // injectable clock for persistence timestamps
+	statusWriter func(RuntimeConfig, *agent.Report, time.Duration) error
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
@@ -63,22 +64,27 @@ func (r *LoopRunner) WithSession(store *session.Store, sess *session.Session) *L
 	return r
 }
 
+// WithStatusWriter attaches an optional completion hook used by the CLI to write
+// the same structured JSON summary as headless runs after visible TUI runs.
+func (r *LoopRunner) WithStatusWriter(fn func(RuntimeConfig, *agent.Report, time.Duration) error) *LoopRunner {
+	r.statusWriter = fn
+	return r
+}
+
 // setSend connects the program's message sink (called by Run).
 func (r *LoopRunner) setSend(send func(tea.Msg)) { r.send = send }
 
 // Start runs the loop for task and pumps its signals into the program. In
 // approve-each mode an edit is held via a confirmRequestMsg until the user
 // answers. It blocks until the run ends, then sends the terminal reportMsg.
-func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, contextFiles []string) {
+func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string) {
 	if r.send == nil {
 		return
 	}
 
-	// Apply the current model to the loop so THIS run's requests use it. The model
-	// can change between runs via /model in the TUI; without this the loop kept the
-	// model fixed at launch and /model only relabeled the header (the request still
-	// went out under the launch model). Set per-run from the caller's current model.
-	r.loop.Model = model
+	// Apply the current runtime config to the loop so THIS run's requests use the
+	// selected endpoint/key/model/tool adapter. Switches apply between runs only.
+	r.applyRuntime(runtime)
 
 	// Wire /add-pinned files into the loop's per-run context: read each (jailed)
 	// and inject a bounded section into the system prompt so the model always
@@ -86,7 +92,7 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 	r.loop.System = r.baseSystem + pinnedSection(r.ws, contextFiles)
 
 	r.loop.OnProgress = func(step, maxSteps, tokens, maxTokens int) {
-		r.send(progressMsg{Model: model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
+		r.send(progressMsg{Model: runtime.Model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
 		// Forward the working-memory compaction count over the same plumbing
 		// (nil-safe: no message when memory is off, so the indicator stays hidden).
 		if r.loop.Memory != nil {
@@ -138,7 +144,9 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 	// single user-role context recap (task + outcome + the reply) gives a follow-up
 	// what it needs without derailing the model.
 	r.loop.SessionHistory = r.session
+	start := time.Now()
 	rep, _ := r.loop.Run(ctx, task)
+	elapsed := time.Since(start)
 	flushProse() // the final turn's answer (prose with no trailing tool call)
 	if rep != nil {
 		r.session = capSession(append(r.session, sessionRecap(task, rep)))
@@ -147,7 +155,32 @@ func (r *LoopRunner) Start(ctx context.Context, task, model string, mode Mode, c
 		}
 		r.persist(task)
 	}
+	if r.statusWriter != nil {
+		if err := r.statusWriter(runtime, rep, elapsed); err != nil {
+			r.send(noticeMsg{text: "status file write failed: " + err.Error()})
+		}
+	}
 	r.send(reportFor(rep, r.maxTokens))
+}
+
+func (r *LoopRunner) applyRuntime(runtime RuntimeConfig) {
+	if runtime.Model != "" {
+		r.loop.Model = runtime.Model
+	}
+	r.loop.Endpoint = runtime.Endpoint
+	if runtime.ContextTokens > 0 {
+		r.loop.ContextTokens = runtime.ContextTokens
+	}
+	r.loop.Temperature = runtime.Temperature
+	r.loop.NoThink = runtime.NoThink
+	if runtime.NewClient != nil {
+		r.loop.Client = runtime.NewClient(runtime.Endpoint, runtime.Model, runtime.APIKey)
+	}
+	if runtime.ToolFormat != "" {
+		if adapter, err := tools.SelectAdapter(runtime.ToolFormat, tools.EndpointCaps{SupportsTools: true}); err == nil {
+			r.loop.Adapter = adapter
+		}
+	}
 }
 
 // persist writes the updated session to disk (resume across restarts). No-op when

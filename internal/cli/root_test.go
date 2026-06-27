@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -68,6 +70,9 @@ func TestFlagsMapToConfig(t *testing.T) {
 		"--mode", "manual",
 		"--max-steps", "9",
 		"--temperature", "0.5",
+		"--no-think",
+		"--json-only",
+		"--status-file", filepath.Join(t.TempDir(), "status.json"),
 		"say hi",
 	)
 	if err != nil {
@@ -95,6 +100,12 @@ func TestFlagsMapToConfig(t *testing.T) {
 	if got := fake.gotReq.Messages[len(fake.gotReq.Messages)-1].Content; got != "say hi" {
 		t.Errorf("task forwarded = %q, want \"say hi\"", got)
 	}
+	if !gotCfg.NoThink || fake.gotReq.ReasoningEffort != "none" {
+		t.Errorf("--no-think should reach config and one-shot request, cfg=%+v req=%+v", gotCfg, fake.gotReq)
+	}
+	if !gotCfg.JSONOnly || gotCfg.StatusFile == "" {
+		t.Errorf("--json-only/--status-file should reach config, cfg=%+v", gotCfg)
+	}
 	if !strings.Contains(out.String(), "ok") {
 		t.Errorf("streamed reply not printed; out = %q", out.String())
 	}
@@ -121,19 +132,32 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	var gotCfg config.Config
 	var gotVerify string
 	var gotLint lintOpts
+	var gotProfile string
+	var gotGetenv func(string) string
 	clientCalled := false
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	getenv := func(k string) string {
+		if k == "KLOO_TEST_THREAD" {
+			return "threaded"
+		}
+		return ""
+	}
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			launched = true
 			gotCfg = cfg
 			gotVerify = verifyCmd
 			gotLint = lint
+			gotProfile = profilePath
+			gotGetenv = getenv
 			return nil
 		},
+		Getenv: getenv,
 	}
 
-	if _, _, err := runCmd(t, deps); err != nil {
+	statusFile := filepath.Join(t.TempDir(), "status.json")
+	if _, _, err := runCmd(t, deps, "--profile", profile, "--no-think", "--json-only", "--status-file", statusFile); err != nil {
 		t.Fatalf("no-arg invocation should exit 0, got %v", err)
 	}
 	if !launched {
@@ -145,6 +169,12 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	if gotCfg.Model != config.DefaultModel {
 		t.Errorf("TUI should receive resolved config, got model %q", gotCfg.Model)
 	}
+	if !gotCfg.NoThink {
+		t.Errorf("TUI should receive --no-think in resolved config")
+	}
+	if !gotCfg.JSONOnly || gotCfg.StatusFile != statusFile {
+		t.Errorf("TUI should receive observability flags, cfg=%+v", gotCfg)
+	}
 	// --verify now defaults to "" (no longer go-test): the actual command is
 	// auto-detected downstream in defaultLaunchTUI, so the flag passes "" through.
 	if gotVerify != "" {
@@ -153,6 +183,35 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	// No --lint/--no-lint flags ⇒ zero lintOpts (resolved/auto-detected downstream).
 	if (gotLint != lintOpts{}) {
 		t.Errorf("TUI should receive zero lintOpts by default, got %+v", gotLint)
+	}
+	if gotProfile != profile {
+		t.Errorf("TUI should receive profile path %q, got %q", profile, gotProfile)
+	}
+	if gotGetenv == nil || gotGetenv("KLOO_TEST_THREAD") != "threaded" {
+		t.Errorf("TUI should receive deps.Getenv")
+	}
+}
+
+func TestModelAliasOptionsFromProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {
+			"or": {"models": {"dsv4": {"model": "deepseek-chat", "maxContextTokens": 128000}}},
+			"tg": {"models": {"qwen": {"model": "qwen2.5-coder-7b"}}}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := modelAliasOptions(profile)
+	if len(opts) != 2 {
+		t.Fatalf("len = %d, want 2: %+v", len(opts), opts)
+	}
+	if opts[0].Provider != "or" || opts[0].Alias != "dsv4" || opts[0].ID != "deepseek-chat" || opts[0].ContextLength != 128000 {
+		t.Errorf("first alias option wrong: %+v", opts[0])
+	}
+	if opts[1].Provider != "tg" || opts[1].Alias != "qwen" || opts[1].ID != "qwen2.5-coder-7b" || opts[1].ContextLength != 24576 {
+		t.Errorf("second alias option should include bundled context: %+v", opts[1])
 	}
 }
 
@@ -167,7 +226,7 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	clientCalled, tuiCalled := false, false
 	deps := Deps{
 		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			tuiCalled = true
 			return nil
 		},
@@ -177,7 +236,8 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 		},
 	}
 
-	if _, _, err := runCmd(t, deps, "--headless", "--verify", "npm run build", "--lint", "golangci-lint run", "rework the tabs"); err != nil {
+	statusFile := filepath.Join(t.TempDir(), "status.json")
+	if _, _, err := runCmd(t, deps, "--headless", "--no-think", "--json-only", "--status-file", statusFile, "--verify", "npm run build", "--lint", "golangci-lint run", "rework the tabs"); err != nil {
 		t.Fatalf("--headless with a task should exit 0, got %v", err)
 	}
 	if !ran {
@@ -198,6 +258,12 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	if gotCfg.Model != config.DefaultModel {
 		t.Errorf("headless should receive resolved config, got model %q", gotCfg.Model)
 	}
+	if !gotCfg.NoThink {
+		t.Errorf("headless should receive --no-think in resolved config")
+	}
+	if !gotCfg.JSONOnly || gotCfg.StatusFile != statusFile {
+		t.Errorf("headless should receive observability flags, cfg=%+v", gotCfg)
+	}
 }
 
 // TestHeadlessWithoutTaskErrors: --headless with no task argument is a usage
@@ -205,7 +271,7 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 func TestHeadlessWithoutTaskErrors(t *testing.T) {
 	tuiCalled := false
 	deps := Deps{
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error {
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			tuiCalled = true
 			return nil
 		},

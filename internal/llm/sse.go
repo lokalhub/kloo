@@ -91,11 +91,10 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, onDelta func(Delta
 
 	// A non-2xx arrives before the event stream — read the body as an APIError.
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(httpResp.Body)
 		return ChatResponse{}, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Status:     httpResp.Status,
-			Body:       string(body),
+			Body:       readAPIErrorBody(httpResp.Body, c.apiKey),
 		}
 	}
 
@@ -152,13 +151,7 @@ func parseSSE(ctx context.Context, body io.Reader, onDelta func(Delta) error) (C
 			}
 			acc.absorbDelta(*ch.Delta)
 			if onDelta != nil {
-				d := *ch.Delta
-				// Show a thinking model's reasoning live (else the UI looks frozen for
-				// hundreds of thinking tokens); the final fallback still owns assembly.
-				if d.Content == "" && d.ReasoningContent != "" {
-					d.Content = d.ReasoningContent
-				}
-				if err := onDelta(d); err != nil {
+				if err := onDelta(*ch.Delta); err != nil {
 					return true, err
 				}
 			}
@@ -275,7 +268,14 @@ func (a *accumulator) absorbDelta(d Delta) {
 
 // response materialises the accumulated state into a ChatResponse.
 func (a *accumulator) response() ChatResponse {
-	msg := Message{Role: a.role, Content: a.content.String(), ReasoningContent: a.reasoning.String()}
+	msg := Message{
+		Role:                a.role,
+		Content:             a.content.String(),
+		ReasoningContent:    a.reasoning.String(),
+		RawContent:          a.content.String(),
+		RawReasoningContent: a.reasoning.String(),
+		FinishReason:        a.finishReason,
+	}
 	msg.FinalizeReasoning() // fold reasoning into content when a thinking model left content blank
 	if len(a.toolCalls) > 0 {
 		// Drop the streaming-only Index from the assembled (non-streaming) calls.
