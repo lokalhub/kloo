@@ -130,6 +130,10 @@ type Config struct {
 	// passthrough for a trusted deploy/CI secret (e.g. an admin password or CF token).
 	// Empty ⇒ only the fixed allowlist (PATH/HOME/…) is exposed.
 	AllowedEnv []string
+	// JSONSummary, when true (--json), makes a headless run emit a compact
+	// machine-readable JSON result line at the end (model/endpoint/ctx/reason/steps/
+	// tokens/tokens-per-sec/verify/error/transcript-tail) for benchmarking harnesses.
+	JSONSummary bool
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -173,6 +177,8 @@ type Flags struct {
 	AllowedImportDirs []string
 	// AllowedEnv (--allow-env) names env vars forwarded into run_command. nil ⇒ unset.
 	AllowedEnv []string
+	// JSONSummary (--json) emits a machine-readable headless result line. nil ⇒ unset.
+	JSONSummary *bool
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
@@ -447,6 +453,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.AllowedEnv != nil { // CLI-only (--allow-env); never from profile
 		cfg.AllowedEnv = flags.AllowedEnv
+	}
+	if flags.JSONSummary != nil {
+		cfg.JSONSummary = *flags.JSONSummary
 	}
 
 	return cfg, nil

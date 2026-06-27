@@ -1154,18 +1154,26 @@ var promiseVerbs = []string{
 	"let me read", "let me search", "let me list", "let me inspect", "let me explore",
 	"let me start", "let me first", "let me fix", "let me update", "let me create",
 	"let me add", "let me find", "let me open", "let me build", "let me actually",
+	"let me deploy", "let me set", "let me register", "let me login", "let me continue",
 	"let's run", "let's check", "let's try", "let's see", "let's start",
 	"i'll run", "i'll check", "i'll try", "i'll look", "i'll start", "i'll fix",
+	"i'll build", "i'll deploy", "i'll set", "i'll create", "i'll also", "i'll now",
 	"i will run", "i will check", "i'm going to", "i am going to",
 	"going to run", "going to check", "try running", "now let me", "now i'll",
-	"next, let me", "next i'll", "next, i'll",
+	"next, let me", "next i'll", "next, i'll", "start by",
 }
 
 // promisesToAct reports whether a no-tool-call reply READS like the model announced a
-// next action ("let me run X") rather than delivering a final answer. Used by the
-// promised-but-didn't-act rail to nudge the model to actually emit the call before
-// the run accepts the calm answered-stop.
+// next action ("let me run X") rather than delivering a final answer — including a
+// reply that contains a FENCED CODE BLOCK, which on a doer run almost always means the
+// model WROTE a command/snippet in prose but forgot to actually call the tool (seen
+// live: dsv4 wrote ```bash … lokal mp deploy …``` and stopped). Used by the
+// promised-but-didn't-act rail to nudge the model to emit the call before the run
+// accepts the calm answered-stop.
 func promisesToAct(content string) bool {
+	if strings.Contains(content, "```") { // wrote a command/code block but never called a tool
+		return true
+	}
 	s := strings.ToLower(content)
 	for _, p := range promiseVerbs {
 		if strings.Contains(s, p) {

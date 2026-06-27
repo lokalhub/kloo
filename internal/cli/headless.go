@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -106,6 +108,9 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	flush()
 	fmt.Fprintln(out)
 	printHeadlessReport(out, rep, time.Since(start))
+	if cfg.JSONSummary {
+		printHeadlessJSON(out, cfg, verifyCmd, rep, time.Since(start), runErr)
+	}
 	if runErr != nil {
 		return runErr
 	}
@@ -187,4 +192,78 @@ func reportReason(rep *agent.Report) string {
 		return "none"
 	}
 	return string(rep.Reason)
+}
+
+// printHeadlessJSON emits a compact, machine-readable result line (prefixed
+// KLOO_RESULT_JSON) for benchmarking harnesses: model/endpoint/ctx, the terminal
+// reason + success, steps/tokens/tokens-per-sec/elapsed, the final verify, any error,
+// and a short transcript tail. A harness greps the prefix and parses the rest.
+func printHeadlessJSON(out io.Writer, cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) {
+	type verifyJSON struct {
+		Command  string `json:"command"`
+		Passed   bool   `json:"passed"`
+		ExitCode int    `json:"exit_code"`
+	}
+	type summary struct {
+		Model          string      `json:"model"`
+		Endpoint       string      `json:"endpoint"`
+		Ctx            int         `json:"ctx"`
+		Reason         string      `json:"reason"`
+		Success        bool        `json:"success"`
+		Steps          int         `json:"steps"`
+		Tokens         int         `json:"tokens"`
+		ElapsedSeconds float64     `json:"elapsed_seconds"`
+		TokensPerSec   float64     `json:"tokens_per_sec"`
+		Compactions    int         `json:"compactions"`
+		Verify         *verifyJSON `json:"verify,omitempty"`
+		Error          string      `json:"error,omitempty"`
+		TranscriptTail string      `json:"transcript_tail,omitempty"`
+	}
+	round2 := func(f float64) float64 { return math.Round(f*100) / 100 }
+	s := summary{Model: cfg.Model, Endpoint: cfg.Endpoint, Ctx: cfg.MaxContextTokens, ElapsedSeconds: round2(elapsed.Seconds())}
+	if rep != nil {
+		s.Reason = string(rep.Reason)
+		s.Success = rep.Reason == agent.ReasonSuccess
+		s.Steps = rep.Steps
+		s.Tokens = rep.TokensUsed
+		s.Compactions = rep.Compactions
+		if secs := elapsed.Seconds(); secs > 0 {
+			s.TokensPerSec = round2(float64(rep.TokensUsed) / secs)
+		}
+		if rep.FinalVerify.Command != "" {
+			s.Verify = &verifyJSON{Command: rep.FinalVerify.Command, Passed: rep.FinalVerify.Passed, ExitCode: rep.FinalVerify.ExitCode}
+		}
+		if rep.Err != nil {
+			s.Error = rep.Err.Error()
+		}
+		s.TranscriptTail = transcriptTail(rep.Transcript, 600)
+	}
+	if runErr != nil && s.Error == "" {
+		s.Error = runErr.Error()
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(out, "KLOO_RESULT_JSON %s\n", b)
+}
+
+// transcriptTail returns the last maxBytes of the transcript as "role: content"
+// lines, for the JSON summary's failure-diagnosis tail.
+func transcriptTail(msgs []llm.Message, maxBytes int) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		b.WriteString(m.Role)
+		b.WriteString(": ")
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	s := strings.TrimSpace(b.String())
+	if len(s) > maxBytes {
+		s = "…" + s[len(s)-maxBytes:]
+	}
+	return s
 }
