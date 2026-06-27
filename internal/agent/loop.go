@@ -402,7 +402,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// otherwise accept as a finished reply (e.g. "a wrong command stops the run").
 		promiseNudges    int
 		lastActionFailed bool
+
+		// Confirm-finish rail state. everActed records whether the model ran a REAL
+		// action (run_command / edit / write) this run; confirmFinishNudged makes the
+		// nudge one-shot. Together they catch the premature `answered` stop where a model
+		// doing multi-step EXECUTION work (e.g. a deploy) completes one step then stops
+		// with a bare prose "done" instead of calling finish — seen live with dsv4
+		// (registered a version, then stopped before upgrading the instance).
+		everActed           bool
+		confirmFinishNudged bool
+
+		// railFires tallies each SOFT rail that injected a corrective this run, copied
+		// into Report.RailFires at finish (nil when empty). Makes self-corrections
+		// observable in the summary/JSON. recordRail bumps a name's count.
+		railFires = map[string]int{}
 	)
+	recordRail := func(r Rail) { railFires[string(r)]++ }
 
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
@@ -425,6 +440,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Compactions: compactions,
 			Ignored:     ignoredAll,
 			Transcript:  append([]llm.Message(nil), convo...), // this run's task + steps, for the session
+		}
+		if len(railFires) > 0 {
+			rep.RailFires = railFires
 		}
 		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
 			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
@@ -493,7 +511,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// promise episodes each get one rescue.
 				if (promisesToAct(msg.Content) || lastActionFailed) && promiseNudges < l.promiseNudgeLimit() {
 					promiseNudges++
+					recordRail(RailPromiseToAct)
 					convo = append(convo, msg, promiseToActCorrective(lastActionFailed))
+					continue
+				}
+				// Confirm-finish rail: the model has been EXECUTING real actions this run
+				// but stops with a bare prose turn — no tool call, no finish, and not an
+				// already-green edit (lastVerify.Passed && edited, which would have ended as
+				// success). On a multi-step ops task (a deploy, a migration) this is the
+				// premature `answered` stop seen live: dsv4 registered the version, said
+				// "done", and stopped before upgrading the instance. Nudge ONCE to call
+				// finish (its explicit, verify-gated terminator) or do the next step. The
+				// one-shot flag means a run that genuinely has nothing left still stops
+				// calmly on the very next bare turn — this only ever costs one extra round.
+				if everActed && !confirmFinishNudged && !(lastVerify.Passed && edited) {
+					confirmFinishNudged = true
+					recordRail(RailConfirmFinish)
+					convo = append(convo, msg, confirmFinishCorrective())
 					continue
 				}
 				// Conversational reply (prose, no tool call): the answer is already
@@ -588,6 +622,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		lastActionFailed = derr != nil || result.ExitCode != 0
 		if !lastActionFailed {
 			promiseNudges = 0
+		}
+
+		// A real action (command / edit / write — anything but a read) dispatched
+		// without a tool-level error counts as EXECUTION work, arming the confirm-finish
+		// rail: a run that has acted may have unfinished steps, so a later bare prose
+		// stop must be challenged rather than accepted as a calm answer.
+		if !isReadOnlyTool(call.Name) && derr == nil {
+			everActed = true
 		}
 
 		if isEditTool(call.Name) {
@@ -740,6 +782,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				})
 			case repeatStreak >= l.repeatNudgeRounds() && !repeatNudged:
 				repeatNudged = true
+				recordRail(RailRepeatedCall)
 				convo = append(convo, repeatCorrective(call, repeatStreak))
 			}
 		}
@@ -761,6 +804,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			return finish(ReasonAnswered, nil, nil, nil)
 		case exploreStreak >= l.exploreNudgeRounds() && !exploreNudged:
 			exploreNudged = true
+			recordRail(RailExplore)
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
@@ -1156,6 +1200,22 @@ func promiseToActCorrective(lastFailed bool) llm.Message {
 	b.WriteString("Only call finish if the task is genuinely complete or you are truly blocked (say why). " +
 		"If you need the user to decide something, ask ONE short question and call no tool.")
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// confirmFinishCorrective nudges a run that has been EXECUTING real actions but tries to
+// stop with a bare prose turn instead of calling finish. On a multi-step ops task (a
+// deploy, a migration) the model often completes one step and narrates "done" while
+// later steps remain — the run would otherwise accept that as a calm answered-stop. The
+// nudge forces the binary choice: call finish (the explicit, verify-gated terminator)
+// ONLY if every step is done, otherwise do the next step now. One-shot (the confirm-
+// finish rail flips confirmFinishNudged), so a genuinely-complete run still stops calmly
+// on its next bare turn — this costs at most one extra round.
+func confirmFinishCorrective() llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: "You stopped with a prose message but did NOT call the finish tool, " +
+		"and you have been running real actions this session — so I cannot tell whether the TASK is actually complete. " +
+		"Re-read the original task and its definition of done. If EVERY step is genuinely complete, call the finish tool now " +
+		"with a one-line summary (it runs the final verify). If ANY step remains, do the next one THIS turn with a tool call. " +
+		"Do not end with a prose 'done' — either call finish or keep going."}
 }
 
 // promiseVerbs are the action-announcing phrases a model emits right before it SHOULD

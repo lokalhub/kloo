@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -181,6 +182,20 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 	if rep.Churn != nil {
 		fmt.Fprintf(out, "  churn:   %s\n", rep.Churn.Kind)
 	}
+	if len(rep.RailFires) > 0 {
+		// Printed only when a soft rail fired, so a clean run's footer is unchanged.
+		// Stable key order so the line is deterministic (tests, diffing across runs).
+		names := make([]string, 0, len(rep.RailFires))
+		for k := range rep.RailFires {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, k := range names {
+			parts = append(parts, fmt.Sprintf("%s×%d", k, rep.RailFires[k]))
+		}
+		fmt.Fprintf(out, "  rails:   %s\n", strings.Join(parts, ", "))
+	}
 	if rep.RolledBack {
 		fmt.Fprintln(out, "  rolled back to checkpoint")
 	}
@@ -222,6 +237,10 @@ type runSummary struct {
 	Verify         *verifySummary `json:"verify,omitempty"`
 	Error          string         `json:"error,omitempty"`
 	TranscriptTail string         `json:"transcript_tail,omitempty"`
+	// RailFires tallies the soft recovery rails that fired (corrective injected, run
+	// continued), keyed by rail name. Omitted when none fired, so a clean run's JSON is
+	// unchanged. Lets a benchmark assert a run's self-corrections (e.g. confirm-finish=1).
+	RailFires map[string]int `json:"rail_fires,omitempty"`
 }
 
 func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) runSummary {
@@ -243,6 +262,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 			s.Error = rep.Err.Error()
 		}
 		s.TranscriptTail = transcriptTail(rep.Transcript, 600)
+		s.RailFires = rep.RailFires
 	}
 	if runErr != nil && s.Error == "" {
 		s.Error = runErr.Error()

@@ -93,6 +93,29 @@ const (
 	ChurnEditFailed ChurnKind = "edit-failed"
 )
 
+// Rail names the SOFT recovery rails — the ones that inject a corrective and let the
+// run continue (as opposed to a terminal stop, which surfaces via Reason). They are
+// otherwise invisible: the corrective is just another user-role turn in the transcript.
+// Report.RailFires tallies them by these names so a run's self-corrections are
+// observable — printed in the run summary and emitted in the headless JSON, which makes
+// the behaviour assertable in a benchmark instead of eyeballing transcript wording.
+type Rail string
+
+const (
+	// RailConfirmFinish: a run that EXECUTED real actions tried to stop with a bare
+	// prose turn instead of calling finish (the premature `answered` stop on a
+	// multi-step ops task). Nudged once to finish-or-continue. See loop.go.
+	RailConfirmFinish Rail = "confirm-finish"
+	// RailPromiseToAct: the model narrated a next action ("let me run X") or gave up
+	// after a failing command, with no tool call. Nudged to actually emit the call.
+	RailPromiseToAct Rail = "promise-to-act"
+	// RailRepeatedCall: the model fired the same call repeatedly; nudged once before
+	// the harder repeated-call churn stop would trip.
+	RailRepeatedCall Rail = "repeated-call"
+	// RailExplore: the model kept reading/exploring without acting; nudged to act-or-ask.
+	RailExplore Rail = "explore"
+)
+
 // VerifyResult is the REAL signal from running the configured verify command —
 // the only thing the loop trusts to decide success (never the model's claim).
 type VerifyResult struct {
@@ -264,6 +287,12 @@ type Report struct {
 	Compactions int
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
+	// RailFires tallies the SOFT recovery rails that fired this run (corrective
+	// injected, run continued), keyed by Rail name. Nil when none fired, so a clean
+	// run's report/JSON is unchanged. Lets a run's self-corrections be inspected (and
+	// a benchmark assert e.g. that an acted multi-step run was rescued by exactly one
+	// confirm-finish nudge) instead of eyeballing transcript wording.
+	RailFires map[string]int
 	// Transcript is this run's full conversation (task + every step). The TUI
 	// accumulates it into the session so the next submission carries context
 	// (seeded back via Loop.SessionHistory). Empty for callers that don't read it.

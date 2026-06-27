@@ -306,6 +306,58 @@ func TestLoopConversationalReplyAnswers(t *testing.T) {
 	}
 }
 
+// TestLoopConfirmFinishNudgeOnActedBareStop: a run that EXECUTED a real action
+// (run_command) and then tries to stop with a bare prose "done" — no tool call, no
+// finish — is nudged ONCE to call finish or do the next step. This is the premature
+// `answered` stop seen live: dsv4 ran step 1 of a multi-step deploy, said "done", and
+// stopped before the remaining steps. The nudge adds EXACTLY one round: the second bare
+// turn then stops calmly as answered (the flag is one-shot), so the run terminates at
+// step 3 instead of step 2.
+func TestLoopConfirmFinishNudgeOnActedBareStop(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"run_command", map[string]any{"path": "x"}})},
+		llmtest.Mock{Body: proseResp(t, "All done — the deploy is complete.")},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "register the version then upgrade the instance")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonAnswered {
+		t.Fatalf("reason = %q, want answered (after the one-shot confirm-finish nudge)", rep.Reason)
+	}
+	if rep.Steps != 3 {
+		t.Errorf("steps = %d, want 3 — the confirm-finish nudge must add exactly one round (without it the acted run would stop at step 2)", rep.Steps)
+	}
+	// The rail fire is recorded so it is observable in the run summary / headless JSON.
+	if got := rep.RailFires[string(RailConfirmFinish)]; got != 1 {
+		t.Errorf("RailFires[%q] = %d, want 1 (the fire must be tallied for validation)", RailConfirmFinish, got)
+	}
+}
+
+// TestLoopReadOnlyRunSkipsConfirmFinishNudge: the confirm-finish rail is gated on a REAL
+// action. A run that only READ (read_file) then answers in prose is the legitimate
+// ReasonAnswered case — it must NOT get the extra nudge round, so it stops at step 2.
+func TestLoopReadOnlyRunSkipsConfirmFinishNudge(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "x"}})},
+		llmtest.Mock{Body: proseResp(t, "Here is the answer to your question.")},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "what does x do?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonAnswered {
+		t.Fatalf("reason = %q, want answered", rep.Reason)
+	}
+	if rep.Steps != 2 {
+		t.Errorf("steps = %d, want 2 — a read-only run must not trigger the confirm-finish nudge", rep.Steps)
+	}
+}
+
 // TestLoopReadonlyRunDoesNotChurn is the end-to-end guard for the "hello churns"
 // bug: with the REAL churn detector and a verify that always fails (e.g. the
 // default `go test` on a non-Go app), a run that only reads/explores — never

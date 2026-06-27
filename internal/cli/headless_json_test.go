@@ -45,6 +45,39 @@ func TestPrintHeadlessJSON(t *testing.T) {
 	if v, _ := s["verify"].(map[string]any); v == nil || v["passed"] != true {
 		t.Errorf("verify block missing/wrong: %v", s["verify"])
 	}
+	// A clean run fired no rails ⇒ the field is omitted entirely (no key in the JSON).
+	if _, present := s["rail_fires"]; present {
+		t.Errorf("rail_fires must be omitted when no rail fired, got %v", s["rail_fires"])
+	}
+}
+
+// TestPrintHeadlessJSONRailFires: when soft rails fired, the JSON carries a rail_fires
+// tally so a benchmark can ASSERT the run's self-corrections (e.g. that a multi-step
+// run was rescued by exactly one confirm-finish nudge) instead of parsing transcripts.
+func TestPrintHeadlessJSONRailFires(t *testing.T) {
+	cfg := config.Config{Model: "dsv4", Endpoint: "http://x/v1", MaxContextTokens: 900000}
+	rep := &agent.Report{
+		Reason:     agent.ReasonAnswered,
+		Steps:      3,
+		TokensUsed: 900,
+		RailFires:  map[string]int{string(agent.RailConfirmFinish): 1},
+		Transcript: []llm.Message{{Role: "assistant", Content: "all done"}},
+	}
+	var buf bytes.Buffer
+	printHeadlessJSON(&buf, cfg, "npm test", rep, 5*time.Second, nil)
+
+	line := strings.TrimPrefix(strings.TrimSpace(buf.String()), "KLOO_RESULT_JSON ")
+	var s map[string]any
+	if err := json.Unmarshal([]byte(line), &s); err != nil {
+		t.Fatalf("emitted JSON is invalid: %v", err)
+	}
+	rf, ok := s["rail_fires"].(map[string]any)
+	if !ok {
+		t.Fatalf("rail_fires missing/wrong type: %v", s["rail_fires"])
+	}
+	if rf[string(agent.RailConfirmFinish)] != float64(1) {
+		t.Errorf("rail_fires[%q] = %v, want 1", agent.RailConfirmFinish, rf[string(agent.RailConfirmFinish)])
+	}
 }
 
 func TestPrintHeadlessJSON_Error(t *testing.T) {

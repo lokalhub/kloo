@@ -212,6 +212,7 @@ The JSON shape is:
 | `steps`, `tokens`, `elapsed_seconds`, `tokens_per_sec`, `compactions` | Run counters for benchmark comparison. |
 | `verify` | Optional final verify command, pass flag, and exit code. |
 | `error` | Optional report/model/validation error. Upstream model errors include endpoint/model and a bounded upstream body tail, not API keys. |
+| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human `--headless` footer prints the same as a `rails:` line. |
 | `transcript_tail` | A short role-prefixed tail of the run transcript for diagnostics. |
 
 `--json-only` is useful when a benchmark expects the final assistant answer to be
