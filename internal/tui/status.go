@@ -13,6 +13,7 @@ import (
 type statusData struct {
 	effort      string
 	model       string
+	provider    string
 	step        int
 	maxSteps    int
 	tokens      int
@@ -93,7 +94,11 @@ func (m Model) renderHeader() string {
 	}
 
 	// Lead cluster: kloo <version> • model • effort.
-	lead := "kloo " + displayVersion(m.version) + "  " + s.model
+	modelLabel := s.model
+	if s.provider != "" {
+		modelLabel = s.provider + "/" + modelLabel
+	}
+	lead := "kloo " + displayVersion(m.version) + "  " + modelLabel
 	if s.effort != "" {
 		lead += " · " + s.effort
 	}

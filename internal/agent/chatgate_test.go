@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -78,6 +79,41 @@ func TestChatGateFailsOpen(t *testing.T) {
 	}
 	if rep.Reason != ReasonSuccess {
 		t.Fatalf("reason = %q, want success (gate error fails open → loop ran)", rep.Reason)
+	}
+}
+
+func TestChatGateRunawayThinkingStopsAsRecoverableError(t *testing.T) {
+	reasoning := strings.Repeat("thinking ", 300)
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: `{
+		"choices": [{
+			"message": {"role":"assistant","content":"","reasoning_content":` + strconv.Quote(reasoning) + `},
+			"finish_reason":"length"
+		}],
+		"usage": {"total_tokens": 77}
+	}`})
+	loop, calls := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.ChatSystem = "classify the message: TASK or a reply"
+	var streamed string
+	loop.OnDelta = func(s string) { streamed += s }
+
+	rep, err := loop.Run(context.Background(), "thanks")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonError || rep.Err == nil {
+		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
+	}
+	if !strings.Contains(rep.Err.Error(), "--no-think") || !strings.Contains(rep.Err.Error(), "output budget") {
+		t.Fatalf("recoverable error missing guidance: %q", rep.Err.Error())
+	}
+	if streamed != "" {
+		t.Fatalf("chat gate should not stream raw reasoning before diagnostic, got %q", streamed)
+	}
+	if len(*calls) != 0 || rep.Steps != 0 {
+		t.Fatalf("chat-gate runaway should stop before act loop, calls=%v steps=%d", *calls, rep.Steps)
+	}
+	if n := len(srv.Requests()); n != 1 {
+		t.Fatalf("requests = %d, want gate only", n)
 	}
 }
 

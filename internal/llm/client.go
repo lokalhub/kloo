@@ -109,16 +109,17 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (ChatResponse, e
 	}
 	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("llm: read response body: %w", err)
-	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		return ChatResponse{}, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Status:     httpResp.Status,
-			Body:       string(body),
+			Body:       readAPIErrorBody(httpResp.Body, c.apiKey),
 		}
+	}
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("llm: read response body: %w", err)
 	}
 
 	var resp ChatResponse
@@ -128,7 +129,11 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (ChatResponse, e
 	// Reasoning-content fallback: a thinking model may leave content empty and put its
 	// output in reasoning_content — fold it back so the loop never sees a blank turn.
 	for i := range resp.Choices {
-		resp.Choices[i].Message.FinalizeReasoning()
+		msg := &resp.Choices[i].Message
+		msg.RawContent = msg.Content
+		msg.RawReasoningContent = msg.ReasoningContent
+		msg.FinishReason = resp.Choices[i].FinishReason
+		msg.FinalizeReasoning()
 	}
 	return resp, nil
 }

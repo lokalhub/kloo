@@ -96,6 +96,8 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "/add":
 		return m.slashAdd(arg), nil
+	case "/models":
+		return m.slashModels(), nil
 	case "/model":
 		return m.slashModel(arg), nil
 	case "/mode":
@@ -120,12 +122,9 @@ func (m Model) slashAdd(path string) Model {
 func (m Model) slashModel(name string) Model {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return m.appendItem(infoItem{text: "/model needs a model name"})
+		return m.openModelPicker()
 	}
-	// kloo is BYO-endpoint: accept any model name the configured endpoint serves.
-	m.modelName = name
-	m.status.model = name
-	return m.appendItem(infoItem{text: "model: " + name})
+	return m.selectModelName(name)
 }
 
 func (m Model) slashMode(value string) Model {
@@ -191,11 +190,11 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	m.tickCount = 0
 	files := append([]string{}, m.contextFiles...)
 	mode := m.mode
-	model := m.modelName // current model (switchable via /model) — applied to this run
+	runtime := m.runtime
 	runner := m.runner
 	return m, tea.Batch(
 		func() tea.Msg {
-			go runner.Start(ctx, task, model, mode, files)
+			go runner.Start(ctx, task, runtime, mode, files)
 			return nil
 		},
 		tickCmd(),

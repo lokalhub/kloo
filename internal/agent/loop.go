@@ -55,8 +55,10 @@ type Loop struct {
 	// actionable task (→ run the loop) or conversation (→ reply directly, no run).
 	// Empty ⇒ disabled (headless/benchmark, where every input is a real task).
 	ChatSystem  string
+	Endpoint    string
 	Model       string
 	Temperature float64
+	NoThink     bool
 	Now         func() time.Time // injectable clock (defaults to time.Now)
 	// SessionHistory is the conversation from PRIOR runs in the same session (the
 	// TUI reuses one Loop across submissions). It is seeded into working memory as
@@ -400,7 +402,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// otherwise accept as a finished reply (e.g. "a wrong command stops the run").
 		promiseNudges    int
 		lastActionFailed bool
+
+		// Confirm-finish rail state. everActed records whether the model ran a REAL
+		// action (run_command / edit / write) this run; confirmFinishNudged makes the
+		// nudge one-shot. Together they catch the premature `answered` stop where a model
+		// doing multi-step EXECUTION work (e.g. a deploy) completes one step then stops
+		// with a bare prose "done" instead of calling finish — seen live with dsv4
+		// (registered a version, then stopped before upgrading the instance).
+		everActed           bool
+		confirmFinishNudged bool
+
+		// railFires tallies each SOFT rail that injected a corrective this run, copied
+		// into Report.RailFires at finish (nil when empty). Makes self-corrections
+		// observable in the summary/JSON. recordRail bumps a name's count.
+		railFires = map[string]int{}
 	)
+	recordRail := func(r Rail) { railFires[string(r)]++ }
 
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
@@ -424,6 +441,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Ignored:     ignoredAll,
 			Transcript:  append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 		}
+		if len(railFires) > 0 {
+			rep.RailFires = railFires
+		}
 		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
 			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
 				rep.RolledBack = true
@@ -440,8 +460,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// ChatSystem is empty (headless/benchmark). A gate error fails OPEN — we run the
 	// loop rather than block real work on a classifier hiccup.
 	if l.ChatSystem != "" && ctx.Err() == nil {
-		reply, conversational, usage := l.chatGate(ctx, task)
+		reply, conversational, usage, gateErr := l.chatGate(ctx, task)
 		l.Budget.AddTokens(usage.TotalTokens)
+		if gateErr != nil {
+			return finish(ReasonError, gateErr, nil, nil)
+		}
 		if conversational {
 			if l.OnDelta != nil {
 				l.OnDelta(reply)
@@ -488,7 +511,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// promise episodes each get one rescue.
 				if (promisesToAct(msg.Content) || lastActionFailed) && promiseNudges < l.promiseNudgeLimit() {
 					promiseNudges++
+					recordRail(RailPromiseToAct)
 					convo = append(convo, msg, promiseToActCorrective(lastActionFailed))
+					continue
+				}
+				// Confirm-finish rail: the model has been EXECUTING real actions this run
+				// but stops with a bare prose turn — no tool call, no finish, and not an
+				// already-green edit (lastVerify.Passed && edited, which would have ended as
+				// success). On a multi-step ops task (a deploy, a migration) this is the
+				// premature `answered` stop seen live: dsv4 registered the version, said
+				// "done", and stopped before upgrading the instance. Nudge ONCE to call
+				// finish (its explicit, verify-gated terminator) or do the next step. The
+				// one-shot flag means a run that genuinely has nothing left still stops
+				// calmly on the very next bare turn — this only ever costs one extra round.
+				if everActed && !confirmFinishNudged && !(lastVerify.Passed && edited) {
+					confirmFinishNudged = true
+					recordRail(RailConfirmFinish)
+					convo = append(convo, msg, confirmFinishCorrective())
 					continue
 				}
 				// Conversational reply (prose, no tool call): the answer is already
@@ -583,6 +622,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		lastActionFailed = derr != nil || result.ExitCode != 0
 		if !lastActionFailed {
 			promiseNudges = 0
+		}
+
+		// A real action (command / edit / write — anything but a read) dispatched
+		// without a tool-level error counts as EXECUTION work, arming the confirm-finish
+		// rail: a run that has acted may have unfinished steps, so a later bare prose
+		// stop must be challenged rather than accepted as a calm answer.
+		if !isReadOnlyTool(call.Name) && derr == nil {
+			everActed = true
 		}
 
 		if isEditTool(call.Name) {
@@ -735,6 +782,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				})
 			case repeatStreak >= l.repeatNudgeRounds() && !repeatNudged:
 				repeatNudged = true
+				recordRail(RailRepeatedCall)
 				convo = append(convo, repeatCorrective(call, repeatStreak))
 			}
 		}
@@ -756,6 +804,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			return finish(ReasonAnswered, nil, nil, nil)
 		case exploreStreak >= l.exploreNudgeRounds() && !exploreNudged:
 			exploreNudged = true
+			recordRail(RailExplore)
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
@@ -853,11 +902,11 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	}
 
 	msgs := append([]llm.Message{sys}, hist...)
-	req := l.Adapter.BuildRequest(llm.ChatRequest{
+	req := l.withThinkingControl(l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,
 		Messages:    msgs,
 		Temperature: l.Temperature,
-	}, l.Registry)
+	}, l.Registry))
 
 	resp, err := l.complete(ctx, req)
 	if err != nil {
@@ -868,16 +917,26 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	calls, perr := l.Adapter.ParseAll(msg)
 
 	if perr != nil || len(calls) == 0 {
+		if perr == nil {
+			if err := runawayThinkingError(msg); err != nil {
+				return tools.Call{}, nil, usage, msg, err
+			}
+		}
 		// One corrective re-prompt (the anti-spiral rail, mirrored from P02).
 		corrective := llm.Message{Role: llm.RoleUser, Content: l.Adapter.Corrective(perr)}
 		retryMsgs := append(append([]llm.Message{}, msgs...), msg, corrective)
-		resp2, err2 := l.complete(ctx, llm.ChatRequest{Model: l.Model, Messages: retryMsgs, Temperature: l.Temperature})
+		resp2, err2 := l.complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: retryMsgs, Temperature: l.Temperature}))
 		if err2 != nil {
 			return tools.Call{}, nil, usage, msg, err2
 		}
 		msg2 := assistantMessage(resp2)
 		usage2 := estimateUsage(resp2.Usage, retryMsgs, msg2)
 		calls, perr = l.Adapter.ParseAll(msg2)
+		if perr == nil && len(calls) == 0 {
+			if err := runawayThinkingError(msg2); err != nil {
+				return tools.Call{}, nil, addUsage(usage, usage2), msg2, err
+			}
+		}
 		if perr != nil {
 			// A MALFORMED tool call after the nudge is a real error (the model tried to
 			// act but botched the format).
@@ -1143,6 +1202,22 @@ func promiseToActCorrective(lastFailed bool) llm.Message {
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
 }
 
+// confirmFinishCorrective nudges a run that has been EXECUTING real actions but tries to
+// stop with a bare prose turn instead of calling finish. On a multi-step ops task (a
+// deploy, a migration) the model often completes one step and narrates "done" while
+// later steps remain — the run would otherwise accept that as a calm answered-stop. The
+// nudge forces the binary choice: call finish (the explicit, verify-gated terminator)
+// ONLY if every step is done, otherwise do the next step now. One-shot (the confirm-
+// finish rail flips confirmFinishNudged), so a genuinely-complete run still stops calmly
+// on its next bare turn — this costs at most one extra round.
+func confirmFinishCorrective() llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: "You stopped with a prose message but did NOT call the finish tool, " +
+		"and you have been running real actions this session — so I cannot tell whether the TASK is actually complete. " +
+		"Re-read the original task and its definition of done. If EVERY step is genuinely complete, call the finish tool now " +
+		"with a one-line summary (it runs the final verify). If ANY step remains, do the next one THIS turn with a tool call. " +
+		"Do not end with a prose 'done' — either call finish or keep going."}
+}
+
 // promiseVerbs are the action-announcing phrases a model emits right before it SHOULD
 // call a tool. They are matched (lower-cased, substring) on a no-tool-call reply by
 // promisesToAct. Deliberately action-verb-anchored ("let me run", not bare "let me")
@@ -1271,22 +1346,25 @@ const chatSentinel = "TASK"
 // never flash on the user's screen; the conversational reply is surfaced by the
 // caller (via OnDelta) only once classification is known. Any error fails OPEN
 // (returns false) so a classifier hiccup never blocks real work.
-func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage) {
+func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage, gateErr error) {
 	msgs := []llm.Message{{Role: llm.RoleSystem, Content: l.ChatSystem}}
 	msgs = append(msgs, l.SessionHistory...)
 	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: task})
 
-	resp, err := l.Client.Complete(ctx, llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature})
+	resp, err := l.Client.Complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature}))
 	if err != nil {
-		return "", false, llm.Usage{} // fail open: run the loop normally
+		return "", false, llm.Usage{}, nil // fail open: run the loop normally
 	}
 	msg := assistantMessage(resp)
 	usage = estimateUsage(resp.Usage, msgs, msg)
+	if err := runawayThinkingError(msg); err != nil {
+		return "", false, usage, err
+	}
 	text := strings.TrimSpace(msg.Content)
 	if text == "" || isTaskVerdict(text) {
-		return "", false, usage
+		return "", false, usage, nil
 	}
-	return text, true, usage
+	return text, true, usage, nil
 }
 
 // isTaskVerdict reports whether the gate reply is the TASK sentinel. Lenient: the
@@ -1344,7 +1422,7 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 			})
 		}
 		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !isRetryableLLMError(err) {
-			return resp, err
+			return resp, l.modelCallError(err)
 		}
 		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
 		if l.OnRetry != nil {
@@ -1356,7 +1434,28 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		case <-time.After(wait):
 		}
 	}
-	return resp, err
+	return resp, l.modelCallError(err)
+}
+
+func (l *Loop) withThinkingControl(req llm.ChatRequest) llm.ChatRequest {
+	if l.NoThink {
+		req.ReasoningEffort = "none"
+	}
+	return req
+}
+
+func (l *Loop) modelCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	parts := []string{"agent: model call failed"}
+	if strings.TrimSpace(l.Endpoint) != "" {
+		parts = append(parts, "endpoint="+l.Endpoint)
+	}
+	if strings.TrimSpace(l.Model) != "" {
+		parts = append(parts, "model="+l.Model)
+	}
+	return fmt.Errorf("%s: %w", strings.Join(parts, " "), err)
 }
 
 // isRetryableLLMError reports whether a failed model call is a TRANSIENT endpoint
@@ -1399,7 +1498,35 @@ func assistantMessage(resp llm.ChatResponse) llm.Message {
 	if len(resp.Choices) == 0 {
 		return llm.Message{Role: llm.RoleAssistant}
 	}
-	return resp.Choices[0].Message
+	msg := resp.Choices[0].Message
+	if msg.FinishReason == "" {
+		msg.FinishReason = resp.Choices[0].FinishReason
+	}
+	return msg
+}
+
+const runawayReasoningChars = 2000
+
+func runawayThinkingError(msg llm.Message) error {
+	if len(msg.ToolCalls) > 0 {
+		return nil
+	}
+	rawReasoning := msg.RawReasoningContent
+	if rawReasoning == "" {
+		rawReasoning = msg.ReasoningContent
+	}
+	rawContent := msg.RawContent
+	if rawContent == "" && rawReasoning == "" {
+		rawContent = msg.Content
+	}
+	if strings.TrimSpace(rawContent) != "" {
+		return nil
+	}
+	reasoningChars := len([]rune(rawReasoning))
+	if reasoningChars >= runawayReasoningChars || msg.FinishReason == "length" {
+		return fmt.Errorf("model produced %d reasoning chars but no usable content; disable thinking (--no-think) or raise the output budget", reasoningChars)
+	}
+	return nil
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {

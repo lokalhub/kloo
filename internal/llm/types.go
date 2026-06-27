@@ -39,12 +39,21 @@ type ChatRequest struct {
 	// llama.cpp accepts). Also set only by the constrained-decoding
 	// layer when supported; omitted otherwise.
 	Grammar string `json:"grammar,omitempty"`
+	// ReasoningEffort is the OpenAI-compatible thinking control. kloo sets
+	// "none" only when --no-think/profile noThink is configured.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // StreamOptions opts a streaming request into a final usage chunk
 // (OpenAI/llama.cpp emit usage on a stream only when asked).
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// ModelInfo is one model advertised by GET /v1/models.
+type ModelInfo struct {
+	ID            string
+	ContextLength int
 }
 
 // Message is one chat message (request or response).
@@ -57,6 +66,12 @@ type Message struct {
 	// FinalizeReasoning folds it into Content so the loop never treats such a turn as
 	// blank. Sent back to the endpoint omitted (it's a response-only field).
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// RawContent/RawReasoningContent/FinishReason preserve the original response
+	// shape before FinalizeReasoning promotes reasoning into Content. They are
+	// response metadata for the agent and are never sent back to endpoints.
+	RawContent          string `json:"-"`
+	RawReasoningContent string `json:"-"`
+	FinishReason        string `json:"-"`
 	// Name optionally identifies the author (tool name for tool messages, etc.).
 	Name string `json:"name,omitempty"`
 	// ToolCalls is set on an assistant message that calls tools.

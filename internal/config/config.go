@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -134,6 +135,18 @@ type Config struct {
 	// machine-readable JSON result line at the end (model/endpoint/ctx/reason/steps/
 	// tokens/tokens-per-sec/verify/error/transcript-tail) for benchmarking harnesses.
 	JSONSummary bool
+	// JSONOnly, when true (--json-only), requires the final assistant answer to be
+	// one valid JSON value with no surrounding prose or code fences.
+	JSONOnly bool
+	// StatusFile, when non-empty (--status-file), writes the run summary JSON after
+	// a visible TUI run completes.
+	StatusFile string
+	// NoThink asks compatible OpenAI-style backends to disable thinking/reasoning
+	// for this run by setting reasoning_effort:"none" on chat requests.
+	NoThink bool
+	// NoThinkExplicit is true when --no-think was explicitly provided. TUI runtime
+	// alias switches use this to preserve CLI flag precedence over profile aliases.
+	NoThinkExplicit bool
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -179,6 +192,12 @@ type Flags struct {
 	AllowedEnv []string
 	// JSONSummary (--json) emits a machine-readable headless result line. nil ⇒ unset.
 	JSONSummary *bool
+	// JSONOnly (--json-only) validates the final assistant answer as strict JSON.
+	JSONOnly *bool
+	// StatusFile (--status-file) writes the reusable run summary JSON. nil ⇒ unset.
+	StatusFile *string
+	// NoThink (--no-think) asks compatible backends to disable reasoning. nil ⇒ unset.
+	NoThink *bool
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
@@ -192,6 +211,7 @@ type profileEntry struct {
 	MaxTokens           *int     `json:"maxTokens,omitempty"`
 	MaxWallClockSeconds *int     `json:"maxWallClockSeconds,omitempty"`
 	ChurnRounds         *int     `json:"churnRounds,omitempty"`
+	NoThink             *bool    `json:"noThink,omitempty"`
 }
 
 // providerEntry is one entry of the reserved "providers" profile block, selected
@@ -214,6 +234,17 @@ type providerEntry struct {
 type modelEntry struct {
 	Model        string `json:"model,omitempty"`
 	profileEntry        // promoted: toolFormat, temperature, fewShotPath, context/budget knobs
+}
+
+// ModelAlias describes one provider-scoped alias from the profile's providers
+// block. It is used by the TUI picker to display aliases before selection.
+type ModelAlias struct {
+	Provider      string
+	Alias         string
+	Model         string
+	ContextLength int
+	Temperature   float64
+	ToolFormat    string
 }
 
 // loadProviders reads the reserved "providers" block from the profile file. Like
@@ -261,6 +292,150 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	if e.ChurnRounds != nil {
 		cfg.ChurnRounds = *e.ChurnRounds
 	}
+	if e.NoThink != nil {
+		cfg.NoThink = *e.NoThink
+	}
+}
+
+// ResolveModelAlias searches every provider's model alias map and returns a
+// fully resolved config for the first deterministic match. Duplicate aliases are
+// resolved by sorted provider name so direct TUI switches are stable.
+func ResolveModelAlias(alias, profilePath string, getenv func(string) string) (Config, bool) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	providers, err := loadProviders(profilePath)
+	if err != nil || len(providers) == 0 {
+		return Config{}, false
+	}
+
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		p := providers[name]
+		if cfg, ok := resolveProviderModelAlias(name, alias, p, getenv); ok {
+			return cfg, true
+		}
+	}
+	return Config{}, false
+}
+
+// ResolveProviderModelAlias resolves alias only within provider. It is used when
+// a UI row already carries provider identity, so duplicate aliases across
+// providers select the highlighted row rather than the first sorted provider.
+func ResolveProviderModelAlias(provider, alias, profilePath string, getenv func(string) string) (Config, bool) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	providers, err := loadProviders(profilePath)
+	if err != nil || len(providers) == 0 {
+		return Config{}, false
+	}
+	p, ok := providers[provider]
+	if !ok {
+		return Config{}, false
+	}
+	return resolveProviderModelAlias(provider, alias, p, getenv)
+}
+
+func resolveProviderModelAlias(provider, alias string, p providerEntry, getenv func(string) string) (Config, bool) {
+	me, ok := p.Models[alias]
+	if !ok {
+		return Config{}, false
+	}
+	model := me.Model
+	if model == "" {
+		model = alias
+	}
+	cfg := Config{
+		Endpoint:            DefaultEndpoint,
+		Model:               model,
+		Provider:            provider,
+		Temperature:         DefaultTemperature,
+		MaxSteps:            DefaultMaxSteps,
+		Mode:                DefaultMode,
+		ToolFormat:          DefaultToolFormat,
+		Effort:              DefaultEffort,
+		MaxContextTokens:    DefaultMaxContextTokens,
+		MaxTokens:           DefaultMaxTokens,
+		MaxWallClockSeconds: DefaultMaxWallClockSeconds,
+		ChurnRounds:         DefaultChurnRounds,
+	}
+	tier := lookupEffort(DefaultEffort)
+	cfg.MaxSteps = tier.MaxSteps
+	cfg.ChurnRounds = tier.ChurnRounds
+	cfg.MaxTokens = tier.MaxTokens
+	cfg.MaxWallClockSeconds = tier.MaxWallClockSeconds
+	if p.Endpoint != "" {
+		cfg.Endpoint = p.Endpoint
+	}
+	if p.APIKey != "" {
+		cfg.APIKey = expandValue(p.APIKey)
+	}
+
+	applyBundledDefaults(&cfg, cfg.Model)
+	applyModelTuning(&cfg, me.profileEntry)
+
+	if v := getenv(EnvAPIKey); v != "" {
+		cfg.APIKey = v
+	} else if cfg.APIKey == "" {
+		if v := getenv(EnvAPIKeyOpenAI); v != "" {
+			cfg.APIKey = v
+		}
+	}
+	return cfg, true
+}
+
+// ModelAliases returns every provider alias in deterministic provider/alias
+// order. Missing or malformed profiles return nil; ResolveModelAlias owns the
+// user-facing selection behavior.
+func ModelAliases(profilePath string) []ModelAlias {
+	providers, err := loadProviders(profilePath)
+	if err != nil || len(providers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var aliases []ModelAlias
+	for _, provider := range names {
+		p := providers[provider]
+		aliasNames := make([]string, 0, len(p.Models))
+		for alias := range p.Models {
+			aliasNames = append(aliasNames, alias)
+		}
+		sort.Strings(aliasNames)
+		for _, alias := range aliasNames {
+			entry := p.Models[alias]
+			model := entry.Model
+			if model == "" {
+				model = alias
+			}
+			cfg := Config{
+				ToolFormat:       DefaultToolFormat,
+				Temperature:      DefaultTemperature,
+				MaxContextTokens: DefaultMaxContextTokens,
+			}
+			applyBundledDefaults(&cfg, model)
+			applyModelTuning(&cfg, entry.profileEntry)
+			aliases = append(aliases, ModelAlias{
+				Provider:      provider,
+				Alias:         alias,
+				Model:         model,
+				ContextLength: cfg.MaxContextTokens,
+				Temperature:   cfg.Temperature,
+				ToolFormat:    cfg.ToolFormat,
+			})
+		}
+	}
+	return aliases
 }
 
 // Resolve computes the effective Config from the precedence chain
@@ -456,6 +631,16 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.JSONSummary != nil {
 		cfg.JSONSummary = *flags.JSONSummary
+	}
+	if flags.JSONOnly != nil {
+		cfg.JSONOnly = *flags.JSONOnly
+	}
+	if flags.StatusFile != nil {
+		cfg.StatusFile = *flags.StatusFile
+	}
+	if flags.NoThink != nil {
+		cfg.NoThink = *flags.NoThink
+		cfg.NoThinkExplicit = true
 	}
 
 	return cfg, nil

@@ -57,3 +57,4 @@ benchmark/**/artifacts/
 *.swo
 .DS_Store
 Thumbs.db
+.j1-plans/

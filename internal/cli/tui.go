@@ -20,7 +20,7 @@ import (
 // under the Bubble Tea TUI (P05). verifyCmd is the deprecated --verify override
 // ("" ⇒ kloo auto-detects the project's build/test); when it resolves to "" the
 // loop runs unverified (the model's finish stops calmly, but nothing is success).
-func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt SessionOpts) error {
+func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt SessionOpts, profilePath string, getenv func(string) string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -58,8 +58,13 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 	reg, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(os.Stderr))
 	defer closeMCP()
 
+	clientFactory := func(endpoint, model, apiKey string) llm.LLMClient {
+		return llm.New(endpoint, model, llm.WithAPIKey(apiKey))
+	}
+	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey))
+
 	loop := &agent.Loop{
-		Client:        llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey)),
+		Client:        client,
 		Adapter:       adapter,
 		Registry:      reg,
 		Verifier:      buildVerifier(ws, verifyCmd),
@@ -74,20 +79,46 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
 		StallRounds: cfg.ChurnRounds,
+		Endpoint:    cfg.Endpoint,
 		Model:       cfg.Model,
 		Temperature: cfg.Temperature,
+		NoThink:     cfg.NoThink,
 	}
 
 	runner := tui.NewLoopRunner(loop, ws, cfg.MaxTokens).WithSession(store, sess)
+	if cfg.StatusFile != "" {
+		statusPath := cfg.StatusFile
+		runner.WithStatusWriter(func(runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) error {
+			runCfg := cfg
+			runCfg.Provider = runtime.Provider
+			runCfg.Endpoint = runtime.Endpoint
+			runCfg.Model = runtime.Model
+			runCfg.MaxContextTokens = runtime.ContextTokens
+			return writeRunSummaryFile(statusPath, buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil))
+		})
+	}
 	runErr := tui.Run(tui.Config{
-		Version:   Version(),
-		Effort:    cfg.Effort,
-		Model:     cfg.Model,
-		MaxSteps:  cfg.MaxSteps,
-		MaxTokens: cfg.MaxTokens,
-		Runner:    runner,
-		Banner:    banner,
-		History:   sess.Transcript, // replay prior turns on resume (empty for a fresh session)
+		Version:       Version(),
+		Effort:        cfg.Effort,
+		Model:         cfg.Model,
+		MaxSteps:      cfg.MaxSteps,
+		MaxTokens:     cfg.MaxTokens,
+		Runner:        runner,
+		Banner:        banner,
+		ModelList:     client,
+		Models:        modelAliasOptions(profilePath),
+		Provider:      cfg.Provider,
+		Endpoint:      cfg.Endpoint,
+		APIKey:        cfg.APIKey,
+		ContextTokens: cfg.MaxContextTokens,
+		Temperature:   cfg.Temperature,
+		ToolFormat:    cfg.ToolFormat,
+		NoThink:       cfg.NoThink,
+		NoThinkLocked: cfg.NoThinkExplicit,
+		ProfilePath:   profilePath,
+		Getenv:        getenv,
+		NewClient:     clientFactory,
+		History:       sess.Transcript, // replay prior turns on resume (empty for a fresh session)
 	})
 	// Sessions are fresh by default, so on exit print the id (only once something
 	// was saved) so the user can pick this conversation back up with --resume.
@@ -95,6 +126,21 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		fmt.Fprintf(os.Stderr, "\nsession %s saved · resume it with:  kloo --resume %s\n", sess.ID, sess.ID)
 	}
 	return runErr
+}
+
+func modelAliasOptions(profilePath string) []tui.ModelOption {
+	aliases := config.ModelAliases(profilePath)
+	options := make([]tui.ModelOption, 0, len(aliases))
+	for _, alias := range aliases {
+		options = append(options, tui.ModelOption{
+			ID:            alias.Model,
+			ContextLength: alias.ContextLength,
+			Provider:      alias.Provider,
+			Source:        "alias " + alias.Alias,
+			Alias:         alias.Alias,
+		})
+	}
+	return options
 }
 
 // chooseSession resolves which session a TUI launch uses. Every launch is a FRESH

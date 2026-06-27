@@ -194,6 +194,56 @@ func TestStreamNon200(t *testing.T) {
 	}
 }
 
+func TestStreamNon200BodyIsBoundedTail(t *testing.T) {
+	body := "STREAM-HEAD-" + strings.Repeat("z", maxAPIErrorBodyBytes+512) + "-STREAM-TAIL"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, body, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL+"/v1", "test-model")
+	_, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if !strings.Contains(apiErr.Body, "upstream body truncated") {
+		t.Fatalf("large stream body should be marked truncated, got %q", apiErr.Body[:min(len(apiErr.Body), 120)])
+	}
+	if strings.Contains(apiErr.Body, "STREAM-HEAD") {
+		t.Fatalf("bounded stream body should keep the tail, not the head")
+	}
+	if !strings.Contains(apiErr.Body, "STREAM-TAIL") {
+		t.Fatalf("bounded stream body should preserve useful tail context")
+	}
+	if len(apiErr.Body) > maxAPIErrorBodyBytes+256 {
+		t.Fatalf("bounded stream body too large: len=%d", len(apiErr.Body))
+	}
+}
+
+func TestStreamNon200RedactsAPIKeyFromBodyAndError(t *testing.T) {
+	const key = "sk-test-stream-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `stream failed; Authorization=`+r.Header.Get("Authorization"), http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL+"/v1", "test-model", WithAPIKey(key))
+	_, err := client.Stream(context.Background(), ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	for _, got := range []string{apiErr.Body, err.Error()} {
+		if strings.Contains(got, key) {
+			t.Fatalf("API key leaked in stream error body/string: %q", got)
+		}
+		if !strings.Contains(got, "Bearer [REDACTED]") {
+			t.Fatalf("redacted bearer marker missing: %q", got)
+		}
+	}
+}
+
 // TestStreamPartialLines: a transcript whose data chunks are split across reads
 // (no trailing blank line on the last event) still assembles correctly.
 func TestStreamPartialLines(t *testing.T) {

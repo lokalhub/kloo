@@ -84,7 +84,7 @@ type Deps struct {
 	// under the Bubble Tea UI). sess carries the user's session choice (--new /
 	// --resume); lint carries the fast-advisory-lint config (--lint/--no-lint +
 	// env). Injected so tests stay offline.
-	LaunchTUI func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts) error
+	LaunchTUI func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error
 	// RunHeadless runs the autonomous loop NON-interactively (no TTY), streaming
 	// progress to out and returning the loop's terminal report. Used for the
 	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. lint carries
@@ -143,6 +143,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagAllowedDirs []string
 		flagAllowEnv    []string
 		flagJSON        bool
+		flagJSONOnly    bool
+		flagStatusFile  string
+		flagNoThink     bool
 	)
 
 	cmd := &cobra.Command{
@@ -200,6 +203,15 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("json") {
 				flags.JSONSummary = &flagJSON
 			}
+			if fs.Changed("json-only") {
+				flags.JSONOnly = &flagJSONOnly
+			}
+			if fs.Changed("status-file") {
+				flags.StatusFile = &flagStatusFile
+			}
+			if fs.Changed("no-think") {
+				flags.NoThink = &flagNoThink
+			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
 			if err != nil {
@@ -217,7 +229,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
-				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume})
+				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume}, flagProfile, deps.Getenv)
 			}
 
 			if flagHeadless {
@@ -255,6 +267,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringSliceVar(&flagAllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
 	f.StringSliceVar(&flagAllowEnv, "allow-env", nil, "env var NAMES to forward from kloo's env into run_command (repeatable/comma-separated) — the trusted-secret passthrough for a deploy/CI step; default exposes only PATH/HOME/…")
 	f.BoolVar(&flagJSON, "json", false, "in --headless, emit a compact machine-readable JSON result line at the end (model/reason/steps/tokens/tokens-per-sec/verify/error) for benchmarking")
+	f.BoolVar(&flagJSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
+	f.StringVar(&flagStatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
+	f.BoolVar(&flagNoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
 
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd
@@ -266,6 +281,9 @@ func runOneShot(ctx context.Context, client llm.LLMClient, cfg config.Config, ta
 		Model:       cfg.Model,
 		Messages:    []llm.Message{{Role: llm.RoleUser, Content: task}},
 		Temperature: cfg.Temperature,
+	}
+	if cfg.NoThink {
+		req.ReasoningEffort = "none"
 	}
 	_, err := client.Stream(ctx, req, func(d llm.Delta) error {
 		if d.Content != "" {

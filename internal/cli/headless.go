@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,8 +71,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:        defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out)),
 		StallRounds:   cfg.ChurnRounds,
+		Endpoint:      cfg.Endpoint,
 		Model:         cfg.Model,
 		Temperature:   cfg.Temperature,
+		NoThink:       cfg.NoThink,
 	}
 
 	// Stream progress/tools to out. Deltas are buffered and flushed on the next
@@ -105,11 +110,15 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 
 	start := time.Now()
 	rep, runErr := loop.Run(ctx, task)
+	elapsed := time.Since(start)
+	if cfg.JSONOnly {
+		applyJSONOnlyValidation(rep)
+	}
 	flush()
 	fmt.Fprintln(out)
-	printHeadlessReport(out, rep, time.Since(start))
+	printHeadlessReport(out, rep, elapsed)
 	if cfg.JSONSummary {
-		printHeadlessJSON(out, cfg, verifyCmd, rep, time.Since(start), runErr)
+		printHeadlessJSON(out, cfg, verifyCmd, rep, elapsed, runErr)
 	}
 	if runErr != nil {
 		return runErr
@@ -173,6 +182,20 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 	if rep.Churn != nil {
 		fmt.Fprintf(out, "  churn:   %s\n", rep.Churn.Kind)
 	}
+	if len(rep.RailFires) > 0 {
+		// Printed only when a soft rail fired, so a clean run's footer is unchanged.
+		// Stable key order so the line is deterministic (tests, diffing across runs).
+		names := make([]string, 0, len(rep.RailFires))
+		for k := range rep.RailFires {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, k := range names {
+			parts = append(parts, fmt.Sprintf("%s×%d", k, rep.RailFires[k]))
+		}
+		fmt.Fprintf(out, "  rails:   %s\n", strings.Join(parts, ", "))
+	}
 	if rep.RolledBack {
 		fmt.Fprintln(out, "  rolled back to checkpoint")
 	}
@@ -194,33 +217,35 @@ func reportReason(rep *agent.Report) string {
 	return string(rep.Reason)
 }
 
-// printHeadlessJSON emits a compact, machine-readable result line (prefixed
-// KLOO_RESULT_JSON) for benchmarking harnesses: model/endpoint/ctx, the terminal
-// reason + success, steps/tokens/tokens-per-sec/elapsed, the final verify, any error,
-// and a short transcript tail. A harness greps the prefix and parses the rest.
-func printHeadlessJSON(out io.Writer, cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) {
-	type verifyJSON struct {
-		Command  string `json:"command"`
-		Passed   bool   `json:"passed"`
-		ExitCode int    `json:"exit_code"`
-	}
-	type summary struct {
-		Model          string      `json:"model"`
-		Endpoint       string      `json:"endpoint"`
-		Ctx            int         `json:"ctx"`
-		Reason         string      `json:"reason"`
-		Success        bool        `json:"success"`
-		Steps          int         `json:"steps"`
-		Tokens         int         `json:"tokens"`
-		ElapsedSeconds float64     `json:"elapsed_seconds"`
-		TokensPerSec   float64     `json:"tokens_per_sec"`
-		Compactions    int         `json:"compactions"`
-		Verify         *verifyJSON `json:"verify,omitempty"`
-		Error          string      `json:"error,omitempty"`
-		TranscriptTail string      `json:"transcript_tail,omitempty"`
-	}
+type verifySummary struct {
+	Command  string `json:"command"`
+	Passed   bool   `json:"passed"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type runSummary struct {
+	Model          string         `json:"model"`
+	Endpoint       string         `json:"endpoint"`
+	Ctx            int            `json:"ctx"`
+	Reason         string         `json:"reason"`
+	Success        bool           `json:"success"`
+	Steps          int            `json:"steps"`
+	Tokens         int            `json:"tokens"`
+	ElapsedSeconds float64        `json:"elapsed_seconds"`
+	TokensPerSec   float64        `json:"tokens_per_sec"`
+	Compactions    int            `json:"compactions"`
+	Verify         *verifySummary `json:"verify,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	TranscriptTail string         `json:"transcript_tail,omitempty"`
+	// RailFires tallies the soft recovery rails that fired (corrective injected, run
+	// continued), keyed by rail name. Omitted when none fired, so a clean run's JSON is
+	// unchanged. Lets a benchmark assert a run's self-corrections (e.g. confirm-finish=1).
+	RailFires map[string]int `json:"rail_fires,omitempty"`
+}
+
+func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) runSummary {
 	round2 := func(f float64) float64 { return math.Round(f*100) / 100 }
-	s := summary{Model: cfg.Model, Endpoint: cfg.Endpoint, Ctx: cfg.MaxContextTokens, ElapsedSeconds: round2(elapsed.Seconds())}
+	s := runSummary{Model: cfg.Model, Endpoint: cfg.Endpoint, Ctx: cfg.MaxContextTokens, ElapsedSeconds: round2(elapsed.Seconds())}
 	if rep != nil {
 		s.Reason = string(rep.Reason)
 		s.Success = rep.Reason == agent.ReasonSuccess
@@ -231,21 +256,110 @@ func printHeadlessJSON(out io.Writer, cfg config.Config, verifyCmd string, rep *
 			s.TokensPerSec = round2(float64(rep.TokensUsed) / secs)
 		}
 		if rep.FinalVerify.Command != "" {
-			s.Verify = &verifyJSON{Command: rep.FinalVerify.Command, Passed: rep.FinalVerify.Passed, ExitCode: rep.FinalVerify.ExitCode}
+			s.Verify = &verifySummary{Command: rep.FinalVerify.Command, Passed: rep.FinalVerify.Passed, ExitCode: rep.FinalVerify.ExitCode}
 		}
 		if rep.Err != nil {
 			s.Error = rep.Err.Error()
 		}
 		s.TranscriptTail = transcriptTail(rep.Transcript, 600)
+		s.RailFires = rep.RailFires
 	}
 	if runErr != nil && s.Error == "" {
 		s.Error = runErr.Error()
 	}
-	b, err := json.Marshal(s)
+	if verifyCmd != "" && s.Verify == nil {
+		s.Verify = &verifySummary{Command: verifyCmd}
+	}
+	return s
+}
+
+// printHeadlessJSON emits a compact, machine-readable result line (prefixed
+// KLOO_RESULT_JSON) for benchmarking harnesses: model/endpoint/ctx, the terminal
+// reason + success, steps/tokens/tokens-per-sec/elapsed, the final verify, any error,
+// and a short transcript tail. A harness greps the prefix and parses the rest.
+func printHeadlessJSON(out io.Writer, cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) {
+	b, err := json.Marshal(buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr))
 	if err != nil {
 		return
 	}
 	fmt.Fprintf(out, "KLOO_RESULT_JSON %s\n", b)
+}
+
+func writeRunSummaryFile(path string, summary runSummary) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(summary); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+func applyJSONOnlyValidation(rep *agent.Report) {
+	if rep == nil {
+		return
+	}
+	if rep.Err != nil {
+		return
+	}
+	answer := finalAssistantAnswer(rep.Transcript)
+	if err := validateJSONOnly(answer); err != nil {
+		rep.Reason = agent.ReasonError
+		rep.Err = fmt.Errorf("final assistant answer must be valid JSON only; remove prose/code fences and return one JSON value: %w", err)
+	}
+}
+
+func finalAssistantAnswer(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleAssistant {
+			return strings.TrimSpace(msgs[i].Content)
+		}
+	}
+	return ""
+}
+
+func validateJSONOnly(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("empty answer")
+	}
+	dec := json.NewDecoder(bytes.NewBufferString(s))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("extra content after JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 // transcriptTail returns the last maxBytes of the transcript as "role: content"
