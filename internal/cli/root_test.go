@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,29 +188,6 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	}
 	if gotGetenv == nil || gotGetenv("KLOO_TEST_THREAD") != "threaded" {
 		t.Errorf("TUI should receive deps.Getenv")
-	}
-}
-
-func TestModelAliasOptionsFromProfile(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "profiles.json")
-	if err := os.WriteFile(profile, []byte(`{
-		"providers": {
-			"or": {"models": {"dsv4": {"model": "deepseek-chat", "maxContextTokens": 128000}}},
-			"tg": {"models": {"qwen": {"model": "qwen2.5-coder-7b"}}}
-		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	opts := modelAliasOptions(profile)
-	if len(opts) != 2 {
-		t.Fatalf("len = %d, want 2: %+v", len(opts), opts)
-	}
-	if opts[0].Provider != "or" || opts[0].Alias != "dsv4" || opts[0].ID != "deepseek-chat" || opts[0].ContextLength != 128000 {
-		t.Errorf("first alias option wrong: %+v", opts[0])
-	}
-	if opts[1].Provider != "tg" || opts[1].Alias != "qwen" || opts[1].ID != "qwen2.5-coder-7b" || opts[1].ContextLength != 24576 {
-		t.Errorf("second alias option should include bundled context: %+v", opts[1])
 	}
 }
 

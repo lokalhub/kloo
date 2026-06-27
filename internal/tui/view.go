@@ -23,11 +23,15 @@ func (m Model) View() string {
 	transcript := m.renderTranscriptRegion()
 	activity := m.renderActivityLine()
 	picker := m.renderModelPicker()
+	menu := m.renderSlashMenu()
 	input := m.renderInput()
 	hint := m.renderHint()
 	parts := []string{header, transcript, activity}
 	if picker != "" {
 		parts = append(parts, picker)
+	}
+	if menu != "" {
+		parts = append(parts, menu)
 	}
 	parts = append(parts, input, hint)
 	return strings.Join(parts, "\n")
@@ -39,6 +43,11 @@ func (m Model) renderTranscriptRegion() string {
 		vp := m.vp
 		if m.picker != nil {
 			if h := vp.Height - lipgloss.Height(m.renderModelPicker()); h > 1 {
+				vp.Height = h
+			}
+		}
+		if m.menu != nil {
+			if h := vp.Height - lipgloss.Height(m.renderSlashMenu()); h > 1 {
 				vp.Height = h
 			}
 		}
@@ -86,20 +95,13 @@ func (m Model) transcriptContent() string {
 	return body
 }
 
-// renderInput renders the bordered input region with slash hints to the right.
+// renderInput renders the bordered input region. The input spans the full width;
+// the filterable slash-command menu (slash_menu.go) floats just above it.
 func (m Model) renderInput() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		Width(m.width - 2)
-
-	left := m.input.View()
-	right := slashHints
-	gap := m.width - 2 - 2 - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		// Too narrow: drop the hints.
-		return box.Render(left)
-	}
-	return box.Render(left + strings.Repeat(" ", gap) + right)
+	return box.Render(m.input.View())
 }
 
 // renderHint renders the line under the input: the animated thinking line while

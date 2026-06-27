@@ -39,12 +39,6 @@ func (r *recordingRunner) Start(ctx context.Context, task string, runtime Runtim
 	r.got <- runtime.Model
 }
 
-type runtimeRecordingRunner struct{ got chan RuntimeConfig }
-
-func (r *runtimeRecordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
-	r.got <- runtime
-}
-
 type runtimeClient struct {
 	endpoint string
 	model    string

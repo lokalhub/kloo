@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -57,7 +56,7 @@ const (
 	EnvModel    = "KLOO_MODEL"
 	// EnvProvider selects a named provider from the profile's "providers" block
 	// (below the --provider flag). A provider bundles the endpoint + bearer key
-	// (+ its own model aliases) so provider and model are independent axes.
+	// under a short name so provider and model stay independent axes.
 	EnvProvider = "KLOO_PROVIDER"
 	// EnvAPIKey is the bearer token for the endpoint (needed for hosted providers
 	// like OpenRouter; not needed for a local llama.cpp/Ollama server, which has no
@@ -90,8 +89,8 @@ type Config struct {
 	Endpoint string
 	Model    string
 	// Provider is the resolved provider name (--provider / KLOO_PROVIDER), or ""
-	// when none was selected. It seeds Endpoint/APIKey and scopes the model-alias
-	// lookup; it is not sent to the endpoint (informational/debug).
+	// when none was selected. It seeds Endpoint/APIKey; it is not sent to the
+	// endpoint (informational/debug).
 	Provider    string
 	APIKey      string // bearer token for the endpoint (hosted providers); "" for local
 	Temperature float64
@@ -216,35 +215,14 @@ type profileEntry struct {
 
 // providerEntry is one entry of the reserved "providers" profile block, selected
 // by name via --provider / KLOO_PROVIDER. It bundles the endpoint and bearer key
-// for a service (OpenRouter, Together, a local server …) plus that service's own
-// model aliases — so the same model offered by several providers is just one
-// alias per provider, each pointing at that provider's real model id. APIKey is
-// expandValue'd; prefer a "${ENV_VAR}" reference over an inline secret, since the
-// profile file is a trust root (same guidance as mcpServers headers).
+// for a service (OpenRouter, Together, a local server …) — the model id itself is
+// supplied at runtime (--model / KLOO_MODEL / the /model command), so provider and
+// model stay independent axes. APIKey is expandValue'd; prefer a "${ENV_VAR}"
+// reference over an inline secret, since the profile file is a trust root (same
+// guidance as mcpServers headers).
 type providerEntry struct {
-	Endpoint string                `json:"endpoint,omitempty"`
-	APIKey   string                `json:"apiKey,omitempty"`
-	Models   map[string]modelEntry `json:"models,omitempty"`
-}
-
-// modelEntry is one alias inside a provider's "models" map. Model is the real
-// model id sent to the endpoint (the map key is the short alias you pass to
-// --model, e.g. "dsv4"); the embedded profileEntry carries the same per-model
-// tuning knobs as the legacy top-level entries (toolFormat, temperature, …).
-type modelEntry struct {
-	Model        string `json:"model,omitempty"`
-	profileEntry        // promoted: toolFormat, temperature, fewShotPath, context/budget knobs
-}
-
-// ModelAlias describes one provider-scoped alias from the profile's providers
-// block. It is used by the TUI picker to display aliases before selection.
-type ModelAlias struct {
-	Provider      string
-	Alias         string
-	Model         string
-	ContextLength int
-	Temperature   float64
-	ToolFormat    string
+	Endpoint string `json:"endpoint,omitempty"`
+	APIKey   string `json:"apiKey,omitempty"`
 }
 
 // loadProviders reads the reserved "providers" block from the profile file. Like
@@ -297,152 +275,11 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 }
 
-// ResolveModelAlias searches every provider's model alias map and returns a
-// fully resolved config for the first deterministic match. Duplicate aliases are
-// resolved by sorted provider name so direct TUI switches are stable.
-func ResolveModelAlias(alias, profilePath string, getenv func(string) string) (Config, bool) {
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
-	providers, err := loadProviders(profilePath)
-	if err != nil || len(providers) == 0 {
-		return Config{}, false
-	}
-
-	names := make([]string, 0, len(providers))
-	for name := range providers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		p := providers[name]
-		if cfg, ok := resolveProviderModelAlias(name, alias, p, getenv); ok {
-			return cfg, true
-		}
-	}
-	return Config{}, false
-}
-
-// ResolveProviderModelAlias resolves alias only within provider. It is used when
-// a UI row already carries provider identity, so duplicate aliases across
-// providers select the highlighted row rather than the first sorted provider.
-func ResolveProviderModelAlias(provider, alias, profilePath string, getenv func(string) string) (Config, bool) {
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
-	providers, err := loadProviders(profilePath)
-	if err != nil || len(providers) == 0 {
-		return Config{}, false
-	}
-	p, ok := providers[provider]
-	if !ok {
-		return Config{}, false
-	}
-	return resolveProviderModelAlias(provider, alias, p, getenv)
-}
-
-func resolveProviderModelAlias(provider, alias string, p providerEntry, getenv func(string) string) (Config, bool) {
-	me, ok := p.Models[alias]
-	if !ok {
-		return Config{}, false
-	}
-	model := me.Model
-	if model == "" {
-		model = alias
-	}
-	cfg := Config{
-		Endpoint:            DefaultEndpoint,
-		Model:               model,
-		Provider:            provider,
-		Temperature:         DefaultTemperature,
-		MaxSteps:            DefaultMaxSteps,
-		Mode:                DefaultMode,
-		ToolFormat:          DefaultToolFormat,
-		Effort:              DefaultEffort,
-		MaxContextTokens:    DefaultMaxContextTokens,
-		MaxTokens:           DefaultMaxTokens,
-		MaxWallClockSeconds: DefaultMaxWallClockSeconds,
-		ChurnRounds:         DefaultChurnRounds,
-	}
-	tier := lookupEffort(DefaultEffort)
-	cfg.MaxSteps = tier.MaxSteps
-	cfg.ChurnRounds = tier.ChurnRounds
-	cfg.MaxTokens = tier.MaxTokens
-	cfg.MaxWallClockSeconds = tier.MaxWallClockSeconds
-	if p.Endpoint != "" {
-		cfg.Endpoint = p.Endpoint
-	}
-	if p.APIKey != "" {
-		cfg.APIKey = expandValue(p.APIKey)
-	}
-
-	applyBundledDefaults(&cfg, cfg.Model)
-	applyModelTuning(&cfg, me.profileEntry)
-
-	if v := getenv(EnvAPIKey); v != "" {
-		cfg.APIKey = v
-	} else if cfg.APIKey == "" {
-		if v := getenv(EnvAPIKeyOpenAI); v != "" {
-			cfg.APIKey = v
-		}
-	}
-	return cfg, true
-}
-
-// ModelAliases returns every provider alias in deterministic provider/alias
-// order. Missing or malformed profiles return nil; ResolveModelAlias owns the
-// user-facing selection behavior.
-func ModelAliases(profilePath string) []ModelAlias {
-	providers, err := loadProviders(profilePath)
-	if err != nil || len(providers) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(providers))
-	for name := range providers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var aliases []ModelAlias
-	for _, provider := range names {
-		p := providers[provider]
-		aliasNames := make([]string, 0, len(p.Models))
-		for alias := range p.Models {
-			aliasNames = append(aliasNames, alias)
-		}
-		sort.Strings(aliasNames)
-		for _, alias := range aliasNames {
-			entry := p.Models[alias]
-			model := entry.Model
-			if model == "" {
-				model = alias
-			}
-			cfg := Config{
-				ToolFormat:       DefaultToolFormat,
-				Temperature:      DefaultTemperature,
-				MaxContextTokens: DefaultMaxContextTokens,
-			}
-			applyBundledDefaults(&cfg, model)
-			applyModelTuning(&cfg, entry.profileEntry)
-			aliases = append(aliases, ModelAlias{
-				Provider:      provider,
-				Alias:         alias,
-				Model:         model,
-				ContextLength: cfg.MaxContextTokens,
-				Temperature:   cfg.Temperature,
-				ToolFormat:    cfg.ToolFormat,
-			})
-		}
-	}
-	return aliases
-}
-
 // Resolve computes the effective Config from the precedence chain
 // flags > env > user profile-file > bundled per-model defaults > built-in
 // defaults. The bundled layer (applyBundledDefaults) runs after the model id is
-// resolved (incl. provider alias) and before the user's per-model tuning, so a
-// known model "just works" while the user profile, env, and flags still win.
+// resolved and before the user's per-model tuning, so a known model "just works"
+// while the user profile, env, and flags still win.
 //
 // getenv looks up an environment variable (pass os.Getenv in production; a map
 // closure in tests). profilePath points at the profile JSON; when empty the
@@ -493,7 +330,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	cfg.MaxWallClockSeconds = tier.MaxWallClockSeconds
 
 	// Provider axis (flag > env). A provider bundles an endpoint + bearer key
-	// (+ its own model aliases) under a short name, so `--provider or --model dsv4`
+	// under a short name, so `--provider openrouter --model deepseek/deepseek-v4-flash`
 	// fully describes where to send which model — decoupling the provider from the
 	// model (the same model is served by many providers). The endpoint/key land at
 	// the PROFILE layer here, so KLOO_ENDPOINT/KLOO_API_KEY and --endpoint still win
@@ -504,7 +341,6 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	cfg.Provider = provider
 
-	var providerModels map[string]modelEntry
 	if provider != "" {
 		providers, err := loadProviders(profilePath)
 		if err != nil {
@@ -520,14 +356,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		if p.APIKey != "" {
 			cfg.APIKey = expandValue(p.APIKey)
 		}
-		providerModels = p.Models
 	}
 
-	// Resolve the model selector (flag > env > default). With a provider it is an
-	// ALIAS looked up in that provider's "models" map (→ its real model id + tuning);
-	// otherwise it is the model name itself, keying the legacy top-level per-model
-	// entries. An unmatched selector is used verbatim as the model id, so
-	// `--provider or --model gpt-4o` works even without an alias entry.
+	// Resolve the model selector (flag > env > default). The model id is used
+	// verbatim — a provider supplies only the endpoint+key, so the same raw id
+	// (e.g. "deepseek/deepseek-v4-flash") describes which model to serve.
 	modelSel := DefaultModel
 	if v := getenv(EnvModel); v != "" {
 		modelSel = v
@@ -537,23 +370,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	cfg.Model = modelSel
 
-	// Capture the user's per-model tuning entry (from EITHER the provider-alias
-	// path OR the legacy top-level path) instead of applying it inline, so the
-	// bundled-defaults layer can run between model-id resolution and user tuning.
-	var userTuning *profileEntry
-	if me, ok := providerModels[modelSel]; ok {
-		if me.Model != "" {
-			cfg.Model = me.Model // alias → real model id sent to the endpoint
-		}
-		e := me.profileEntry
-		userTuning = &e
-	} else {
-		// Legacy / no-provider path: top-level per-model entry keyed by model name.
-		entry, err := loadProfileEntry(profilePath, cfg.Model)
-		if err != nil {
-			return Config{}, err
-		}
-		userTuning = entry // may be nil
+	// Capture the user's per-model tuning entry (legacy top-level per-model map,
+	// keyed by model name) instead of applying it inline, so the bundled-defaults
+	// layer can run between model-id resolution and user tuning.
+	userTuning, err := loadProfileEntry(profilePath, cfg.Model)
+	if err != nil {
+		return Config{}, err
 	}
 
 	// BUNDLED defaults layer: below the user profile, above the flat built-ins.

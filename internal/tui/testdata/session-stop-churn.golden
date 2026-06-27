@@ -1,14 +1,14 @@
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │ kloo dev  test-model                                       step 0/40 · 0/8k tok · auto │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-                                                                                        
-                                                                                        
-                                                                                        
-                                                                                        
-                                                                                        
-                                                                                        
-▸ you: a task that keeps repeating the same edit                                        
-                                                                                        
+
+
+
+
+
+
+▸ you: a task that keeps repeating the same edit
+
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │ ■ run stopped — NO PROGRESS (churn)                                                  │
 │ reason:  repeated-failure (same failure ×3)                                          │
@@ -19,6 +19,6 @@
 
 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│> type a task…                                           /add /model /mode /stop /diff  │
+│> type a task…                                                                          │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

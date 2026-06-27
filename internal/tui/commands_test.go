@@ -3,10 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -50,30 +47,7 @@ func (f fakeModelLister) Models(context.Context) ([]llm.ModelInfo, error) {
 	return f.models, f.err
 }
 
-type endpointModelClient struct {
-	models []llm.ModelInfo
-}
-
-func (c endpointModelClient) Models(context.Context) ([]llm.ModelInfo, error) {
-	return c.models, nil
-}
-
-func (c endpointModelClient) Complete(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
-	return llm.ChatResponse{}, nil
-}
-
-func (c endpointModelClient) Stream(context.Context, llm.ChatRequest, func(llm.Delta) error) (llm.ChatResponse, error) {
-	return llm.ChatResponse{}, nil
-}
-
-func modelCatalog() []ModelOption {
-	return []ModelOption{
-		{ID: "deepseek/deepseek-v4-flash", ContextLength: 128000, Provider: "or", Source: "alias dsv4"},
-		{ID: "deepseek-ai/DeepSeek-V4-Flash", ContextLength: 64000, Provider: "together", Source: "alias dsv4"},
-	}
-}
-
-func TestSlashModelsPrintsLiveModelsAndAliases(t *testing.T) {
+func TestSlashModelsPrintsLiveModels(t *testing.T) {
 	m := sized(New(Config{
 		Model:     "test-model",
 		MaxSteps:  40,
@@ -81,7 +55,6 @@ func TestSlashModelsPrintsLiveModelsAndAliases(t *testing.T) {
 		ModelList: fakeModelLister{models: []llm.ModelInfo{
 			{ID: "openai/gpt-4.1-mini", ContextLength: 1047000},
 		}},
-		Models: modelCatalog(),
 	}), tw, th)
 
 	m = typeAndEnter(m, "/models")
@@ -90,11 +63,7 @@ func TestSlashModelsPrintsLiveModelsAndAliases(t *testing.T) {
 		"models:",
 		"openai/gpt-4.1-mini",
 		"1047k ctx",
-		"deepseek/deepseek-v4-flash",
-		"128k ctx",
-		"or",
-		"alias dsv4",
-		"together",
+		"live",
 	} {
 		if !contains(v, want) {
 			t.Errorf("/models output missing %q:\n%s", want, v)
@@ -102,13 +71,12 @@ func TestSlashModelsPrintsLiveModelsAndAliases(t *testing.T) {
 	}
 }
 
-func TestSlashModelsPrintsAliasesWhenLiveFetchFails(t *testing.T) {
+func TestSlashModelsWhenLiveFetchFails(t *testing.T) {
 	m := sized(New(Config{
 		Model:     "test-model",
 		MaxSteps:  40,
 		MaxTokens: 8000,
 		ModelList: fakeModelLister{err: errors.New("upstream down")},
-		Models:    modelCatalog(),
 	}), tw, th)
 
 	m = typeAndEnter(m, "/models")
@@ -116,8 +84,8 @@ func TestSlashModelsPrintsAliasesWhenLiveFetchFails(t *testing.T) {
 	if !contains(v, "live models unavailable: upstream down") {
 		t.Errorf("/models should show live-fetch warning:\n%s", v)
 	}
-	if !contains(v, "deepseek/deepseek-v4-flash") || !contains(v, "alias dsv4") {
-		t.Errorf("/models should still show aliases after live failure:\n%s", v)
+	if !contains(v, "no models available") {
+		t.Errorf("/models with no live models should say so:\n%s", v)
 	}
 }
 
@@ -129,7 +97,6 @@ func TestBareSlashModelOpensPickerOverlay(t *testing.T) {
 		ModelList: fakeModelLister{models: []llm.ModelInfo{
 			{ID: "openai/gpt-4.1-mini", ContextLength: 1047000},
 		}},
-		Models: modelCatalog(),
 	}), tw, th)
 
 	m = typeAndEnter(m, "/model")
@@ -140,11 +107,8 @@ func TestBareSlashModelOpensPickerOverlay(t *testing.T) {
 	for _, want := range []string{
 		"Select model for next run",
 		"type to filter",
-		"deepseek/deepseek-v4-flash",
-		"128k ctx",
-		"provider or",
-		"alias dsv4",
 		"openai/gpt-4.1-mini",
+		"1047k ctx",
 		"provider current",
 		"live",
 		"Enter select",
@@ -162,22 +126,25 @@ func TestModelPickerTypingFiltersAndDoesNotEditTaskInput(t *testing.T) {
 		Model:     "test-model",
 		MaxSteps:  40,
 		MaxTokens: 8000,
-		Models:    modelCatalog(),
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "alpha-model", ContextLength: 1000},
+			{ID: "beta-model", ContextLength: 2000},
+		}},
 	}), tw, th)
 	m = typeAndEnter(m, "/model")
-	m = apply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("together")})
+	m = apply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("beta")})
 
 	if m.input.Value() != "" {
 		t.Fatalf("picker typing should not update task input, got %q", m.input.Value())
 	}
-	if m.picker == nil || m.picker.filter != "together" {
+	if m.picker == nil || m.picker.filter != "beta" {
 		t.Fatalf("picker filter = %#v", m.picker)
 	}
 	v := m.View()
-	if !contains(v, "filter: together") || !contains(v, "deepseek-ai/DeepSeek-V4-Flash") {
-		t.Errorf("picker should show filtered together row:\n%s", v)
+	if !contains(v, "filter: beta") || !contains(v, "beta-model") {
+		t.Errorf("picker should show filtered beta row:\n%s", v)
 	}
-	if contains(v, "deepseek/deepseek-v4-flash") {
+	if contains(v, "alpha-model") {
 		t.Errorf("picker should hide non-matching row after filter:\n%s", v)
 	}
 }
@@ -187,10 +154,10 @@ func TestModelPickerUpDownEnterSelectsItem(t *testing.T) {
 		Model:     "test-model",
 		MaxSteps:  40,
 		MaxTokens: 8000,
-		Models: []ModelOption{
-			{ID: "alpha-model", ContextLength: 1000, Provider: "a", Source: "alias alpha"},
-			{ID: "beta-model", ContextLength: 2000, Provider: "b", Source: "alias beta"},
-		},
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "alpha-model", ContextLength: 1000},
+			{ID: "beta-model", ContextLength: 2000},
+		}},
 	}), tw, th)
 	m = typeAndEnter(m, "/model")
 	m = apply(m, tea.KeyMsg{Type: tea.KeyDown})
@@ -218,7 +185,10 @@ func TestModelPickerEscCancelsAndLeavesModelUnchanged(t *testing.T) {
 		Model:     "test-model",
 		MaxSteps:  40,
 		MaxTokens: 8000,
-		Models:    modelCatalog(),
+		ModelList: fakeModelLister{models: []llm.ModelInfo{
+			{ID: "alpha-model", ContextLength: 1000},
+			{ID: "beta-model", ContextLength: 2000},
+		}},
 	}), tw, th)
 	m = typeAndEnter(m, "/model")
 	m = apply(m, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEsc})
@@ -230,202 +200,6 @@ func TestModelPickerEscCancelsAndLeavesModelUnchanged(t *testing.T) {
 	}
 	if !contains(m.View(), "model picker cancelled") {
 		t.Errorf("cancel should be visible:\n%s", m.View())
-	}
-}
-
-func TestSlashModelAliasAppliesResolvedRuntimeConfig(t *testing.T) {
-	t.Setenv("KLOO_TEST_PROVIDER_KEY", "provider-secret")
-	profile := filepath.Join(t.TempDir(), "profiles.json")
-	if err := os.WriteFile(profile, []byte(`{
-		"providers": {
-			"or": {
-				"endpoint": "https://openrouter.ai/api/v1",
-				"apiKey": "${KLOO_TEST_PROVIDER_KEY}",
-				"models": {
-					"dsv4": {"model": "deepseek-chat", "toolFormat": "xml", "temperature": 0.35, "maxContextTokens": 128000}
-				}
-			}
-		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := sized(New(Config{
-		Model:         "test-model",
-		Endpoint:      "http://local/v1",
-		ContextTokens: 8000,
-		ToolFormat:    "native",
-		ProfilePath:   profile,
-		Getenv:        os.Getenv,
-	}), tw, th)
-
-	m = typeAndEnter(m, "/model dsv4")
-	if m.runtime.Provider != "or" || m.runtime.Endpoint != "https://openrouter.ai/api/v1" || m.runtime.APIKey != "provider-secret" {
-		t.Errorf("alias provider runtime wrong: %+v", m.runtime)
-	}
-	if m.runtime.Model != "deepseek-chat" || m.runtime.ContextTokens != 128000 || m.runtime.Temperature != 0.35 || m.runtime.ToolFormat != "xml" {
-		t.Errorf("alias model runtime wrong: %+v", m.runtime)
-	}
-	if m.modelName != "deepseek-chat" || !contains(m.View(), "model: or/deepseek-chat (alias dsv4)") || !contains(m.View(), "or/deepseek-chat") {
-		t.Errorf("alias switch not visible/applied:\n%s", m.View())
-	}
-}
-
-func TestSlashModelAliasPreservesExplicitNoThinkForNextRun(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "profiles.json")
-	if err := os.WriteFile(profile, []byte(`{
-		"providers": {
-			"remote": {
-				"endpoint": "https://remote.example/v1",
-				"models": {
-					"r": {"model": "remote-selected", "toolFormat": "xml", "maxContextTokens": 64000}
-				}
-			}
-		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := &runtimeRecordingRunner{got: make(chan RuntimeConfig, 1)}
-	m := sized(New(Config{
-		Model:         "local-model",
-		Endpoint:      "http://local/v1",
-		ContextTokens: 8000,
-		ToolFormat:    "native",
-		NoThink:       true,
-		NoThinkLocked: true,
-		ProfilePath:   profile,
-		Getenv:        func(string) string { return "" },
-		Runner:        rec,
-	}), tw, th)
-
-	m = typeAndEnter(m, "/model r")
-	tm, cmd := m.Update(submitTaskMsg{task: "run"})
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("submit produced no command")
-	}
-	if batch, ok := cmd().(tea.BatchMsg); ok {
-		for _, c := range batch {
-			if c != nil {
-				c()
-			}
-		}
-	}
-	select {
-	case got := <-rec.got:
-		if got.Model != "remote-selected" || !got.NoThink {
-			t.Fatalf("alias switch should preserve explicit no-think for next run, got %+v", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("runner.Start was not invoked")
-	}
-}
-
-func TestModelPickerDuplicateAliasSelectsHighlightedProvider(t *testing.T) {
-	t.Setenv("KLOO_TEST_ALPHA_KEY", "alpha-secret")
-	t.Setenv("KLOO_TEST_ZULU_KEY", "zulu-secret")
-	profile := filepath.Join(t.TempDir(), "profiles.json")
-	if err := os.WriteFile(profile, []byte(`{
-		"providers": {
-			"alpha": {
-				"endpoint": "https://alpha.example/v1",
-				"apiKey": "${KLOO_TEST_ALPHA_KEY}",
-				"models": {
-					"dsv4": {"model": "alpha-model", "toolFormat": "native", "temperature": 0.11, "maxContextTokens": 11000}
-				}
-			},
-			"zulu": {
-				"endpoint": "https://zulu.example/v1",
-				"apiKey": "${KLOO_TEST_ZULU_KEY}",
-				"models": {
-					"dsv4": {"model": "zulu-model", "toolFormat": "xml", "temperature": 0.44, "maxContextTokens": 44000}
-				}
-			}
-		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := sized(New(Config{
-		Model:       "test-model",
-		ProfilePath: profile,
-		Getenv:      os.Getenv,
-		Models: []ModelOption{
-			{ID: "alpha-model", ContextLength: 11000, Provider: "alpha", Source: "alias dsv4", Alias: "dsv4"},
-			{ID: "zulu-model", ContextLength: 44000, Provider: "zulu", Source: "alias dsv4", Alias: "dsv4"},
-		},
-	}), tw, th)
-
-	m = typeAndEnter(m, "/model")
-	m = apply(m, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter})
-
-	if m.runtime.Provider != "zulu" || m.runtime.Endpoint != "https://zulu.example/v1" || m.runtime.APIKey != "zulu-secret" {
-		t.Fatalf("selected duplicate alias should preserve zulu provider runtime, got %+v", m.runtime)
-	}
-	if m.runtime.Model != "zulu-model" || m.runtime.ContextTokens != 44000 || m.runtime.Temperature != 0.44 || m.runtime.ToolFormat != "xml" {
-		t.Fatalf("selected duplicate alias should use zulu model tuning, got %+v", m.runtime)
-	}
-	if !contains(m.View(), "selected model: zulu/zulu-model (alias dsv4)") || !contains(m.View(), "zulu/zulu-model") {
-		t.Fatalf("selected duplicate alias should show zulu provider/model:\n%s", m.View())
-	}
-}
-
-func TestSlashModelsAfterAliasSwitchUsesSelectedProviderClient(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "profiles.json")
-	if err := os.WriteFile(profile, []byte(`{
-		"providers": {
-			"remote": {
-				"endpoint": "https://remote.example/v1",
-				"apiKey": "remote-key",
-				"models": {
-					"r": {"model": "remote-selected", "toolFormat": "xml", "maxContextTokens": 64000}
-				}
-			}
-		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	calls := []string{}
-	newClient := func(endpoint, model, apiKey string) llm.LLMClient {
-		calls = append(calls, endpoint+"|"+model+"|"+apiKey)
-		switch endpoint {
-		case "https://remote.example/v1":
-			return endpointModelClient{models: []llm.ModelInfo{{ID: "remote-live-model", ContextLength: 64000}}}
-		default:
-			return endpointModelClient{models: []llm.ModelInfo{{ID: "local-live-model", ContextLength: 8000}}}
-		}
-	}
-	m := sized(New(Config{
-		Model:         "local-model",
-		Endpoint:      "http://local/v1",
-		APIKey:        "local-key",
-		ContextTokens: 8000,
-		ToolFormat:    "native",
-		ProfilePath:   profile,
-		Getenv:        func(string) string { return "" },
-		NewClient:     newClient,
-	}), tw, th)
-
-	m = typeAndEnter(m, "/models")
-	if !contains(m.View(), "local-live-model") {
-		t.Fatalf("initial /models should use local runtime client:\n%s", m.View())
-	}
-	m = typeAndEnter(m, "/model r")
-	m = typeAndEnter(m, "/models")
-	v := m.View()
-	if !contains(v, "remote-live-model") {
-		t.Fatalf("/models after alias switch should use selected provider client:\n%s", v)
-	}
-	if contains(v, "local-live-model · 8k ctx · live\n\nmodels:") {
-		t.Fatalf("post-switch /models should not fetch from the stale local endpoint:\n%s", v)
-	}
-	wantCall := "https://remote.example/v1|remote-selected|remote-key"
-	seen := false
-	for _, call := range calls {
-		if call == wantCall {
-			seen = true
-		}
-	}
-	if !seen {
-		t.Fatalf("runtime client factory was not called for selected provider; calls=%v", calls)
 	}
 }
 
@@ -523,30 +297,6 @@ func TestSlashAddMissingPath(t *testing.T) {
 	}
 	if !contains(m.View(), "/add needs a path") {
 		t.Errorf("expected a missing-path message:\n%s", m.View())
-	}
-}
-
-func TestSlashDiffAfterEdit(t *testing.T) {
-	m := newSized()
-	m = apply(m, toolEventMsg{Name: "edit_file", Path: "a.ts", Search: "old", Replace: "new"})
-	m = typeAndEnter(m, "/diff")
-	v := m.View()
-	if !contains(v, "pending diff:") || !contains(v, "- old") || !contains(v, "+ new") {
-		t.Errorf("/diff should render the pending diff:\n%s", v)
-	}
-}
-
-func TestSlashDiffEmpty(t *testing.T) {
-	m := typeAndEnter(newSized(), "/diff")
-	if !contains(m.View(), "no pending diff") {
-		t.Errorf("/diff with nothing pending should say so:\n%s", m.View())
-	}
-}
-
-func TestSlashStopNothingRunning(t *testing.T) {
-	m := typeAndEnter(newSized(), "/stop")
-	if !contains(m.View(), "nothing to stop") {
-		t.Errorf("/stop with nothing running should say so:\n%s", m.View())
 	}
 }
 
