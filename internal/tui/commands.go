@@ -102,10 +102,6 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashModel(arg), nil
 	case "/mode":
 		return m.slashMode(arg), nil
-	case "/stop":
-		return m.slashStop()
-	case "/diff":
-		return m.slashDiff(), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
@@ -139,25 +135,6 @@ func (m Model) slashMode(value string) Model {
 	}
 }
 
-func (m Model) slashStop() (tea.Model, tea.Cmd) {
-	if !m.running {
-		return m.appendItem(infoItem{text: "nothing to stop"}), nil
-	}
-	// Delegate to the interrupt path (task 07).
-	return m.interrupt()
-}
-
-func (m Model) slashDiff() Model {
-	if len(m.pendingDiffs) == 0 {
-		return m.appendItem(infoItem{text: "no pending diff"})
-	}
-	m = m.appendItem(infoItem{text: "pending diff:"})
-	for _, d := range m.pendingDiffs {
-		m = m.appendItem(d)
-	}
-	return m
-}
-
 // submitTask appends the user line and, if a Runner is wired, launches an
 // autonomous run under a cancelable context. Without a Runner (unit tests) it
 // just records the submission.
@@ -165,7 +142,7 @@ func (m Model) slashDiff() Model {
 // One run at a time: a non-slash submission is ignored (with a message) while a
 // run is active — otherwise a second goroutine would race the first on the
 // shared loop's hooks and overwrite the cancel func, leaving the first run
-// uninterruptible (mirrors the running-check /stop has).
+// uninterruptible (Esc interrupts the active run before a new one can start).
 func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	if m.running {
 		return m.appendItem(infoItem{text: "a run is already active — press Esc to interrupt it first"}), nil

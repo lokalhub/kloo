@@ -37,8 +37,8 @@ churn detection as the primary guard).
 | Flag | Default | Meaning |
 |---|---|---|
 | `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds step/token budgets + churn patience (see table below). |
-| `--model` | `local` | Model your endpoint serves. `local` is a neutral placeholder — a single-model llama.cpp server ignores it; set a real name for Ollama/OpenAI/OpenRouter. With `--provider`, this is a **model alias** looked up in that provider's `models` map (see [providers](#providers--endpointkey--model-aliases)). |
-| `--provider` | _(unset)_ | Named provider from the profile's `providers` block. Selecting one sets the endpoint + bearer key and scopes the `--model` alias lookup, so the same model on different providers is just one alias per provider. |
+| `--model` | `local` | Model id your endpoint serves, used verbatim. `local` is a neutral placeholder — a single-model llama.cpp server ignores it; set a real id for Ollama/OpenAI/OpenRouter. With `--provider`, the provider supplies the endpoint+key while `--model` still names the model (see [providers](#providers--endpointkey)). It can also be changed at runtime with the `/model` command. |
+| `--provider` | _(unset)_ | Named provider from the profile's `providers` block. Selecting one sets the endpoint + bearer key; the model is an independent axis you name with `--model`. |
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. Set directly, or via `--provider` (a provider's `endpoint` wins over this default but loses to an explicit `--endpoint`/`KLOO_ENDPOINT`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps. Also seeded by `--effort` (fast 50 · medium 500 · heavy 1000); an explicit `--max-steps` overrides the tier. |
@@ -60,7 +60,7 @@ churn detection as the primary guard).
 | Var | Effect |
 |---|---|
 | `KLOO_ENDPOINT` | OpenAI-compatible base URL (same as `--endpoint`). |
-| `KLOO_MODEL` | Model name / alias (same as `--model`). |
+| `KLOO_MODEL` | Model id (same as `--model`). |
 | `KLOO_PROVIDER` | Named provider from the profile's `providers` block (same as `--provider`). |
 | `KLOO_CONTEXT_TOKENS` | Per-step context window (same as `--ctx`). |
 | `KLOO_EFFORT` | Effort tier (same as `--effort`). |
@@ -129,40 +129,54 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 A headless run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
 
-## TUI model discovery and switching
+## Choosing and changing models
 
-The interactive TUI can inspect the configured endpoint and switch the runtime
-model for the **next** submitted task without restarting kloo.
+There are two ways to set the model: **at launch** (a flag or profile) and **live
+in the TUI** (a slash command, no restart).
+
+**At launch.** Point kloo at any OpenAI-compatible endpoint and name the model id:
+
+```sh
+kloo --endpoint https://openrouter.ai/api/v1 --model deepseek/deepseek-v4-flash
+# or, with a named provider from your profile's `providers` block (endpoint + key):
+kloo --provider openrouter --model deepseek/deepseek-v4-flash
+```
+
+The model id is sent to the endpoint **verbatim** — there is no per-provider alias
+map; a provider just supplies the endpoint+key (see [`providers`](#providers--endpointkey)).
+The per-step context window is read from the endpoint's `/v1/models` when it reports
+one, otherwise `--ctx` / the bundled per-model default / the built-in default.
+
+**Live in the TUI** — switch the model for the **next** submitted task without
+restarting. As you type a command, a small filterable menu of the available slash
+commands (`/model`, `/models`, `/add`, `/mode`) appears above the input — Up/Down to
+move, Enter or Tab to complete the highlighted command (a no-argument command like
+`/models` runs immediately on Enter), Esc to dismiss.
 
 | Command | Behavior |
 |---|---|
-| `/models` | Lists live `/v1/models` rows from the current endpoint plus profile aliases. Live rows include context length when the endpoint reports it; aliases are labeled with provider/source metadata. A live fetch failure is shown in the transcript and does not crash the TUI. |
-| `/model` | Opens the model picker overlay above the input. Type to filter, use Up/Down to move, Enter to select, and Esc to cancel. While the picker is open, keystrokes go to the picker instead of the normal task input. |
-| `/model <alias-or-id>` | Switches directly. A profile alias may also switch provider, endpoint, API key, model id, context tokens, temperature, tool adapter, and `noThink` defaults. A raw model id switches on the same endpoint; if it is not present in the live model list, kloo warns but still allows the switch. |
+| `/models` | Lists live `/v1/models` rows from the current endpoint. Rows include context length when the endpoint reports it. A live fetch failure is shown in the transcript and does not crash the TUI. |
+| `/model` | Opens the model picker overlay above the input. It lists the live `/v1/models` rows. Type to filter, use Up/Down to move, Enter to select, and Esc to cancel. While the picker is open, keystrokes go to the picker instead of the normal task input. |
+| `/model <id>` | Switches directly to a raw model id on the same endpoint. Its context window is read from `/v1/models` when present; if the id is not in the live model list, kloo warns but still allows the switch. |
 
 Examples:
 
 ```sh
-# TUI launch seeded from a provider alias.
-kloo --provider or --model dsv4
+# TUI launch: a provider supplies the endpoint+key, --model names the model.
+kloo --provider openrouter --model deepseek/deepseek-v4-flash
 
 # Inside the TUI:
 /models
 /model
-/model dsv4
 /model qwen2.5-coder-32b-instruct
 ```
 
-Cross-provider alias switches use the profile `providers` map. If multiple
-providers define the same alias, direct `/model dsv4` chooses the first provider
-by sorted provider name; selecting a row from the picker uses that row's provider.
-The status line and transcript report the selected provider/model, and the next
-run rebuilds the LLM client from the selected endpoint/key/model. API keys are
-never printed in `/models`, status files, JSON summaries, or error messages.
+The status line and transcript report the selected model, and the next run
+rebuilds the LLM client from the current endpoint/key/model. API keys are never
+printed in `/models`, status files, JSON summaries, or error messages.
 
-Live context lengths are used when available. Profile aliases use their
-`maxContextTokens` setting, or the bundled per-model default for the resolved
-model id, before falling back to the built-in default.
+Live context lengths are used when available, otherwise the bundled per-model
+default for the model id, before falling back to the built-in default.
 
 ## Thinking controls
 
@@ -185,9 +199,8 @@ If a thinking model produces a long reasoning-only response with no usable conte
 or tool call, kloo stops with a recoverable error that suggests `--no-think` or a
 larger output budget instead of silently spinning.
 
-`--no-think` has CLI precedence. In the TUI, later model alias switches preserve
-an explicit CLI `--no-think`; otherwise an alias can apply its own `noThink`
-profile value.
+`--no-think` has CLI precedence and is preserved across runtime `/model` switches
+in the TUI (a raw model switch never changes the thinking setting).
 
 ## Headless and TUI benchmark output
 
@@ -410,49 +423,41 @@ the native path) · `"xml"` (XML fallback, forced even on a tool-capable endpoin
 With `""`/`"auto"`, kloo picks native FC when the endpoint advertises tools, else
 XML. Any other value (e.g. `"yaml"`) is rejected.
 
-### `providers` — endpoint+key + model aliases
+### `providers` — endpoint+key
 
 A reserved top-level key, **`providers`**, decouples *where you send a request*
 (endpoint + bearer key) from *which model* you ask for. The same model is served
-by many providers (OpenRouter, Together, Fireworks, the direct vendor API…), so
-keying config by model name alone can't tell them apart — `providers` fixes that.
+by many providers (OpenRouter, Together, Fireworks, the direct vendor API…), so a
+provider is just a named endpoint+key; the model is an independent axis.
 
-Each entry is a provider you name (e.g. `or` for OpenRouter), holding an
-`endpoint`, an `apiKey`, and that provider's own `models` map of **aliases**. You
-select one with `--provider <name>` / `KLOO_PROVIDER`, and `--model <alias>` then
-resolves to that provider's real model id plus its tuning:
+Each entry is a provider you name (e.g. `or` for OpenRouter), holding only an
+`endpoint` and an `apiKey`. You select one with `--provider <name>` /
+`KLOO_PROVIDER`, and name the model with `--model <id>` (used verbatim — there is
+no per-provider alias map):
 
 ```jsonc
 {
   "providers": {
     "or": {
       "endpoint": "https://openrouter.ai/api/v1",
-      "apiKey": "${OPENROUTER_API_KEY}",   // ${VAR}/~ expanded — never inline the raw secret
-      "models": {
-        "dsv4": {                          // alias → real id + per-model tuning
-          "model": "deepseek/deepseek-v4-flash",
-          "toolFormat": "native",
-          "temperature": 0.1,
-          "maxContextTokens": 128000
-        }
-      }
+      "apiKey": "${OPENROUTER_API_KEY}"    // ${VAR}/~ expanded — never inline the raw secret
     },
     "together": {
       "endpoint": "https://api.together.xyz/v1",
-      "apiKey": "${TOGETHER_API_KEY}",
-      "models": { "dsv4": { "model": "deepseek-ai/DeepSeek-V4-Flash" } }
+      "apiKey": "${TOGETHER_API_KEY}"
     }
   }
 }
 ```
 
 ```sh
-kloo --provider or       --model dsv4   # → OpenRouter, deepseek/deepseek-v4-flash
-kloo --provider together --model dsv4   # → Together,  deepseek-ai/DeepSeek-V4-Flash
+kloo --provider or       --model deepseek/deepseek-v4-flash       # → OpenRouter
+kloo --provider together --model deepseek-ai/DeepSeek-V4-Flash    # → Together
 ```
 
-The same alias (`dsv4`) maps to each provider's own slug, so switching providers
-is one token. Notes:
+The model id is passed straight through to the endpoint; you can also switch it at
+runtime with the `/model` command, and the context window is read from
+`/v1/models` (overridable with `--ctx`). Notes:
 
 - **Precedence is unchanged:** a provider sets endpoint/key at the *profile*
   layer, so `KLOO_ENDPOINT`/`KLOO_API_KEY` and `--endpoint` still override it
@@ -460,15 +465,11 @@ is one token. Notes:
   the `OPENAI_API_KEY` fallback only applies when nothing else set a key.
 - **`apiKey` is `expandValue`'d** (`${ENV_VAR}` / leading `~`), exactly like
   `mcpServers` headers — keep real secrets out of the committed file.
-- **A `--model` with no matching alias is used verbatim** as the model id, so
-  `--provider or --model gpt-4o` works without an alias entry.
 - **An unknown `--provider` is a hard error** (not a silent fallback).
-- Per-model fields inside an alias are the same set as the legacy top-level
-  entries: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
-  `maxTokens`, `maxWallClockSeconds`, `churnRounds`, `noThink`.
 
-Legacy top-level model-keyed entries still work unchanged when no `--provider` is
-given — `providers` is purely additive.
+Per-model tuning (`toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
+…) still comes from the legacy top-level model-keyed entries, keyed by the model
+id; these work with or without a `--provider`.
 
 ### `mcpServers` — external MCP tool servers
 

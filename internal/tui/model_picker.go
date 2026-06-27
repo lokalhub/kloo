@@ -12,7 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/lokalhub/kloo/internal/config"
 	"github.com/lokalhub/kloo/internal/llm"
 )
 
@@ -259,14 +258,6 @@ func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) selectModelName(name string) Model {
 	name = strings.TrimSpace(name)
-	for _, opt := range m.modelOptions {
-		if opt.Alias == name {
-			return m.selectModelOption(opt)
-		}
-	}
-	if cfg, ok := config.ResolveModelAlias(name, m.profilePath, m.getenv); ok {
-		return m.applyResolvedModel(cfg, name, false)
-	}
 	live, err := m.fetchLiveModels()
 	if err != nil {
 		m = m.appendItem(infoItem{text: "live model validation unavailable: " + err.Error()})
@@ -286,44 +277,10 @@ func (m Model) selectModelName(name string) Model {
 }
 
 func (m Model) selectModelOption(opt ModelOption) Model {
-	if opt.Alias != "" {
-		if opt.Provider != "" {
-			if cfg, ok := config.ResolveProviderModelAlias(opt.Provider, opt.Alias, m.profilePath, m.getenv); ok {
-				return m.applyResolvedModel(cfg, opt.Alias, true)
-			}
-		}
-		if cfg, ok := config.ResolveModelAlias(opt.Alias, m.profilePath, m.getenv); ok {
-			return m.applyResolvedModel(cfg, opt.Alias, true)
-		}
-	}
 	if opt.ContextLength > 0 {
 		m.runtime.ContextTokens = opt.ContextLength
 	}
 	return m.applyRawModel(opt.ID, "model: "+opt.ID)
-}
-
-func (m Model) applyResolvedModel(cfg config.Config, alias string, fromPicker bool) Model {
-	m.runtime.Provider = cfg.Provider
-	m.runtime.Endpoint = cfg.Endpoint
-	m.runtime.APIKey = cfg.APIKey
-	m.runtime.Model = cfg.Model
-	m.runtime.ContextTokens = cfg.MaxContextTokens
-	m.runtime.Temperature = cfg.Temperature
-	m.runtime.ToolFormat = cfg.ToolFormat
-	if !m.runtime.NoThinkLocked {
-		m.runtime.NoThink = cfg.NoThink
-	}
-	m.modelName = cfg.Model
-	m.status.model = cfg.Model
-	m.status.provider = cfg.Provider
-	msg := "model: " + cfg.Provider + "/" + cfg.Model
-	if alias != "" && alias != cfg.Model {
-		msg += " (alias " + alias + ")"
-	}
-	if fromPicker {
-		msg = "selected " + msg
-	}
-	return m.appendItem(infoItem{text: msg})
 }
 
 func (m Model) applyRawModel(name, msg string) Model {

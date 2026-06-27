@@ -106,7 +106,6 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		Runner:        runner,
 		Banner:        banner,
 		ModelList:     client,
-		Models:        modelAliasOptions(profilePath),
 		Provider:      cfg.Provider,
 		Endpoint:      cfg.Endpoint,
 		APIKey:        cfg.APIKey,
@@ -115,8 +114,6 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		ToolFormat:    cfg.ToolFormat,
 		NoThink:       cfg.NoThink,
 		NoThinkLocked: cfg.NoThinkExplicit,
-		ProfilePath:   profilePath,
-		Getenv:        getenv,
 		NewClient:     clientFactory,
 		History:       sess.Transcript, // replay prior turns on resume (empty for a fresh session)
 	})
@@ -126,21 +123,6 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		fmt.Fprintf(os.Stderr, "\nsession %s saved · resume it with:  kloo --resume %s\n", sess.ID, sess.ID)
 	}
 	return runErr
-}
-
-func modelAliasOptions(profilePath string) []tui.ModelOption {
-	aliases := config.ModelAliases(profilePath)
-	options := make([]tui.ModelOption, 0, len(aliases))
-	for _, alias := range aliases {
-		options = append(options, tui.ModelOption{
-			ID:            alias.Model,
-			ContextLength: alias.ContextLength,
-			Provider:      alias.Provider,
-			Source:        "alias " + alias.Alias,
-			Alias:         alias.Alias,
-		})
-	}
-	return options
 }
 
 // chooseSession resolves which session a TUI launch uses. Every launch is a FRESH

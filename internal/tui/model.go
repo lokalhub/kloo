@@ -32,9 +32,6 @@ const (
 	ModeApproveEach Mode = "approve-each"
 )
 
-// slashHints is the hint shown to the right of the input box.
-const slashHints = "/add /model /mode /stop /diff"
-
 // Model is the root Bubble Tea model. It is a value type (Bubble Tea reassigns
 // it each Update); slice fields are append-and-reassign so copies don't alias.
 type Model struct {
@@ -83,11 +80,11 @@ type Model struct {
 	modelOptions []ModelOption
 	picker       *modelPicker
 	runtime      RuntimeConfig
-	profilePath  string
-	getenv       func(string) string
 
-	// pendingDiffs accumulates edit cards for the /diff command.
-	pendingDiffs []editCardItem
+	// menu is the inline, filterable slash-command menu shown above the input when
+	// the current line starts with "/" and no run is active (slash_menu.go); nil
+	// when closed.
+	menu *slashMenu
 
 	// pastes holds long/multi-line pastes collapsed to placeholders in the input
 	// (paste.go); expanded to full text when the task is submitted.
@@ -113,7 +110,6 @@ type Config struct {
 	Source    TaskSource // optional: defaults to the keyboard source
 	Banner    string     // optional: a startup notice shown in the transcript (e.g. "resumed session …")
 	ModelList ModelLister
-	Models    []ModelOption
 	Provider  string
 	Endpoint  string
 	APIKey    string
@@ -123,8 +119,6 @@ type Config struct {
 	ToolFormat    string
 	NoThink       bool
 	NoThinkLocked bool
-	ProfilePath   string
-	Getenv        func(string) string
 	NewClient     func(endpoint, model, apiKey string) llm.LLMClient
 	// History is the prior conversation to replay on resume (compact display items
 	// from the saved session). Rendered above the banner so a resumed session shows
@@ -142,10 +136,6 @@ func New(cfg Config) Model {
 	modelName := cfg.Model
 	if modelName == "" {
 		modelName = "local"
-	}
-	getenv := cfg.Getenv
-	if getenv == nil {
-		getenv = func(string) string { return "" }
 	}
 	useNewClient := cfg.NewClient != nil
 	newClient := cfg.NewClient
@@ -188,12 +178,9 @@ func New(cfg Config) Model {
 			maxTokens: cfg.MaxTokens,
 			mode:      ModeAuto,
 		},
-		runner:       cfg.Runner,
-		modelLister:  cfg.ModelList,
-		modelOptions: append([]ModelOption{}, cfg.Models...),
-		runtime:      runtime,
-		profilePath:  cfg.ProfilePath,
-		getenv:       getenv,
+		runner:      cfg.Runner,
+		modelLister: cfg.ModelList,
+		runtime:     runtime,
 	}
 	m.source = cfg.Source
 	if m.source == nil {
@@ -274,12 +261,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // resize lays out the regions for a new window size.
 func (m Model) resize(w, h int) (tea.Model, tea.Cmd) {
 	m.width, m.height = w, h
-	// Leave room in the input box for the slash hints to the right.
-	iw := w - len(slashHints) - 10
-	if iw < 10 {
-		iw = w - 6 // too narrow for hints; use the full line
-	}
-	m.input.Width = iw
+	// The input box spans the full line (the slash-command menu floats above it).
+	m.input.Width = w - 6
 
 	vpHeight := h - headerHeight - activityHeight - inputHeight - hintHeight
 	if vpHeight < 1 {
@@ -305,6 +288,14 @@ func (m Model) resize(w, h int) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.picker != nil {
 		return m.handleModelPickerKey(msg)
+	}
+	// The inline slash-command menu (slash_menu.go) consumes its navigation keys
+	// before the interrupt/Esc path so Esc closes the menu (idle Esc is otherwise a
+	// no-op). It only opens while !running, so this never shadows run interrupt.
+	if m.menu != nil {
+		if nm, cmd, handled := m.handleSlashMenuKey(msg); handled {
+			return nm, cmd
+		}
 	}
 	// Interrupt / quit keys are mode-sensitive (interrupt.go).
 	if handled, nm, cmd := m.handleInterruptKeys(msg); handled {
@@ -353,6 +344,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m = m.syncSlashMenu() // open/refilter/close the slash-command menu on input change
 	return m, cmd
 }
 

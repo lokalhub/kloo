@@ -53,9 +53,7 @@ func (m Model) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
 	var it item
 	switch msg.Name {
 	case "edit_file":
-		ec := editCardItem{path: msg.Path, edits: editsOf(msg)}
-		m.pendingDiffs = append(append([]editCardItem{}, m.pendingDiffs...), ec)
-		it = ec
+		it = editCardItem{path: msg.Path, edits: editsOf(msg)}
 	case "run_command":
 		it = runCardItem{command: msg.Command, exitCode: msg.ExitCode, stderr: msg.Stderr}
 	default:

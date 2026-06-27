@@ -76,10 +76,10 @@ kloo --endpoint https://openrouter.ai/api/v1 --model deepseek/deepseek-v4-flash
 ```
 
 Or name the endpoint+key once in a `providers` block in `profiles.json` and select
-it with `--provider` (see [configuration.md](configuration.md#providers--endpointkey--model-aliases)):
+it with `--provider` (see [configuration.md](configuration.md#providers--endpointkey)):
 
 ```sh
-kloo --provider openrouter --model dsv4        # endpoint + key + real model id from the profile
+kloo --provider openrouter --model deepseek/deepseek-v4-flash   # endpoint + key from the profile
 ```
 
 - `KLOO_API_KEY` is the bearer token; if unset, kloo falls back to `OPENAI_API_KEY`.

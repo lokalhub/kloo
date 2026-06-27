@@ -380,33 +380,30 @@ func TestResolveBundledDefaults(t *testing.T) {
 		}
 	})
 
-	// a provider alias resolving to a deepseek id ⇒ the deepseek bundled defaults
-	// (proves the lookup keys off the resolved id; provider resolution unregressed).
-	t.Run("provider-alias-matches-table", func(t *testing.T) {
+	// a provider + a raw deepseek model id ⇒ the deepseek bundled defaults (proves
+	// the lookup keys off the raw model id under a provider; provider unregressed).
+	t.Run("provider-raw-id-matches-table", func(t *testing.T) {
 		prof := writeProfile(t, `{
 			"providers": {
-				"or": {
-					"endpoint": "https://openrouter.ai/api/v1",
-					"models": {"ds": {"model": "deepseek-chat"}}
-				}
+				"or": {"endpoint": "https://openrouter.ai/api/v1"}
 			}
 		}`)
-		got, err := Resolve(Flags{Provider: strp("or"), Model: strp("ds")}, envFunc(nil), prof)
+		got, err := Resolve(Flags{Provider: strp("or"), Model: strp("deepseek-chat")}, envFunc(nil), prof)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Model != "deepseek-chat" {
-			t.Fatalf("alias not resolved to real id: %+v", got)
+			t.Fatalf("raw model id should be used verbatim: %+v", got)
 		}
 		if got.ToolFormat != "native" || got.Temperature != 0.1 || got.MaxContextTokens != 32768 {
-			t.Errorf("deepseek bundled defaults not applied to resolved alias: %+v", got)
+			t.Errorf("deepseek bundled defaults not applied under a provider: %+v", got)
 		}
 	})
 }
 
 // TestResolveProvider: a --provider selects an endpoint+key from the "providers"
-// block, and --model resolves an alias under that provider to its real model id +
-// tuning. The same alias under a different provider yields that provider's slug.
+// block; the --model raw id is then used verbatim (provider and model are
+// independent axes — no per-provider alias map any more).
 func TestResolveProvider(t *testing.T) {
 	t.Setenv("KLOO_TEST_OR_KEY", "or-secret")
 	t.Setenv("KLOO_TEST_TG_KEY", "tg-secret")
@@ -414,50 +411,34 @@ func TestResolveProvider(t *testing.T) {
 		"providers": {
 			"or": {
 				"endpoint": "https://openrouter.ai/api/v1",
-				"apiKey": "${KLOO_TEST_OR_KEY}",
-				"models": {
-						"dsv4": {"model": "deepseek/deepseek-v4-flash", "toolFormat": "native", "temperature": 0.2, "maxContextTokens": 128000, "noThink": true}
-				}
+				"apiKey": "${KLOO_TEST_OR_KEY}"
 			},
 			"together": {
 				"endpoint": "https://api.together.xyz/v1",
-				"apiKey": "${KLOO_TEST_TG_KEY}",
-				"models": {
-					"dsv4": {"model": "deepseek-ai/DeepSeek-V4-Flash"}
-				}
+				"apiKey": "${KLOO_TEST_TG_KEY}"
 			}
 		}
 	}`)
 
-	// --provider or --model dsv4 → OpenRouter endpoint/key + that provider's slug.
-	got, err := Resolve(Flags{Provider: strp("or"), Model: strp("dsv4")}, envFunc(nil), prof)
+	// --provider or --model <raw-id> → OpenRouter endpoint/key + the verbatim id.
+	got, err := Resolve(Flags{Provider: strp("or"), Model: strp("deepseek/deepseek-v4-flash")}, envFunc(nil), prof)
 	if err != nil {
 		t.Fatalf("Resolve(or): %v", err)
 	}
 	if got.Provider != "or" || got.Endpoint != "https://openrouter.ai/api/v1" || got.APIKey != "or-secret" {
 		t.Errorf("provider or: endpoint/key wrong: %+v", got)
 	}
-	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "native" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 || !got.NoThink {
-		t.Errorf("alias dsv4 under or not resolved: %+v", got)
+	if got.Model != "deepseek/deepseek-v4-flash" {
+		t.Errorf("raw model id should be used verbatim: %+v", got)
 	}
 
-	// Same alias under a different provider → that provider's endpoint/key/slug.
-	got, err = Resolve(Flags{Provider: strp("together"), Model: strp("dsv4")}, envFunc(nil), prof)
+	// A different provider supplies its own endpoint/key for the same raw id.
+	got, err = Resolve(Flags{Provider: strp("together"), Model: strp("deepseek-ai/DeepSeek-V4-Flash")}, envFunc(nil), prof)
 	if err != nil {
 		t.Fatalf("Resolve(together): %v", err)
 	}
 	if got.Endpoint != "https://api.together.xyz/v1" || got.APIKey != "tg-secret" || got.Model != "deepseek-ai/DeepSeek-V4-Flash" {
-		t.Errorf("alias dsv4 under together wrong: %+v", got)
-	}
-
-	// An unmatched --model under a provider is used verbatim as the model id
-	// (provider still supplies endpoint+key).
-	got, err = Resolve(Flags{Provider: strp("or"), Model: strp("gpt-4o")}, envFunc(nil), prof)
-	if err != nil {
-		t.Fatalf("Resolve(or,gpt-4o): %v", err)
-	}
-	if got.Model != "gpt-4o" || got.Endpoint != "https://openrouter.ai/api/v1" {
-		t.Errorf("unmatched alias should pass through: %+v", got)
+		t.Errorf("together provider + raw id wrong: %+v", got)
 	}
 
 	// An unknown provider is a clear error.
@@ -467,155 +448,12 @@ func TestResolveProvider(t *testing.T) {
 
 	// KLOO_PROVIDER selects it from env; --endpoint flag still overrides the
 	// provider's endpoint (flags > env > profile).
-	got, err = Resolve(Flags{Endpoint: strp("http://local/v1")}, envFunc(map[string]string{EnvProvider: "or", EnvModel: "dsv4"}), prof)
+	got, err = Resolve(Flags{Endpoint: strp("http://local/v1")}, envFunc(map[string]string{EnvProvider: "or", EnvModel: "deepseek/deepseek-v4-flash"}), prof)
 	if err != nil {
 		t.Fatalf("Resolve(env provider): %v", err)
 	}
 	if got.Endpoint != "http://local/v1" || got.Model != "deepseek/deepseek-v4-flash" || got.APIKey != "or-secret" {
 		t.Errorf("env provider + endpoint flag override: %+v", got)
-	}
-}
-
-func TestResolveModelAlias(t *testing.T) {
-	t.Setenv("KLOO_TEST_OR_KEY", "or-secret")
-	t.Setenv("KLOO_TEST_TG_KEY", "tg-secret")
-	prof := writeProfile(t, `{
-		"providers": {
-			"or": {
-				"endpoint": "https://openrouter.ai/api/v1",
-				"apiKey": "${KLOO_TEST_OR_KEY}",
-				"models": {
-					"dsv4": {
-						"model": "deepseek/deepseek-v4-flash",
-						"toolFormat": "xml",
-						"temperature": 0.2,
-						"maxContextTokens": 128000
-					}
-				}
-			},
-			"together": {
-				"endpoint": "https://api.together.xyz/v1",
-				"apiKey": "${KLOO_TEST_TG_KEY}",
-				"models": {
-					"other": {"model": "deepseek-ai/DeepSeek-V4-Flash"}
-				}
-			}
-		}
-	}`)
-
-	got, ok := ResolveModelAlias("dsv4", prof, envFunc(nil))
-	if !ok {
-		t.Fatal("ResolveModelAlias returned ok=false")
-	}
-	if got.Provider != "or" || got.Endpoint != "https://openrouter.ai/api/v1" || got.APIKey != "or-secret" {
-		t.Errorf("provider endpoint/key wrong: %+v", got)
-	}
-	if got.Model != "deepseek/deepseek-v4-flash" || got.ToolFormat != "xml" || got.Temperature != 0.2 || got.MaxContextTokens != 128000 {
-		t.Errorf("alias model/tuning wrong: %+v", got)
-	}
-	if got.MaxSteps != DefaultMaxSteps || got.Mode != DefaultMode || got.Effort != DefaultEffort {
-		t.Errorf("default runtime fields wrong: %+v", got)
-	}
-}
-
-func TestResolveModelAliasDuplicateAliasUsesSortedProviderName(t *testing.T) {
-	prof := writeProfile(t, `{
-		"providers": {
-			"zulu": {
-				"endpoint": "https://z.example/v1",
-				"models": {"dupe": {"model": "z-model"}}
-			},
-			"alpha": {
-				"endpoint": "https://a.example/v1",
-				"models": {"dupe": {"model": "a-model"}}
-			}
-		}
-	}`)
-
-	got, ok := ResolveModelAlias("dupe", prof, envFunc(nil))
-	if !ok {
-		t.Fatal("ResolveModelAlias returned ok=false")
-	}
-	if got.Provider != "alpha" || got.Model != "a-model" || got.Endpoint != "https://a.example/v1" {
-		t.Errorf("duplicate alias should choose sorted provider name alpha, got %+v", got)
-	}
-}
-
-func TestResolveModelAliasAPIKeyOverrideAndFallback(t *testing.T) {
-	profWithKey := writeProfile(t, `{
-		"providers": {
-			"or": {
-				"endpoint": "https://openrouter.ai/api/v1",
-				"apiKey": "profile-key",
-				"models": {"dsv4": {"model": "deepseek-chat"}}
-			}
-		}
-	}`)
-	got, ok := ResolveModelAlias("dsv4", profWithKey, envFunc(map[string]string{EnvAPIKey: "env-key", EnvAPIKeyOpenAI: "openai-key"}))
-	if !ok {
-		t.Fatal("ResolveModelAlias returned ok=false")
-	}
-	if got.APIKey != "env-key" {
-		t.Errorf("KLOO_API_KEY should beat provider key, got %q", got.APIKey)
-	}
-
-	profNoKey := writeProfile(t, `{
-		"providers": {
-			"or": {
-				"endpoint": "https://openrouter.ai/api/v1",
-				"models": {"dsv4": {"model": "deepseek-chat"}}
-			}
-		}
-	}`)
-	got, ok = ResolveModelAlias("dsv4", profNoKey, envFunc(map[string]string{EnvAPIKeyOpenAI: "openai-key"}))
-	if !ok {
-		t.Fatal("ResolveModelAlias returned ok=false")
-	}
-	if got.APIKey != "openai-key" {
-		t.Errorf("OPENAI_API_KEY fallback should apply when no provider/KLOO key, got %q", got.APIKey)
-	}
-}
-
-func TestResolveModelAliasMissingAndMalformed(t *testing.T) {
-	if got, ok := ResolveModelAlias("missing", filepath.Join(t.TempDir(), "none.json"), envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
-		t.Errorf("missing profile = %+v, %v; want zero false", got, ok)
-	}
-
-	prof := writeProfile(t, `{"providers":{"or":{"models":{"known":{"model":"m"}}}}}`)
-	if got, ok := ResolveModelAlias("missing", prof, envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
-		t.Errorf("missing alias = %+v, %v; want zero false", got, ok)
-	}
-
-	bad := writeProfile(t, `{"providers": {bad json}`)
-	if got, ok := ResolveModelAlias("known", bad, envFunc(nil)); ok || !reflect.DeepEqual(got, Config{}) {
-		t.Errorf("malformed profile = %+v, %v; want zero false", got, ok)
-	}
-}
-
-func TestResolveModelAliasBundledDefaultsBeforeAliasTuning(t *testing.T) {
-	prof := writeProfile(t, `{
-		"providers": {
-			"or": {
-				"endpoint": "https://openrouter.ai/api/v1",
-				"models": {
-					"ds": {"model": "deepseek-chat", "temperature": 0.35}
-				}
-			}
-		}
-	}`)
-
-	got, ok := ResolveModelAlias("ds", prof, envFunc(nil))
-	if !ok {
-		t.Fatal("ResolveModelAlias returned ok=false")
-	}
-	if got.Model != "deepseek-chat" {
-		t.Fatalf("model = %q, want deepseek-chat", got.Model)
-	}
-	if got.ToolFormat != "native" || got.MaxContextTokens != 32768 {
-		t.Errorf("bundled deepseek defaults should apply for unset fields: %+v", got)
-	}
-	if got.Temperature != 0.35 {
-		t.Errorf("alias tuning should override bundled temperature, got %+v", got)
 	}
 }
 

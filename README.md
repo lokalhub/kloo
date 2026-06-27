@@ -105,11 +105,11 @@ kloo --endpoint https://openrouter.ai/api/v1 --model deepseek/deepseek-v4-flash
 ```
 
 Better, name your endpoints once in `profiles.json` under a **`providers`** block
-(endpoint + key + per-provider model aliases) and select one with `--provider` —
-so the same model served by several providers is just one alias each:
+(endpoint + optional key) and select one with `--provider`; the model id comes from
+`--model` (or switch it live in the TUI with `/model`):
 
 ```sh
-kloo --provider openrouter --model dsv4   # endpoint + key + real model id from the profile
+kloo --provider openrouter --model deepseek/deepseek-v4-flash   # endpoint + key from the profile
 ```
 
 (No `--verify` needed — kloo auto-detects the project's build/test; see below.) See
@@ -129,12 +129,12 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | Flag | Default | Meaning |
 |---|---|---|
 | `--effort` | `medium` | Effort tier (`fast`\|`medium`\|`heavy`) — seeds step/token budgets + churn patience. |
-| `--model` | `local` | Model your endpoint serves (placeholder `local` for single-model llama.cpp). With `--provider`, a model alias from the profile. |
-| `--provider` | _(unset)_ | Named provider from the profile's `providers` block — sets endpoint + key and scopes the `--model` alias lookup. |
+| `--model` | `local` | Model id your endpoint serves (placeholder `local` for single-model llama.cpp). With `--provider`, the id is sent to that provider's endpoint. Switch it live in the TUI with `/model`. |
+| `--provider` | _(unset)_ | Named provider from the profile's `providers` block — sets the endpoint + key; the model id comes from `--model`. |
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL (or supplied by `--provider`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
-| `--ctx` | `8000` | Per-step context window — set it to match your server's `-c`. Needed for a llama-swap/Ollama **alias** (`snappy`, `smart`) the bundled defaults can't size by model id; otherwise kloo over-compacts to 8k on a 32k server. |
+| `--ctx` | `8000` | Per-step context window. The TUI reads it from `/v1/models` when the endpoint reports a context length; set this to override, or for endpoints that don't report one (e.g. match your llama.cpp `-c`) — otherwise kloo over-compacts to 8k on a larger server. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
 | `--lint` | _(auto-detected)_ | Override the fast **advisory** lint command run on edited files after each edit (see below); auto-detected from the project when unset. |
@@ -210,8 +210,8 @@ The **full reference** — every flag, env var, the effort table, and the
 
 The TUI shows a live header (version · model · effort · running token total ·
 step · mode), an animated thinking line, and a transcript of colour-coded tool cards,
-diffs, command output, and assistant prose. Slash commands while running:
-`/add`, `/model`, `/mode`, `/stop`, `/diff`; `Esc`/`Ctrl-C` interrupts;
+diffs, command output, and assistant prose. Slash commands (type `/` for a
+filterable menu): `/add`, `/model`, `/models`, `/mode`; `Esc`/`Ctrl-C` interrupts;
 `Ctrl-O` expands truncated command output. **Scroll** the transcript with the
 mouse wheel or `PgUp`/`PgDn` — it sticks to the newest output unless you scroll
 up. **Copy:** `Ctrl-Y` copies the last assistant reply to the clipboard (OSC 52,
