@@ -16,8 +16,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Default values, used when nothing higher in the precedence chain sets a field.
@@ -48,7 +50,14 @@ const (
 	// 0/absent in the profile ⇒ this default; small enough to protect a small
 	// model's tool-selection quality (master plan §5).
 	DefaultMCPMaxExposedTools = 16
+	DefaultLLMMaxRetries      = 2
+	DefaultLLMRetryBaseDelay  = 2 * time.Second
+	DefaultLLMRetryMaxDelay   = 30 * time.Second
+	DefaultLLMColdLoadTimeout = 120 * time.Second
+	DefaultLLMStreamIdle      = 5 * time.Minute
 )
+
+var DefaultLLMRetryableStatusCodes = []int{408, 429, 500, 502, 503, 504}
 
 // Env var names (KLOO_-prefixed, SCREAMING_SNAKE). Extendable.
 const (
@@ -77,7 +86,13 @@ const (
 	// EnvContextTokens sets the per-step context window (same as --ctx). Useful for a
 	// llama-swap/Ollama ALIAS the bundled defaults can't match by id (e.g. "snappy"),
 	// so the window matches the server's real -c without editing a profile.
-	EnvContextTokens = "KLOO_CONTEXT_TOKENS"
+	EnvContextTokens        = "KLOO_CONTEXT_TOKENS"
+	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
+	EnvLLMRetryCodes        = "KLOO_LLM_RETRY_CODES"
+	EnvLLMRetryBaseDelay    = "KLOO_LLM_RETRY_BASE_DELAY"
+	EnvLLMRetryMaxDelay     = "KLOO_LLM_RETRY_MAX_DELAY"
+	EnvLLMColdLoadTimeout   = "KLOO_LLM_COLD_LOAD_TIMEOUT"
+	EnvLLMStreamIdleTimeout = "KLOO_LLM_STREAM_IDLE_TIMEOUT"
 )
 
 // ErrProfileParse wraps a malformed profile JSON file. A *missing* profile file
@@ -146,6 +161,15 @@ type Config struct {
 	// NoThinkExplicit is true when --no-think was explicitly provided. TUI runtime
 	// alias switches use this to preserve CLI flag precedence over profile aliases.
 	NoThinkExplicit bool
+	// BenchmarkMode enables automation preset behavior in the CLI runner.
+	BenchmarkMode           bool
+	Memory                  MemoryConfig
+	LLMMaxRetries           int
+	LLMRetryableStatusCodes []int
+	LLMRetryBaseDelay       time.Duration
+	LLMRetryMaxDelay        time.Duration
+	LLMColdLoadTimeout      time.Duration
+	LLMStreamIdleTimeout    time.Duration
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -165,6 +189,15 @@ type MCPServerEntry struct {
 	Expose         []string          `json:"expose,omitempty"`         // curated allowlist (original MCP tool names)
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"` // per-call CallTool timeout (0 ⇒ default)
 	Disabled       bool              `json:"disabled,omitempty"`       // per-server kill-switch
+}
+
+type MemoryConfig struct {
+	Enabled        bool
+	Server         string
+	RecallTool     string
+	StoreTool      string
+	MaxRecallBytes int
+	StoreOnFailure bool
 }
 
 // Flags carries the explicitly-set CLI overrides. A nil field means "the flag
@@ -196,21 +229,34 @@ type Flags struct {
 	// StatusFile (--status-file) writes the reusable run summary JSON. nil ⇒ unset.
 	StatusFile *string
 	// NoThink (--no-think) asks compatible backends to disable reasoning. nil ⇒ unset.
-	NoThink *bool
+	NoThink                 *bool
+	BenchmarkMode           *bool
+	LLMMaxRetries           *int
+	LLMRetryableStatusCodes []int
+	LLMRetryBaseDelay       *time.Duration
+	LLMRetryMaxDelay        *time.Duration
+	LLMColdLoadTimeout      *time.Duration
+	LLMStreamIdleTimeout    *time.Duration
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
 //
 //	{ "qwen2.5-coder": {"toolFormat": "native", "temperature": 0.2, "fewShotPath": "..."} }
 type profileEntry struct {
-	ToolFormat          *string  `json:"toolFormat,omitempty"`
-	Temperature         *float64 `json:"temperature,omitempty"`
-	FewShotPath         *string  `json:"fewShotPath,omitempty"`
-	MaxContextTokens    *int     `json:"maxContextTokens,omitempty"`
-	MaxTokens           *int     `json:"maxTokens,omitempty"`
-	MaxWallClockSeconds *int     `json:"maxWallClockSeconds,omitempty"`
-	ChurnRounds         *int     `json:"churnRounds,omitempty"`
-	NoThink             *bool    `json:"noThink,omitempty"`
+	ToolFormat           *string  `json:"toolFormat,omitempty"`
+	Temperature          *float64 `json:"temperature,omitempty"`
+	FewShotPath          *string  `json:"fewShotPath,omitempty"`
+	MaxContextTokens     *int     `json:"maxContextTokens,omitempty"`
+	MaxTokens            *int     `json:"maxTokens,omitempty"`
+	MaxWallClockSeconds  *int     `json:"maxWallClockSeconds,omitempty"`
+	ChurnRounds          *int     `json:"churnRounds,omitempty"`
+	NoThink              *bool    `json:"noThink,omitempty"`
+	LLMMaxRetries        *int     `json:"llmMaxRetries,omitempty"`
+	LLMRetryCodes        []int    `json:"llmRetryCodes,omitempty"`
+	LLMRetryBaseDelay    *string  `json:"llmRetryBaseDelay,omitempty"`
+	LLMRetryMaxDelay     *string  `json:"llmRetryMaxDelay,omitempty"`
+	LLMColdLoadTimeout   *string  `json:"llmColdLoadTimeout,omitempty"`
+	LLMStreamIdleTimeout *string  `json:"llmStreamIdleTimeout,omitempty"`
 }
 
 // providerEntry is one entry of the reserved "providers" profile block, selected
@@ -273,6 +319,32 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
 	}
+	if e.LLMMaxRetries != nil {
+		cfg.LLMMaxRetries = *e.LLMMaxRetries
+	}
+	if e.LLMRetryCodes != nil {
+		cfg.LLMRetryableStatusCodes = normalizeStatusCodes(e.LLMRetryCodes)
+	}
+	if e.LLMRetryBaseDelay != nil {
+		if d, err := parseDurationSetting(*e.LLMRetryBaseDelay); err == nil {
+			cfg.LLMRetryBaseDelay = d
+		}
+	}
+	if e.LLMRetryMaxDelay != nil {
+		if d, err := parseDurationSetting(*e.LLMRetryMaxDelay); err == nil {
+			cfg.LLMRetryMaxDelay = d
+		}
+	}
+	if e.LLMColdLoadTimeout != nil {
+		if d, err := parseDurationSetting(*e.LLMColdLoadTimeout); err == nil {
+			cfg.LLMColdLoadTimeout = d
+		}
+	}
+	if e.LLMStreamIdleTimeout != nil {
+		if d, err := parseDurationSetting(*e.LLMStreamIdleTimeout); err == nil {
+			cfg.LLMStreamIdleTimeout = d
+		}
+	}
 }
 
 // Resolve computes the effective Config from the precedence chain
@@ -292,16 +364,22 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 
 	cfg := Config{
-		Endpoint:            DefaultEndpoint,
-		Model:               DefaultModel,
-		Temperature:         DefaultTemperature,
-		MaxSteps:            DefaultMaxSteps,
-		Mode:                DefaultMode,
-		ToolFormat:          DefaultToolFormat,
-		MaxContextTokens:    DefaultMaxContextTokens,
-		MaxTokens:           DefaultMaxTokens,
-		MaxWallClockSeconds: DefaultMaxWallClockSeconds,
-		ChurnRounds:         DefaultChurnRounds,
+		Endpoint:                DefaultEndpoint,
+		Model:                   DefaultModel,
+		Temperature:             DefaultTemperature,
+		MaxSteps:                DefaultMaxSteps,
+		Mode:                    DefaultMode,
+		ToolFormat:              DefaultToolFormat,
+		MaxContextTokens:        DefaultMaxContextTokens,
+		MaxTokens:               DefaultMaxTokens,
+		MaxWallClockSeconds:     DefaultMaxWallClockSeconds,
+		ChurnRounds:             DefaultChurnRounds,
+		LLMMaxRetries:           DefaultLLMMaxRetries,
+		LLMRetryableStatusCodes: slices.Clone(DefaultLLMRetryableStatusCodes),
+		LLMRetryBaseDelay:       DefaultLLMRetryBaseDelay,
+		LLMRetryMaxDelay:        DefaultLLMRetryMaxDelay,
+		LLMColdLoadTimeout:      DefaultLLMColdLoadTimeout,
+		LLMStreamIdleTimeout:    DefaultLLMStreamIdle,
 	}
 
 	// Effort tier (flag > env > default): seeds the loop budgets + churn from a
@@ -402,6 +480,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	} else {
 		cfg.MCPMaxExposedTools = DefaultMCPMaxExposedTools
 	}
+	if mem, err := loadMemoryConfig(profilePath); err != nil {
+		return Config{}, err
+	} else if mem != nil {
+		cfg.Memory = *mem
+	}
 
 	// Env layer (above profile).
 	if v := getenv(EnvEndpoint); v != "" {
@@ -413,6 +496,36 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if v := getenv(EnvContextTokens); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			cfg.MaxContextTokens = n
+		}
+	}
+	if v := getenv(EnvLLMMaxRetries); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.LLMMaxRetries = n
+		}
+	}
+	if v := getenv(EnvLLMRetryCodes); v != "" {
+		if codes, err := parseStatusCodes(v); err == nil {
+			cfg.LLMRetryableStatusCodes = codes
+		}
+	}
+	if v := getenv(EnvLLMRetryBaseDelay); v != "" {
+		if d, err := parseDurationSetting(v); err == nil {
+			cfg.LLMRetryBaseDelay = d
+		}
+	}
+	if v := getenv(EnvLLMRetryMaxDelay); v != "" {
+		if d, err := parseDurationSetting(v); err == nil {
+			cfg.LLMRetryMaxDelay = d
+		}
+	}
+	if v := getenv(EnvLLMColdLoadTimeout); v != "" {
+		if d, err := parseDurationSetting(v); err == nil {
+			cfg.LLMColdLoadTimeout = d
+		}
+	}
+	if v := getenv(EnvLLMStreamIdleTimeout); v != "" {
+		if d, err := parseDurationSetting(v); err == nil {
+			cfg.LLMStreamIdleTimeout = d
 		}
 	}
 	if v := getenv(EnvAPIKey); v != "" {
@@ -464,8 +577,97 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		cfg.NoThink = *flags.NoThink
 		cfg.NoThinkExplicit = true
 	}
+	if flags.BenchmarkMode != nil {
+		cfg.BenchmarkMode = *flags.BenchmarkMode
+		if *flags.BenchmarkMode {
+			cfg.JSONSummary = true
+		}
+	}
+	if flags.LLMMaxRetries != nil {
+		cfg.LLMMaxRetries = *flags.LLMMaxRetries
+	}
+	if flags.LLMRetryableStatusCodes != nil {
+		cfg.LLMRetryableStatusCodes = normalizeStatusCodes(flags.LLMRetryableStatusCodes)
+	}
+	if flags.LLMRetryBaseDelay != nil {
+		cfg.LLMRetryBaseDelay = *flags.LLMRetryBaseDelay
+	}
+	if flags.LLMRetryMaxDelay != nil {
+		cfg.LLMRetryMaxDelay = *flags.LLMRetryMaxDelay
+	}
+	if flags.LLMColdLoadTimeout != nil {
+		cfg.LLMColdLoadTimeout = *flags.LLMColdLoadTimeout
+	}
+	if flags.LLMStreamIdleTimeout != nil {
+		cfg.LLMStreamIdleTimeout = *flags.LLMStreamIdleTimeout
+	}
 
 	return cfg, nil
+}
+
+func loadMemoryConfig(profilePath string) (*MemoryConfig, error) {
+	data, path, err := readProfileFile(profilePath)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	var file struct {
+		Memory *struct {
+			Enabled        bool   `json:"enabled,omitempty"`
+			Server         string `json:"server,omitempty"`
+			RecallTool     string `json:"recallTool,omitempty"`
+			StoreTool      string `json:"storeTool,omitempty"`
+			MaxRecallBytes int    `json:"maxRecallBytes,omitempty"`
+			StoreOnFailure bool   `json:"storeOnFailure,omitempty"`
+		} `json:"memory"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
+	}
+	if file.Memory == nil {
+		return nil, nil
+	}
+	return &MemoryConfig{
+		Enabled:        file.Memory.Enabled,
+		Server:         file.Memory.Server,
+		RecallTool:     file.Memory.RecallTool,
+		StoreTool:      file.Memory.StoreTool,
+		MaxRecallBytes: file.Memory.MaxRecallBytes,
+		StoreOnFailure: file.Memory.StoreOnFailure,
+	}, nil
+}
+
+func parseDurationSetting(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	return time.ParseDuration(s)
+}
+
+func parseStatusCodes(s string) ([]int, error) {
+	parts := strings.Split(s, ",")
+	codes := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, err
+		}
+		codes = append(codes, n)
+	}
+	return normalizeStatusCodes(codes), nil
+}
+
+func normalizeStatusCodes(in []int) []int {
+	out := append([]int(nil), in...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // readProfileFile reads the profile JSON bytes, or returns (nil, path, nil) when
@@ -611,4 +813,11 @@ func defaultProfilePath() (string, error) {
 	// Neither exists: default to the preferred path (a missing profile is not an
 	// error upstream — Resolve treats absent profiles as "use defaults").
 	return preferred, nil
+}
+
+// DefaultProfilePathForDiagnostics returns the profile path Resolve would inspect
+// when --profile is unset. It performs no profile parsing and does not require the
+// file to exist.
+func DefaultProfilePathForDiagnostics() (string, error) {
+	return defaultProfilePath()
 }

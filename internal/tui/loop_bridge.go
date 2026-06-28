@@ -42,6 +42,8 @@ type LoopRunner struct {
 	sess         *session.Session
 	now          func() time.Time // injectable clock for persistence timestamps
 	statusWriter func(RuntimeConfig, *agent.Report, time.Duration) error
+	beforeRun    func(context.Context, string, RuntimeConfig) string
+	afterRun     func(context.Context, string, RuntimeConfig, *agent.Report, time.Duration)
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
@@ -71,6 +73,15 @@ func (r *LoopRunner) WithStatusWriter(fn func(RuntimeConfig, *agent.Report, time
 	return r
 }
 
+// WithRunHooks attaches optional lifecycle hooks around visible task runs. The
+// before hook may return a system-prompt section for this run; the after hook is
+// called once the loop has completed. Hook failures are handled by the caller so
+// the TUI package stays unaware of specific integrations such as MCP memory.
+func (r *LoopRunner) WithRunHooks(before func(context.Context, string, RuntimeConfig) string, after func(context.Context, string, RuntimeConfig, *agent.Report, time.Duration)) *LoopRunner {
+	r.beforeRun, r.afterRun = before, after
+	return r
+}
+
 // setSend connects the program's message sink (called by Run).
 func (r *LoopRunner) setSend(send func(tea.Msg)) { r.send = send }
 
@@ -86,10 +97,14 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 	// selected endpoint/key/model/tool adapter. Switches apply between runs only.
 	r.applyRuntime(runtime)
 
+	var runSystemSection string
+	if r.beforeRun != nil {
+		runSystemSection = r.beforeRun(ctx, task, runtime)
+	}
 	// Wire /add-pinned files into the loop's per-run context: read each (jailed)
 	// and inject a bounded section into the system prompt so the model always
 	// sees them. Rebuilt from the base each run so a removed pin does not linger.
-	r.loop.System = r.baseSystem + pinnedSection(r.ws, contextFiles)
+	r.loop.System = r.baseSystem + runSystemSection + pinnedSection(r.ws, contextFiles)
 
 	r.loop.OnProgress = func(step, maxSteps, tokens, maxTokens int) {
 		r.send(progressMsg{Model: runtime.Model, Step: step, MaxSteps: maxSteps, Tokens: tokens, MaxTokens: maxTokens})
@@ -159,6 +174,9 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 		if err := r.statusWriter(runtime, rep, elapsed); err != nil {
 			r.send(noticeMsg{text: "status file write failed: " + err.Error()})
 		}
+	}
+	if r.afterRun != nil {
+		r.afterRun(ctx, task, runtime, rep, elapsed)
 	}
 	r.send(reportFor(rep, r.maxTokens))
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,6 +210,40 @@ func TestHeadlessJSONOnlyUnreachableEndpointPreservesConnectionError(t *testing.
 	}
 }
 
+func TestHeadlessLLMMaxRetriesZeroDisablesRetry(t *testing.T) {
+	t.Chdir(t.TempDir())
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Status: 503, Body: `{"error":"model is loading"}`},
+		llmtest.Mock{Body: `{"choices":[{"message":{"role":"assistant","content":"unused"}}]}`},
+	)
+	cfg := config.Config{
+		Endpoint:                srv.URL + "/v1",
+		Model:                   "loading-model",
+		ToolFormat:              config.DefaultToolFormat,
+		Effort:                  config.DefaultEffort,
+		MaxSteps:                1,
+		MaxContextTokens:        config.DefaultMaxContextTokens,
+		ChurnRounds:             config.DefaultChurnRounds,
+		LLMMaxRetries:           0,
+		LLMRetryableStatusCodes: append([]int(nil), config.DefaultLLMRetryableStatusCodes...),
+		LLMRetryBaseDelay:       time.Millisecond,
+		LLMRetryMaxDelay:        time.Millisecond,
+		LLMColdLoadTimeout:      config.DefaultLLMColdLoadTimeout,
+		LLMStreamIdleTimeout:    config.DefaultLLMStreamIdle,
+	}
+	var out bytes.Buffer
+	err := defaultRunHeadless(cfg, "fix x", "true", lintOpts{}, &out)
+	if err == nil {
+		t.Fatal("retryable 503 should fail when retry count is explicitly zero")
+	}
+	if n := len(srv.Requests()); n != 1 {
+		t.Fatalf("requests = %d, want 1 with retry disabled\n%s", n, out.String())
+	}
+	if strings.Contains(out.String(), "retrying") {
+		t.Fatalf("output shows retry even though LLMMaxRetries is zero:\n%s", out.String())
+	}
+}
+
 func TestBuildRunSummaryAndStatusFile(t *testing.T) {
 	rep := &agent.Report{
 		Reason:      agent.ReasonSuccess,
@@ -235,5 +270,194 @@ func TestBuildRunSummaryAndStatusFile(t *testing.T) {
 	}
 	if got.Model != "m" || got.Verify == nil || got.Verify.Command != "go test" {
 		t.Fatalf("status file summary wrong: %+v", got)
+	}
+}
+
+func TestBuildRunSummaryFailureCodes(t *testing.T) {
+	cfg := config.Config{Model: "m", Endpoint: "http://e/v1", MaxContextTokens: 123}
+	cases := []struct {
+		name string
+		rep  *agent.Report
+		err  error
+		want string
+	}{
+		{
+			name: "verify failed",
+			rep:  &agent.Report{Reason: agent.ReasonAnswered, FinalVerify: agent.VerifyResult{Command: "go test", ExitCode: 1, Stdout: "FAIL first line\nmore"}},
+			want: "verify_failed",
+		},
+		{
+			name: "unverified",
+			rep:  &agent.Report{Reason: agent.ReasonUnverified},
+			want: "unverified",
+		},
+		{
+			name: "model api error",
+			rep:  &agent.Report{Reason: agent.ReasonError, Err: &llm.APIError{StatusCode: 503, Body: "model loading"}},
+			want: "model_error",
+		},
+		{
+			name: "json invalid",
+			rep:  &agent.Report{Reason: agent.ReasonError, Err: errors.New("final assistant answer must be valid JSON only: invalid character")},
+			want: "json_invalid",
+		},
+		{
+			name: "context too small",
+			rep:  &agent.Report{Reason: agent.ReasonError, Err: agent.ErrWindowTooSmall},
+			want: "context_too_small",
+		},
+		{
+			name: "budget",
+			rep:  &agent.Report{Reason: agent.ReasonBudgetExceeded, Budget: &agent.BudgetEvidence{Kind: agent.BudgetSteps, Limit: "3", Observed: "4"}},
+			want: "budget_exceeded",
+		},
+		{
+			name: "repetition",
+			rep:  &agent.Report{Reason: agent.ReasonChurn, Churn: &agent.ChurnEvidence{Kind: agent.ChurnRepeatedCall, Artifact: "read_file repeated"}},
+			want: "repetition_halt",
+		},
+		{
+			name: "edit failed",
+			rep:  &agent.Report{Reason: agent.ReasonChurn, Churn: &agent.ChurnEvidence{Kind: agent.ChurnEditFailed, Artifact: "edit_file kept failing"}},
+			want: "edit_failed",
+		},
+		{
+			name: "interrupted",
+			rep:  &agent.Report{Reason: agent.ReasonInterrupted},
+			want: "interrupted",
+		},
+		{
+			name: "config error without report",
+			err:  errors.New("config: parse profile bad.json: invalid character"),
+			want: "config_error",
+		},
+		{
+			name: "nil report internal",
+			err:  errors.New("boom"),
+			want: "internal_error",
+		},
+		{
+			name: "answered",
+			rep:  &agent.Report{Reason: agent.ReasonAnswered},
+			want: "answered",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := buildRunSummary(cfg, "go test", tc.rep, time.Second, tc.err)
+			if s.FailureCode != tc.want {
+				t.Fatalf("FailureCode = %q, want %q; detail=%+v", s.FailureCode, tc.want, s.FailureDetail)
+			}
+			if s.FailureDetail == nil {
+				t.Fatalf("FailureDetail missing for %s", tc.want)
+			}
+			if strings.Contains(fmt.Sprint(s.FailureDetail), "test-token-value") {
+				t.Fatalf("failure detail leaked secret: %+v", s.FailureDetail)
+			}
+		})
+	}
+}
+
+func TestBuildRunSummaryRepeatedReadFailureDetail(t *testing.T) {
+	rep := &agent.Report{
+		Reason: agent.ReasonChurn,
+		Churn: &agent.ChurnEvidence{
+			Kind:     agent.ChurnRepeatedCall,
+			Class:    "repeated_read_file",
+			Tool:     "read_file",
+			Artifact: "read_file src/app.ts repeated 6 times with unchanged content",
+		},
+		ToolCounters: agent.ToolCounters{RepeatedReadFile: 5},
+	}
+	s := buildRunSummary(config.Config{Model: "m", Endpoint: "http://e/v1", MaxContextTokens: 123}, "", rep, time.Second, nil)
+	if s.FailureCode != "repetition_halt" || s.FailureDetail == nil ||
+		s.FailureDetail.Class != "repeated_read_file" || s.FailureDetail.Tool != "read_file" {
+		t.Fatalf("failure detail wrong: code=%s detail=%+v", s.FailureCode, s.FailureDetail)
+	}
+	if s.ToolCounters == nil || s.ToolCounters.RepeatedReadFile != 5 {
+		t.Fatalf("tool counters wrong: %+v", s.ToolCounters)
+	}
+}
+
+func TestBuildRunSummarySuccessOmitsFailureCodeAndSerializesCounters(t *testing.T) {
+	rep := &agent.Report{
+		Reason: agent.ReasonSuccess,
+		ToolCounters: agent.ToolCounters{
+			InvalidToolCalls: 1,
+			RepeatedReadFile: 2,
+			RepeatedEdits:    3,
+			FailedEdits:      4,
+			NoOpEdits:        5,
+			VerifyAttempts:   6,
+			ToolErrors:       7,
+		},
+	}
+	s := buildRunSummary(config.Config{Model: "m"}, "", rep, time.Second, nil)
+	if s.FailureCode != "" || s.FailureDetail != nil {
+		t.Fatalf("success should omit failure fields, got code=%q detail=%+v", s.FailureCode, s.FailureDetail)
+	}
+	if s.ToolCounters == nil || s.ToolCounters.InvalidToolCalls != 1 || s.ToolCounters.VerifyAttempts != 6 {
+		t.Fatalf("tool counters missing/wrong: %+v", s.ToolCounters)
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"tool_counters"`, `"invalid_tool_calls":1`, `"repeated_read_file":2`, `"verify_attempts":6`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("summary JSON missing %s: %s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "failure_code") {
+		t.Fatalf("success JSON should omit failure_code: %s", raw)
+	}
+}
+
+func TestBenchmarkSummaryIncludesModeAndZeroCounters(t *testing.T) {
+	rep := &agent.Report{Reason: agent.ReasonAnswered}
+	s := buildRunSummary(config.Config{Model: "m", BenchmarkMode: true}, "", rep, time.Second, nil)
+	if !s.BenchmarkMode {
+		t.Fatal("benchmark_mode should be true")
+	}
+	if s.ToolCounters == nil {
+		t.Fatal("benchmark mode should include zero tool_counters")
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"benchmark_mode":true`, `"tool_counters"`, `"invalid_tool_calls":0`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("benchmark summary missing %s: %s", want, raw)
+		}
+	}
+}
+
+func TestBenchmarkExitCodeMap(t *testing.T) {
+	cases := map[string]int{
+		"verify_failed":     benchmarkExitVerify,
+		"unverified":        benchmarkExitVerify,
+		"model_error":       benchmarkExitModel,
+		"tool_call_invalid": benchmarkExitTool,
+		"tool_error":        benchmarkExitTool,
+		"context_too_small": benchmarkExitContext,
+		"repetition_halt":   benchmarkExitRepetition,
+		"edit_failed":       benchmarkExitRepetition,
+		"json_invalid":      benchmarkExitJSON,
+		"budget_exceeded":   benchmarkExitBudget,
+		"config_error":      benchmarkExitConfigError,
+		"interrupted":       benchmarkExitInterrupted,
+		"internal_error":    benchmarkExitInternal,
+		"answered":          benchmarkExitAnswered,
+	}
+	for code, want := range cases {
+		t.Run(code, func(t *testing.T) {
+			if got := benchmarkExitCode(runSummary{FailureCode: code}); got != want {
+				t.Fatalf("exit = %d, want %d", got, want)
+			}
+		})
+	}
+	if got := benchmarkExitCode(runSummary{Success: true}); got != 0 {
+		t.Fatalf("success exit = %d, want 0", got)
 	}
 }

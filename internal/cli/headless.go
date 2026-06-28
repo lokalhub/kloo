@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/edit"
 	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/tools"
 )
@@ -34,11 +36,11 @@ const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
 func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return maybeBenchmarkSetupError(cfg, err)
 	}
 	ws, err := tools.NewWorkspace(cwd)
 	if err != nil {
-		return err
+		return maybeBenchmarkSetupError(cfg, err)
 	}
 	// Resolve the verify command: deprecated --verify override, else auto-detect,
 	// else "" (unverified — the run can only end in answered/unverified, not success).
@@ -48,33 +50,40 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	lintCmd, lintPerFile := resolveLintCommand(lint.Override, lint.Disabled, cwd, writerLogf(out))
 	adapter, err := tools.SelectAdapter(cfg.ToolFormat, tools.EndpointCaps{SupportsTools: true})
 	if err != nil {
-		return err
+		return maybeBenchmarkSetupError(cfg, err)
 	}
 
 	// MCP: connect configured servers (non-fatal) + register their tools alongside
 	// the builtins; the startup/trust lines go to out. Closed on return.
 	ctx := context.Background()
-	reg, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
+	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
+	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
+	systemPrompt := defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
+	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
-		Client:        llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey)),
-		Adapter:       adapter,
-		Registry:      reg,
-		Verifier:      buildVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
-		Linter:        buildLinter(ws, lintCmd, lintPerFile),
-		Budget:        agent.NewBudget(cfg, nil),
-		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
-		Checkpoint:    agent.NewGitCheckpointer(cwd),
-		Root:          ws.Root(),
-		ContextTokens: cfg.MaxContextTokens,
-		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:        defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out)),
-		StallRounds:   cfg.ChurnRounds,
-		Endpoint:      cfg.Endpoint,
-		Model:         cfg.Model,
-		Temperature:   cfg.Temperature,
-		NoThink:       cfg.NoThink,
+		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout)),
+		Adapter:              adapter,
+		Registry:             reg,
+		Verifier:             buildVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Linter:               buildLinter(ws, lintCmd, lintPerFile),
+		Budget:               agent.NewBudget(cfg, nil),
+		Churn:                agent.NewChurnDetector(cfg.ChurnRounds),
+		Checkpoint:           agent.NewGitCheckpointer(cwd),
+		Root:                 ws.Root(),
+		ContextTokens:        cfg.MaxContextTokens,
+		Memory:               agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
+		System:               systemPrompt,
+		StallRounds:          cfg.ChurnRounds,
+		Endpoint:             cfg.Endpoint,
+		Model:                cfg.Model,
+		Temperature:          cfg.Temperature,
+		NoThink:              cfg.NoThink,
+		LLMRetries:           cfg.LLMMaxRetries,
+		RetryBaseDelay:       cfg.LLMRetryBaseDelay,
+		RetryMaxDelay:        cfg.LLMRetryMaxDelay,
+		RetryableStatusCodes: cfg.LLMRetryableStatusCodes,
 	}
 
 	// Stream progress/tools to out. Deltas are buffered and flushed on the next
@@ -104,7 +113,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		fmt.Fprintf(out, "⟳ model call failed transiently — retrying %d/%d in %s\n", attempt, max, wait.Round(time.Second))
 	}
 
-	fmt.Fprintf(out, "kloo headless run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
+	fmt.Fprintf(out, "kloo task run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
 		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)
 	fmt.Fprintf(out, "task: %s\n\n", task)
 
@@ -117,8 +126,17 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	flush()
 	fmt.Fprintln(out)
 	printHeadlessReport(out, rep, elapsed)
-	if cfg.JSONSummary {
-		printHeadlessJSON(out, cfg, verifyCmd, rep, elapsed, runErr)
+	summary := buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr)
+	memoryStore(ctx, cfg, mcpMgr, cwd, task, summary, rep, writerLogf(out))
+	if cfg.JSONSummary || cfg.BenchmarkMode {
+		printRunSummaryJSON(out, summary)
+	}
+	if cfg.BenchmarkMode {
+		code := benchmarkExitCode(summary)
+		if code == 0 {
+			return nil
+		}
+		return exitError{code: code, err: fmt.Errorf("benchmark run did not reach success (failure_code: %s)", summary.FailureCode)}
 	}
 	if runErr != nil {
 		return runErr
@@ -126,9 +144,16 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	// Exit non-zero unless the loop stopped because the verify passed (success),
 	// so a script/CI run can branch on kloo's exit code.
 	if rep == nil || rep.Reason != agent.ReasonSuccess {
-		return fmt.Errorf("headless run did not reach success (reason: %s)", reportReason(rep))
+		return fmt.Errorf("task run did not reach success (reason: %s)", reportReason(rep))
 	}
 	return nil
+}
+
+func maybeBenchmarkSetupError(cfg config.Config, err error) error {
+	if cfg.BenchmarkMode {
+		return exitError{code: benchmarkExitConfigError, err: err}
+	}
+	return err
 }
 
 // headlessToolLine renders one dispatched tool call as a compact log line.
@@ -196,6 +221,9 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 		}
 		fmt.Fprintf(out, "  rails:   %s\n", strings.Join(parts, ", "))
 	}
+	if !toolCountersZero(rep.ToolCounters) {
+		fmt.Fprintf(out, "  tool counters: %s\n", formatToolCounters(rep.ToolCounters))
+	}
 	if rep.RolledBack {
 		fmt.Fprintln(out, "  rolled back to checkpoint")
 	}
@@ -223,7 +251,27 @@ type verifySummary struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+type failureDetail struct {
+	Source     string `json:"source,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Class      string `json:"class,omitempty"`
+	Tool       string `json:"tool,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+	Message    string `json:"message,omitempty"`
+}
+
+type toolCountersSummary struct {
+	InvalidToolCalls int `json:"invalid_tool_calls"`
+	RepeatedReadFile int `json:"repeated_read_file"`
+	RepeatedEdits    int `json:"repeated_edits"`
+	FailedEdits      int `json:"failed_edits"`
+	NoOpEdits        int `json:"no_op_edits"`
+	VerifyAttempts   int `json:"verify_attempts"`
+	ToolErrors       int `json:"tool_errors"`
+}
+
 type runSummary struct {
+	BenchmarkMode  bool           `json:"benchmark_mode,omitempty"`
 	Model          string         `json:"model"`
 	Endpoint       string         `json:"endpoint"`
 	Ctx            int            `json:"ctx"`
@@ -236,16 +284,19 @@ type runSummary struct {
 	Compactions    int            `json:"compactions"`
 	Verify         *verifySummary `json:"verify,omitempty"`
 	Error          string         `json:"error,omitempty"`
+	FailureCode    string         `json:"failure_code,omitempty"`
+	FailureDetail  *failureDetail `json:"failure_detail,omitempty"`
 	TranscriptTail string         `json:"transcript_tail,omitempty"`
 	// RailFires tallies the soft recovery rails that fired (corrective injected, run
 	// continued), keyed by rail name. Omitted when none fired, so a clean run's JSON is
 	// unchanged. Lets a benchmark assert a run's self-corrections (e.g. confirm-finish=1).
-	RailFires map[string]int `json:"rail_fires,omitempty"`
+	RailFires    map[string]int       `json:"rail_fires,omitempty"`
+	ToolCounters *toolCountersSummary `json:"tool_counters,omitempty"`
 }
 
 func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) runSummary {
 	round2 := func(f float64) float64 { return math.Round(f*100) / 100 }
-	s := runSummary{Model: cfg.Model, Endpoint: cfg.Endpoint, Ctx: cfg.MaxContextTokens, ElapsedSeconds: round2(elapsed.Seconds())}
+	s := runSummary{BenchmarkMode: cfg.BenchmarkMode, Model: cfg.Model, Endpoint: cfg.Endpoint, Ctx: cfg.MaxContextTokens, ElapsedSeconds: round2(elapsed.Seconds())}
 	if rep != nil {
 		s.Reason = string(rep.Reason)
 		s.Success = rep.Reason == agent.ReasonSuccess
@@ -263,6 +314,18 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		}
 		s.TranscriptTail = transcriptTail(rep.Transcript, 600)
 		s.RailFires = rep.RailFires
+		if cfg.BenchmarkMode || !toolCountersZero(rep.ToolCounters) {
+			tc := rep.ToolCounters
+			s.ToolCounters = &toolCountersSummary{
+				InvalidToolCalls: tc.InvalidToolCalls,
+				RepeatedReadFile: tc.RepeatedReadFile,
+				RepeatedEdits:    tc.RepeatedEdits,
+				FailedEdits:      tc.FailedEdits,
+				NoOpEdits:        tc.NoOpEdits,
+				VerifyAttempts:   tc.VerifyAttempts,
+				ToolErrors:       tc.ToolErrors,
+			}
+		}
 	}
 	if runErr != nil && s.Error == "" {
 		s.Error = runErr.Error()
@@ -270,7 +333,188 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 	if verifyCmd != "" && s.Verify == nil {
 		s.Verify = &verifySummary{Command: verifyCmd}
 	}
+	s.FailureCode, s.FailureDetail = classifyFailure(rep, runErr)
 	return s
+}
+
+func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
+	if rep != nil && rep.Reason == agent.ReasonSuccess {
+		return "", nil
+	}
+	detail := &failureDetail{Source: "internal"}
+	if rep != nil {
+		detail.Reason = string(rep.Reason)
+	}
+	err := runErr
+	if rep != nil && rep.Err != nil {
+		err = rep.Err
+	}
+	msg := boundedMessage(err)
+	if rep == nil {
+		if strings.Contains(msg, "config:") {
+			detail.Source = "config"
+			detail.Class = "config_error"
+			detail.Message = msg
+			return "config_error", detail
+		}
+		detail.Class = "nil_report"
+		detail.Message = msg
+		return "internal_error", detail
+	}
+	switch rep.Reason {
+	case agent.ReasonBudgetExceeded:
+		detail.Source = "budget"
+		if rep.Budget != nil {
+			detail.Class = string(rep.Budget.Kind)
+			detail.Message = fmt.Sprintf("%s/%s", rep.Budget.Observed, rep.Budget.Limit)
+		}
+		return "budget_exceeded", detail
+	case agent.ReasonInterrupted:
+		detail.Source = "internal"
+		detail.Class = "interrupted"
+		detail.Message = msg
+		return "interrupted", detail
+	case agent.ReasonChurn:
+		detail.Source = "rail"
+		if rep.Churn != nil {
+			detail.Class = string(rep.Churn.Kind)
+			if rep.Churn.Class != "" {
+				detail.Class = rep.Churn.Class
+			}
+			detail.Tool = rep.Churn.Tool
+			detail.Message = boundedString(rep.Churn.Artifact, 240)
+			if rep.Churn.Kind == agent.ChurnEditFailed {
+				return "edit_failed", detail
+			}
+		}
+		return "repetition_halt", detail
+	case agent.ReasonUnverified:
+		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
+			return verifyFailure(rep, detail)
+		}
+		detail.Source = "verify"
+		detail.Class = "no_verify_command"
+		detail.Message = "no verify command was available"
+		return "unverified", detail
+	case agent.ReasonAnswered:
+		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
+			return verifyFailure(rep, detail)
+		}
+		detail.Source = "internal"
+		detail.Class = "answered"
+		return "answered", detail
+	case agent.ReasonError:
+		return classifyErrorFailure(rep, err, detail)
+	default:
+		detail.Class = "unknown_reason"
+		detail.Message = msg
+		return "internal_error", detail
+	}
+}
+
+func verifyFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
+	detail.Source = "verify"
+	detail.Class = "verify_failed"
+	line := firstNonEmptyLine(rep.FinalVerify.Stdout, rep.FinalVerify.Stderr)
+	if line != "" {
+		detail.Message = boundedString(line, 240)
+	}
+	return "verify_failed", detail
+}
+
+func classifyErrorFailure(rep *agent.Report, err error, detail *failureDetail) (string, *failureDetail) {
+	detail.Message = boundedMessage(err)
+	switch {
+	case errors.Is(err, agent.ErrWindowTooSmall) || strings.Contains(strings.ToLower(detail.Message), "context") && strings.Contains(strings.ToLower(detail.Message), "too small"):
+		detail.Source = "config"
+		detail.Class = "window_too_small"
+		return "context_too_small", detail
+	case strings.Contains(detail.Message, "valid JSON only"):
+		detail.Source = "json"
+		detail.Class = "json_decoder"
+		return "json_invalid", detail
+	case errors.Is(err, tools.ErrMalformedToolCall) || strings.Contains(detail.Message, "no usable tool call"):
+		detail.Source = "tool"
+		detail.Class = "malformed_tool_call"
+		return "tool_call_invalid", detail
+	case errors.Is(err, tools.ErrUnknownTool) || errors.Is(err, tools.ErrInvalidArgs):
+		detail.Source = "tool"
+		detail.Class = "invalid_tool"
+		return "tool_call_invalid", detail
+	case errors.Is(err, edit.ErrSearchNotFound) || errors.Is(err, edit.ErrAmbiguousMatch) || errors.Is(err, edit.ErrMalformedBlock):
+		detail.Source = "edit"
+		detail.Class = "edit_apply"
+		return "edit_failed", detail
+	case strings.HasPrefix(detail.Message, "verify:") || (rep.FinalVerify.Command != "" && rep.FinalVerify.Err != nil):
+		return verifyFailure(rep, detail)
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		detail.Source = "llm"
+		detail.Class = "api_error"
+		detail.HTTPStatus = apiErr.StatusCode
+		return "model_error", detail
+	}
+	if strings.Contains(detail.Message, "llm:") || strings.Contains(detail.Message, "model call failed") {
+		detail.Source = "llm"
+		detail.Class = "model_error"
+		return "model_error", detail
+	}
+	if strings.Contains(detail.Message, "config:") {
+		detail.Source = "config"
+		detail.Class = "config_error"
+		return "config_error", detail
+	}
+	detail.Source = "internal"
+	detail.Class = "internal_error"
+	return "internal_error", detail
+}
+
+func toolCountersZero(c agent.ToolCounters) bool {
+	return c == agent.ToolCounters{}
+}
+
+func formatToolCounters(c agent.ToolCounters) string {
+	parts := []string{}
+	add := func(name string, n int) {
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", name, n))
+		}
+	}
+	add("invalid_tool_calls", c.InvalidToolCalls)
+	add("repeated_read_file", c.RepeatedReadFile)
+	add("repeated_edits", c.RepeatedEdits)
+	add("failed_edits", c.FailedEdits)
+	add("no_op_edits", c.NoOpEdits)
+	add("verify_attempts", c.VerifyAttempts)
+	add("tool_errors", c.ToolErrors)
+	return strings.Join(parts, " ")
+}
+
+func firstNonEmptyLine(values ...string) string {
+	for _, v := range values {
+		for _, line := range strings.Split(v, "\n") {
+			if s := strings.TrimSpace(line); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func boundedMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return boundedString(err.Error(), 400)
+}
+
+func boundedString(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // printHeadlessJSON emits a compact, machine-readable result line (prefixed
@@ -278,7 +522,11 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 // reason + success, steps/tokens/tokens-per-sec/elapsed, the final verify, any error,
 // and a short transcript tail. A harness greps the prefix and parses the rest.
 func printHeadlessJSON(out io.Writer, cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) {
-	b, err := json.Marshal(buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr))
+	printRunSummaryJSON(out, buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr))
+}
+
+func printRunSummaryJSON(out io.Writer, summary runSummary) {
+	b, err := json.Marshal(summary)
 	if err != nil {
 		return
 	}

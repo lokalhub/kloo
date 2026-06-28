@@ -72,6 +72,81 @@ func TestLoopDoesNotRetryDeterministicError(t *testing.T) {
 	}
 }
 
+func TestLoopRetriesConfiguredCustomStatus(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Status: 418, Body: `{"error":"warming teapot"}`},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.LLMRetries = 1
+	loop.RetryBaseDelay = time.Millisecond
+	loop.RetryableStatusCodes = []int{418}
+
+	rep, err := loop.Run(context.Background(), "is it set up?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q, want success", rep.Reason)
+	}
+	if n := len(srv.Requests()); n != 2 {
+		t.Fatalf("requests = %d, want 2", n)
+	}
+}
+
+func TestLoopZeroRetriesDisablesRetry(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Status: 503, Body: `{"error":"model is loading"}`},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.LLMRetries = 0
+	loop.RetryBaseDelay = time.Millisecond
+	retried := false
+	loop.OnRetry = func(attempt, max int, err error, wait time.Duration) { retried = true }
+
+	rep, err := loop.Run(context.Background(), "is it set up?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonError {
+		t.Fatalf("reason = %q, want error after the first retryable failure", rep.Reason)
+	}
+	if retried {
+		t.Fatal("OnRetry fired even though LLMRetries was explicitly zero")
+	}
+	if n := len(srv.Requests()); n != 1 {
+		t.Fatalf("requests = %d, want 1 with retry disabled", n)
+	}
+}
+
+func TestLoopRetryMaxDelayCapsBackoff(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Status: 503, Body: `{"error":"loading"}`},
+		llmtest.Mock{Status: 503, Body: `{"error":"loading"}`},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.LLMRetries = 2
+	loop.RetryBaseDelay = time.Millisecond
+	loop.RetryMaxDelay = time.Millisecond
+	var waits []time.Duration
+	loop.OnRetry = func(attempt, max int, err error, wait time.Duration) {
+		waits = append(waits, wait)
+	}
+
+	rep, err := loop.Run(context.Background(), "is it set up?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q, want success", rep.Reason)
+	}
+	if len(waits) != 2 || waits[0] != time.Millisecond || waits[1] != time.Millisecond {
+		t.Fatalf("waits = %v, want capped millisecond waits", waits)
+	}
+}
+
 // TestLoopRetriesExhaustThenError: when every attempt fails transiently, the loop
 // exhausts its retries and surfaces the error (rather than looping forever).
 func TestLoopRetriesExhaustThenError(t *testing.T) {
@@ -134,6 +209,7 @@ func TestIsRetryableLLMError(t *testing.T) {
 		{"stream incomplete", llm.ErrStreamIncomplete, true},
 		{"deadline", context.DeadlineExceeded, true},
 		{"503", &llm.APIError{StatusCode: 503}, true},
+		{"502", &llm.APIError{StatusCode: 502}, true},
 		{"429", &llm.APIError{StatusCode: 429}, true},
 		{"408", &llm.APIError{StatusCode: 408}, true},
 		{"400", &llm.APIError{StatusCode: 400}, false},

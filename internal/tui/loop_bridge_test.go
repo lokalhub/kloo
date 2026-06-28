@@ -213,6 +213,64 @@ func TestLoopRunnerStatusWriterAndFailureNotice(t *testing.T) {
 	}
 }
 
+func TestLoopRunnerRunHooksWrapTaskRun(t *testing.T) {
+	root := t.TempDir()
+	ws, err := tools.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{MaxSteps: 5, MaxContextTokens: 8000, ChurnRounds: 3}
+	loop := &agent.Loop{
+		Client:        proseClient{},
+		Adapter:       tools.NativeFCAdapter{},
+		Registry:      tools.NewRegistry(),
+		Budget:        agent.NewBudget(cfg, nil),
+		Churn:         agent.NewChurnDetector(3),
+		Root:          root,
+		ContextTokens: 8000,
+		System:        "you are kloo",
+	}
+	var beforeTask, afterTask string
+	var afterRep *agent.Report
+	var afterRuntime RuntimeConfig
+	r := NewLoopRunner(loop, ws, 0).WithRunHooks(
+		func(ctx context.Context, task string, runtime RuntimeConfig) string {
+			beforeTask = task
+			return "\n\nExternal memory recall:\nremember the prior decision"
+		},
+		func(ctx context.Context, task string, runtime RuntimeConfig, rep *agent.Report, elapsed time.Duration) {
+			afterTask = task
+			afterRuntime = runtime
+			afterRep = rep
+		},
+	)
+	r.setSend(func(tea.Msg) {})
+
+	runtime := RuntimeConfig{
+		Endpoint:      "https://example.test/v1",
+		Model:         "new-model",
+		ContextTokens: 16000,
+		ToolFormat:    "native",
+		NewClient: func(endpoint, model, apiKey string) llm.LLMClient {
+			return proseClient{}
+		},
+	}
+	r.Start(context.Background(), "answer with memory", runtime, ModeAuto, nil)
+
+	if beforeTask != "answer with memory" || afterTask != "answer with memory" {
+		t.Fatalf("hooks saw tasks before=%q after=%q", beforeTask, afterTask)
+	}
+	if !strings.Contains(loop.System, "External memory recall") || !strings.Contains(loop.System, "prior decision") {
+		t.Fatalf("before-run recall section was not injected into system prompt:\n%s", loop.System)
+	}
+	if afterRuntime.Endpoint != runtime.Endpoint || afterRuntime.Model != runtime.Model {
+		t.Fatalf("after hook got runtime %+v, want %+v", afterRuntime, runtime)
+	}
+	if afterRep == nil || afterRep.Reason != agent.ReasonAnswered {
+		t.Fatalf("after hook got rep %+v, want answered report", afterRep)
+	}
+}
+
 // TestSubmitTaskRejectedWhileRunning: a non-slash submission while a run is
 // active is ignored (with a message) — it must NOT launch a second run on the
 // shared loop (the data-race / uncancelable-run bug).

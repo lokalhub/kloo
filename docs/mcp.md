@@ -17,8 +17,8 @@ make in your profile file.
 
 - **More tools, no kloo changes.** Point kloo at any MCP server (a memory backend,
   a docs index, a database tool, …) and its tools join the vocabulary.
-- **Foundation for bring-your-own-memory.** kloo's memory feature can later target
-  an MCP memory backend (e.g. mempalace) through this same client.
+- **Bring-your-own-memory.** kloo can call configured MCP recall/store tools at
+  task-run boundaries through the reserved `memory` profile block.
 
 If you don't configure any server, nothing changes — kloo behaves exactly as
 before (the five builtins + `finish`).
@@ -58,6 +58,28 @@ block; the model-name lookup ignores it (just like `efforts`).
   "mcp": { "maxExposedTools": 16 }                  // optional global cap (default 16) — see Curated vs lazy
 }
 ```
+
+For BYO memory, add a reserved top-level `memory` block that points at one of
+those MCP servers:
+
+```jsonc
+{
+  "mcpServers": {
+    "memory": {"command": "mempalace-mcp", "expose": ["recall", "store"]}
+  },
+  "memory": {
+    "enabled": true,
+    "server": "memory",
+    "recallTool": "recall",
+    "storeTool": "store",
+    "maxRecallBytes": 4096,
+    "storeOnFailure": true
+  }
+}
+```
+
+`kloo doctor` shows this block without connecting to the server. During a task run,
+recall/store failures are logged and the run continues.
 
 ### Server fields
 

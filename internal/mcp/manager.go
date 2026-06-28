@@ -94,6 +94,18 @@ func (m *Manager) Register(reg *tools.Registry) {
 	}
 }
 
+func (m *Manager) Call(ctx context.Context, server, tool string, args map[string]any) (tools.Result, error) {
+	if m == nil {
+		return tools.Result{}, fmt.Errorf("mcp: memory server %q is not connected", server)
+	}
+	for _, s := range m.servers {
+		if s.client != nil && s.client.Name == server {
+			return s.client.Call(ctx, tool, args)
+		}
+	}
+	return tools.Result{}, fmt.Errorf("mcp: memory server %q is not connected", server)
+}
+
 // Close shuts every connected session down, best-effort: one client's Close error
 // does not skip the rest. Called via defer on loop/TUI exit; it terminates stdio
 // child processes (the SDK's CommandTransport SIGTERMs after a grace window).

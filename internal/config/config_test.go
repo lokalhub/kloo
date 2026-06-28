@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // envFunc builds a getenv closure over a map for deterministic, isolated tests.
@@ -13,10 +14,11 @@ func envFunc(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-func strp(s string) *string { return &s }
-func fp(f float64) *float64 { return &f }
-func ip(i int) *int         { return &i }
-func bp(b bool) *bool       { return &b }
+func strp(s string) *string               { return &s }
+func fp(f float64) *float64               { return &f }
+func ip(i int) *int                       { return &i }
+func bp(b bool) *bool                     { return &b }
+func durp(d time.Duration) *time.Duration { return &d }
 
 // writeProfile writes a profile JSON to a temp file and returns its path.
 func writeProfile(t *testing.T, body string) string {
@@ -214,11 +216,136 @@ func TestResolve(t *testing.T) {
 			// struct can be compared without listing them in every want literal.
 			// (Config now holds a map, so it is no longer != comparable.)
 			got.MCPServers, got.MCPMaxExposedTools, got.MCPDisabled = nil, 0, false
+			got.LLMMaxRetries = tc.want.LLMMaxRetries
+			got.LLMRetryableStatusCodes = tc.want.LLMRetryableStatusCodes
+			got.LLMRetryBaseDelay = tc.want.LLMRetryBaseDelay
+			got.LLMRetryMaxDelay = tc.want.LLMRetryMaxDelay
+			got.LLMColdLoadTimeout = tc.want.LLMColdLoadTimeout
+			got.LLMStreamIdleTimeout = tc.want.LLMStreamIdleTimeout
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Resolve mismatch\n got: %+v\nwant: %+v", got, tc.want)
 			}
 		})
 	}
+}
+
+func TestResolveRetryPolicyPrecedence(t *testing.T) {
+	profile := writeProfile(t, `{
+		"local": {
+			"llmMaxRetries": 1,
+			"llmRetryCodes": [503],
+			"llmRetryBaseDelay": "3s",
+			"llmRetryMaxDelay": "9s",
+			"llmColdLoadTimeout": "2m",
+			"llmStreamIdleTimeout": "4m"
+		}
+	}`)
+	flags := Flags{
+		LLMMaxRetries:           ip(4),
+		LLMRetryableStatusCodes: []int{429, 408, 429},
+		LLMRetryBaseDelay:       durp(500 * time.Millisecond),
+		LLMRetryMaxDelay:        durp(5 * time.Second),
+		LLMColdLoadTimeout:      durp(7 * time.Minute),
+		LLMStreamIdleTimeout:    durp(3 * time.Minute),
+	}
+	env := map[string]string{
+		EnvLLMMaxRetries:        "2",
+		EnvLLMRetryCodes:        "500,502",
+		EnvLLMRetryBaseDelay:    "1s",
+		EnvLLMRetryMaxDelay:     "6s",
+		EnvLLMColdLoadTimeout:   "90",
+		EnvLLMStreamIdleTimeout: "120",
+	}
+	got, err := Resolve(flags, envFunc(env), profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LLMMaxRetries != 4 {
+		t.Fatalf("LLMMaxRetries = %d", got.LLMMaxRetries)
+	}
+	if !reflect.DeepEqual(got.LLMRetryableStatusCodes, []int{408, 429}) {
+		t.Fatalf("retry codes = %v", got.LLMRetryableStatusCodes)
+	}
+	if got.LLMRetryBaseDelay != 500*time.Millisecond || got.LLMRetryMaxDelay != 5*time.Second ||
+		got.LLMColdLoadTimeout != 7*time.Minute || got.LLMStreamIdleTimeout != 3*time.Minute {
+		t.Fatalf("durations wrong: base=%s max=%s cold=%s idle=%s",
+			got.LLMRetryBaseDelay, got.LLMRetryMaxDelay, got.LLMColdLoadTimeout, got.LLMStreamIdleTimeout)
+	}
+}
+
+func TestResolveRetryPolicyEnvAndProfile(t *testing.T) {
+	profile := writeProfile(t, `{"local":{"llmMaxRetries":1,"llmRetryCodes":[503],"llmRetryBaseDelay":"3s","llmRetryMaxDelay":"9s","llmColdLoadTimeout":"2m","llmStreamIdleTimeout":"4m"}}`)
+	got, err := Resolve(Flags{}, envFunc(map[string]string{
+		EnvLLMMaxRetries:      "2",
+		EnvLLMRetryCodes:      "500,502",
+		EnvLLMRetryBaseDelay:  "1s",
+		EnvLLMRetryMaxDelay:   "6s",
+		EnvLLMColdLoadTimeout: "90",
+	}), profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LLMMaxRetries != 2 || !reflect.DeepEqual(got.LLMRetryableStatusCodes, []int{500, 502}) ||
+		got.LLMRetryBaseDelay != time.Second || got.LLMRetryMaxDelay != 6*time.Second ||
+		got.LLMColdLoadTimeout != 90*time.Second || got.LLMStreamIdleTimeout != 4*time.Minute {
+		t.Fatalf("env/profile retry precedence wrong: %+v", got)
+	}
+}
+
+func TestResolveMemoryProfileBlock(t *testing.T) {
+	profile := writeProfile(t, `{
+		"local": {"toolFormat": "xml"},
+		"memory": {
+			"enabled": true,
+			"server": "memory",
+			"recallTool": "recall",
+			"storeTool": "store",
+			"maxRecallBytes": 4096,
+			"storeOnFailure": true
+		}
+	}`)
+	got, err := Resolve(Flags{}, envFunc(nil), profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ToolFormat != "xml" {
+		t.Fatalf("per-model entry should still apply, got toolFormat=%q", got.ToolFormat)
+	}
+	if got.Memory != (MemoryConfig{Enabled: true, Server: "memory", RecallTool: "recall", StoreTool: "store", MaxRecallBytes: 4096, StoreOnFailure: true}) {
+		t.Fatalf("memory config wrong: %+v", got.Memory)
+	}
+}
+
+func TestResolveRetryPolicyExplicitZeroDisablesRetries(t *testing.T) {
+	t.Run("profile zero", func(t *testing.T) {
+		profile := writeProfile(t, `{"local":{"llmMaxRetries":0}}`)
+		got, err := Resolve(Flags{}, envFunc(nil), profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.LLMMaxRetries != 0 {
+			t.Fatalf("LLMMaxRetries = %d, want 0", got.LLMMaxRetries)
+		}
+	})
+	t.Run("env zero", func(t *testing.T) {
+		profile := writeProfile(t, `{"local":{"llmMaxRetries":2}}`)
+		got, err := Resolve(Flags{}, envFunc(map[string]string{EnvLLMMaxRetries: "0"}), profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.LLMMaxRetries != 0 {
+			t.Fatalf("LLMMaxRetries = %d, want 0", got.LLMMaxRetries)
+		}
+	})
+	t.Run("flag zero", func(t *testing.T) {
+		got, err := Resolve(Flags{LLMMaxRetries: ip(0)}, envFunc(map[string]string{EnvLLMMaxRetries: "2"}), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.LLMMaxRetries != 0 {
+			t.Fatalf("LLMMaxRetries = %d, want 0", got.LLMMaxRetries)
+		}
+	})
 }
 
 // TestResolveMissingProfileIsNotError: a non-existent profile path resolves to

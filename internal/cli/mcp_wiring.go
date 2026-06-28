@@ -24,14 +24,14 @@ import (
 // stderr (TUI) or the headless out writer. internal/cli stays SDK-free: the only
 // MCP types it touches are mcp.Manager and mcp.ConfigFromEntries (the converter that
 // keeps internal/config from importing the SDK).
-func wireMCP(ctx context.Context, cfg config.Config, ws tools.Workspace, logf func(string, ...any)) (*tools.Registry, func() error) {
+func wireMCP(ctx context.Context, cfg config.Config, ws tools.Workspace, logf func(string, ...any)) (*tools.Registry, *mcp.Manager, func() error) {
 	reg := tools.DefaultRegistry(ws, tools.WithAllowedEnv(cfg.AllowedEnv))
 	if cfg.MCPDisabled {
-		return reg, func() error { return nil }
+		return reg, nil, func() error { return nil }
 	}
 	mgr := mcp.Connect(ctx, mcp.ConfigFromEntries(cfg.MCPServers, cfg.MCPMaxExposedTools), logf)
 	mgr.Register(reg)
-	return reg, mgr.Close
+	return reg, mgr, mgr.Close
 }
 
 // writerLogf adapts an io.Writer into the printf-style logger wireMCP/Manager use,

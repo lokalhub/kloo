@@ -1,21 +1,22 @@
 // Package cli wires the cobra root command and flag parsing for kloo.
 //
-// For Phase 00 the root runs a single one-shot completion: parse the task
-// argument + core flags, resolve config (internal/config), and stream the
-// model's reply to stdout. The autonomous loop (Phase 04) and interactive TUI
-// (Phase 05) later plug into this same seam.
+// The root parses the task argument + core flags, resolves config
+// (internal/config), and routes to either the interactive TUI (no task) or the
+// non-interactive autonomous loop (task).
 package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/lokalhub/kloo/internal/config"
-	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // SessionOpts is the user's session choice for an interactive launch: --new forces
@@ -77,9 +78,6 @@ func envTruthy(v string) bool {
 // Deps are the injectable dependencies of the root command, so tests can run
 // offline (fake client) and capture output.
 type Deps struct {
-	// NewClient builds the LLM client from resolved config. Defaults to a real
-	// llm.Client; tests inject a fake.
-	NewClient func(cfg config.Config) llm.LLMClient
 	// LaunchTUI starts the interactive TUI session (the autonomous loop wired
 	// under the Bubble Tea UI). sess carries the user's session choice (--new /
 	// --resume); lint carries the fast-advisory-lint config (--lint/--no-lint +
@@ -97,11 +95,6 @@ type Deps struct {
 }
 
 func (d *Deps) withDefaults() {
-	if d.NewClient == nil {
-		d.NewClient = func(cfg config.Config) llm.LLMClient {
-			return llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey))
-		}
-	}
 	if d.LaunchTUI == nil {
 		d.LaunchTUI = defaultLaunchTUI
 	}
@@ -132,7 +125,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagMaxSteps    int
 		flagTemp        float64
 		flagVerify      string
-		flagHeadless    bool
+		flagBenchmark   bool
 		flagEffort      string
 		flagNewSess     bool
 		flagResume      string
@@ -146,6 +139,12 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagJSONOnly    bool
 		flagStatusFile  string
 		flagNoThink     bool
+		flagRetryCodes  []int
+		flagRetryBase   time.Duration
+		flagRetryMax    time.Duration
+		flagColdLoad    time.Duration
+		flagStreamIdle  time.Duration
+		flagMaxRetries  int
 	)
 
 	cmd := &cobra.Command{
@@ -154,7 +153,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		Long: "kloo drives any OpenAI-compatible endpoint (llama.cpp, Ollama, vLLM, " +
 			"OpenAI, OpenRouter, …) to edit and verify code autonomously.\n\n" +
 			"Launch with no task for the interactive TUI session:  kloo\n" +
-			"Or pass a one-shot task to stream a reply non-interactively:  kloo \"say hi\"",
+			"Or pass a task to run the autonomous loop non-interactively:  kloo \"fix the test\"",
 		Args:          cobra.MaximumNArgs(1),
 		Version:       versionString(), // enables `kloo --version`; stamped by goreleaser ldflags
 		SilenceErrors: true,            // Execute() prints errors; avoids double-printing
@@ -212,9 +211,33 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("no-think") {
 				flags.NoThink = &flagNoThink
 			}
+			if fs.Changed("benchmark") {
+				flags.BenchmarkMode = &flagBenchmark
+			}
+			if fs.Changed("llm-max-retries") {
+				flags.LLMMaxRetries = &flagMaxRetries
+			}
+			if fs.Changed("llm-retry-codes") {
+				flags.LLMRetryableStatusCodes = flagRetryCodes
+			}
+			if fs.Changed("llm-retry-base-delay") {
+				flags.LLMRetryBaseDelay = &flagRetryBase
+			}
+			if fs.Changed("llm-retry-max-delay") {
+				flags.LLMRetryMaxDelay = &flagRetryMax
+			}
+			if fs.Changed("llm-cold-load-timeout") {
+				flags.LLMColdLoadTimeout = &flagColdLoad
+			}
+			if fs.Changed("llm-stream-idle-timeout") {
+				flags.LLMStreamIdleTimeout = &flagStreamIdle
+			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
 			if err != nil {
+				if flagBenchmark {
+					return exitError{code: benchmarkExitConfigError, err: err}
+				}
 				return err
 			}
 
@@ -224,25 +247,15 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			lopts := lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
 
 			if len(args) == 0 {
-				if flagHeadless {
-					return fmt.Errorf("--headless requires a task argument (e.g. kloo --headless --verify '…' \"do X\")")
+				if cfg.BenchmarkMode {
+					return exitError{code: benchmarkExitConfigError, err: fmt.Errorf("--benchmark requires a task argument")}
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
 				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume}, flagProfile, deps.Getenv)
 			}
 
-			if flagHeadless {
-				// A task argument + --headless → run the autonomous loop
-				// non-interactively (no TTY), streaming progress to stdout. This is
-				// the acceptance-benchmark / scripted-CI path.
-				return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
-			}
-
-			// A task argument → the non-interactive one-shot stream (scripting /
-			// the Phase-00 live smoke). The full interactive session is the no-arg TUI.
-			client := deps.NewClient(cfg)
-			return runOneShot(cmd.Context(), client, cfg, args[0], deps.Out)
+			return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
 		},
 	}
 
@@ -256,9 +269,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
-	f.StringVar(&flagVerify, "verify", "", "(deprecated) override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
-	_ = f.MarkDeprecated("verify", "kloo now auto-detects the project's build/test command — pass --verify only to override the detected one")
-	f.BoolVar(&flagHeadless, "headless", false, "run the autonomous loop non-interactively (no TTY), streaming progress to stdout; requires a task arg")
+	f.StringVar(&flagVerify, "verify", "", "override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
+	f.BoolVar(&flagBenchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
 	f.BoolVar(&flagNewSess, "new", false, "start a fresh session (the default; sessions are no longer auto-resumed)")
 	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (printed on exit; see {workspace}/.kloo/sessions)")
 	f.BoolVar(&flagNoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
@@ -266,33 +278,148 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagNoLint, "no-lint", false, "disable the fast advisory lint step (lint is on by default when a linter is detected)")
 	f.StringSliceVar(&flagAllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
 	f.StringSliceVar(&flagAllowEnv, "allow-env", nil, "env var NAMES to forward from kloo's env into run_command (repeatable/comma-separated) — the trusted-secret passthrough for a deploy/CI step; default exposes only PATH/HOME/…")
-	f.BoolVar(&flagJSON, "json", false, "in --headless, emit a compact machine-readable JSON result line at the end (model/reason/steps/tokens/tokens-per-sec/verify/error) for benchmarking")
+	f.BoolVar(&flagJSON, "json", false, "emit a compact machine-readable JSON result line at the end (model/reason/steps/tokens/tokens-per-sec/verify/error) for benchmarking")
 	f.BoolVar(&flagJSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
 	f.StringVar(&flagStatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
 	f.BoolVar(&flagNoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
+	f.IntVar(&flagMaxRetries, "llm-max-retries", config.DefaultLLMMaxRetries, "extra model-call retry attempts after the first")
+	f.IntSliceVar(&flagRetryCodes, "llm-retry-codes", config.DefaultLLMRetryableStatusCodes, "HTTP status codes retryable for model calls")
+	f.DurationVar(&flagRetryBase, "llm-retry-base-delay", config.DefaultLLMRetryBaseDelay, "first model-call retry backoff")
+	f.DurationVar(&flagRetryMax, "llm-retry-max-delay", config.DefaultLLMRetryMaxDelay, "maximum model-call retry backoff")
+	f.DurationVar(&flagColdLoad, "llm-cold-load-timeout", config.DefaultLLMColdLoadTimeout, "non-streaming model call timeout")
+	f.DurationVar(&flagStreamIdle, "llm-stream-idle-timeout", config.DefaultLLMStreamIdle, "streaming no-token idle timeout")
 
+	cmd.AddCommand(newDoctorCmd(&deps))
+	cmd.AddCommand(newProbeCmd(&deps))
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd
 }
 
-// runOneShot streams a single completion for task to out.
-func runOneShot(ctx context.Context, client llm.LLMClient, cfg config.Config, task string, out io.Writer) error {
-	req := llm.ChatRequest{
-		Model:       cfg.Model,
-		Messages:    []llm.Message{{Role: llm.RoleUser, Content: task}},
-		Temperature: cfg.Temperature,
-	}
-	if cfg.NoThink {
-		req.ReasoningEffort = "none"
-	}
-	_, err := client.Stream(ctx, req, func(d llm.Delta) error {
-		if d.Content != "" {
-			fmt.Fprint(out, d.Content)
+func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (config.Flags, error) {
+	flags := config.Flags{}
+	fs := cmd.Flags()
+	if fs.Changed("effort") {
+		if !config.IsEffort(values.Effort) {
+			return flags, fmt.Errorf("invalid --effort %q (want one of: %s)", values.Effort, strings.Join(config.EffortNames(), ", "))
 		}
-		return nil
-	})
-	fmt.Fprintln(out) // terminate the streamed line
-	return err
+		flags.Effort = &values.Effort
+	}
+	if fs.Changed("model") {
+		flags.Model = &values.Model
+	}
+	if fs.Changed("provider") {
+		flags.Provider = &values.Provider
+	}
+	if fs.Changed("endpoint") {
+		flags.Endpoint = &values.Endpoint
+	}
+	if fs.Changed("mode") {
+		flags.Mode = &values.Mode
+	}
+	if fs.Changed("max-steps") {
+		flags.MaxSteps = &values.MaxSteps
+	}
+	if fs.Changed("ctx") {
+		flags.MaxContextTokens = &values.Ctx
+	}
+	if fs.Changed("temperature") {
+		flags.Temperature = &values.Temperature
+	}
+	if fs.Changed("no-mcp") {
+		flags.NoMCP = &values.NoMCP
+	}
+	if fs.Changed("allowed-dirs") {
+		flags.AllowedImportDirs = values.AllowedDirs
+	}
+	if fs.Changed("allow-env") {
+		flags.AllowedEnv = values.AllowEnv
+	}
+	if fs.Changed("json") {
+		flags.JSONSummary = &values.JSON
+	}
+	if fs.Changed("json-only") {
+		flags.JSONOnly = &values.JSONOnly
+	}
+	if fs.Changed("status-file") {
+		flags.StatusFile = &values.StatusFile
+	}
+	if fs.Changed("no-think") {
+		flags.NoThink = &values.NoThink
+	}
+	if fs.Changed("benchmark") {
+		flags.BenchmarkMode = &values.Benchmark
+	}
+	if fs.Changed("llm-max-retries") {
+		flags.LLMMaxRetries = &values.LLMMaxRetries
+	}
+	if fs.Changed("llm-retry-codes") {
+		flags.LLMRetryableStatusCodes = values.LLMRetryCodes
+	}
+	if fs.Changed("llm-retry-base-delay") {
+		flags.LLMRetryBaseDelay = &values.LLMRetryBaseDelay
+	}
+	if fs.Changed("llm-retry-max-delay") {
+		flags.LLMRetryMaxDelay = &values.LLMRetryMaxDelay
+	}
+	if fs.Changed("llm-cold-load-timeout") {
+		flags.LLMColdLoadTimeout = &values.LLMColdLoadTimeout
+	}
+	if fs.Changed("llm-stream-idle-timeout") {
+		flags.LLMStreamIdleTimeout = &values.LLMStreamIdleTimeout
+	}
+	return flags, nil
+}
+
+type configFlagValues struct {
+	Model                string
+	Provider             string
+	Endpoint             string
+	Mode                 string
+	Profile              string
+	MaxSteps             int
+	Temperature          float64
+	Effort               string
+	NoMCP                bool
+	Ctx                  int
+	AllowedDirs          []string
+	AllowEnv             []string
+	JSON                 bool
+	JSONOnly             bool
+	StatusFile           string
+	NoThink              bool
+	Benchmark            bool
+	LLMMaxRetries        int
+	LLMRetryCodes        []int
+	LLMRetryBaseDelay    time.Duration
+	LLMRetryMaxDelay     time.Duration
+	LLMColdLoadTimeout   time.Duration
+	LLMStreamIdleTimeout time.Duration
+}
+
+func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
+	f.StringVar(&v.Effort, "effort", config.DefaultEffort, "effort tier (fast|medium|heavy) — seeds step/token budgets + churn patience")
+	f.StringVar(&v.Model, "model", config.DefaultModel, "model your endpoint serves (e.g. qwen2.5-coder, gpt-4o); with --provider, a model alias from the profile")
+	f.StringVar(&v.Provider, "provider", "", "named provider from the profile's \"providers\" block (sets endpoint+key; scopes --model alias lookup)")
+	f.StringVar(&v.Endpoint, "endpoint", config.DefaultEndpoint, "OpenAI-compatible base URL")
+	f.StringVar(&v.Mode, "mode", config.DefaultMode, "run mode (auto|manual)")
+	f.StringVar(&v.Profile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")
+	f.IntVar(&v.MaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
+	f.IntVar(&v.Ctx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
+	f.Float64Var(&v.Temperature, "temperature", config.DefaultTemperature, "sampling temperature")
+	f.BoolVar(&v.NoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
+	f.StringSliceVar(&v.AllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")
+	f.StringSliceVar(&v.AllowEnv, "allow-env", nil, "env var NAMES to forward from kloo's env into run_command (repeatable/comma-separated) — the trusted-secret passthrough for a deploy/CI step; default exposes only PATH/HOME/…")
+	f.BoolVar(&v.JSON, "json", false, "emit JSON output")
+	f.BoolVar(&v.JSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
+	f.StringVar(&v.StatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
+	f.BoolVar(&v.NoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
+	f.BoolVar(&v.Benchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
+	f.IntVar(&v.LLMMaxRetries, "llm-max-retries", config.DefaultLLMMaxRetries, "extra model-call retry attempts after the first")
+	f.IntSliceVar(&v.LLMRetryCodes, "llm-retry-codes", config.DefaultLLMRetryableStatusCodes, "HTTP status codes retryable for model calls")
+	f.DurationVar(&v.LLMRetryBaseDelay, "llm-retry-base-delay", config.DefaultLLMRetryBaseDelay, "first model-call retry backoff")
+	f.DurationVar(&v.LLMRetryMaxDelay, "llm-retry-max-delay", config.DefaultLLMRetryMaxDelay, "maximum model-call retry backoff")
+	f.DurationVar(&v.LLMColdLoadTimeout, "llm-cold-load-timeout", config.DefaultLLMColdLoadTimeout, "non-streaming model call timeout")
+	f.DurationVar(&v.LLMStreamIdleTimeout, "llm-stream-idle-timeout", config.DefaultLLMStreamIdle, "streaming no-token idle timeout")
 }
 
 // Execute builds the root command with production dependencies and runs it,
@@ -300,6 +427,11 @@ func runOneShot(ctx context.Context, client llm.LLMClient, cfg config.Config, ta
 func Execute() {
 	cmd := NewRootCmd(Deps{})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		var ee exitError
+		if errors.As(err, &ee) {
+			fmt.Fprintln(os.Stderr, "kloo:", ee.err)
+			os.Exit(ee.code)
+		}
 		fmt.Fprintln(os.Stderr, "kloo:", err)
 		os.Exit(1)
 	}

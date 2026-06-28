@@ -45,15 +45,65 @@ churn detection as the primary guard).
 | `--ctx` | `8000` | Per-step context window (`maxContextTokens`). Set it to match your server's `-c`/`num_ctx`. **Needed for a llama-swap/Ollama alias** (`snappy`, `smart`) — the bundled per-model defaults key on real model ids, so an alias falls to the conservative 8000 and kloo over-compacts on a larger server. Overrides profile/bundled/built-in. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
-| `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
-| `--json` | `false` | In `--headless`, emit a final `KLOO_RESULT_JSON ...` line for scripts and benchmarks. |
+| `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. Requires a task argument. |
+| `--json` | `false` | Emit a final `KLOO_RESULT_JSON ...` line for scripts and benchmarks. |
 | `--json-only` | `false` | Require the final assistant answer to be one valid JSON value only. If the final answer contains prose, code fences, or trailing text, kloo reports a recoverable error in the human report and JSON summary. Existing model-call failures are preserved. |
 | `--status-file` | _(unset)_ | After each visible TUI run completes, write the same structured result shape as `KLOO_RESULT_JSON` to this path. Write failures are shown in the TUI and do not leak bearer tokens. |
+| `--llm-max-retries` | `2` | Extra model-call retry attempts after the first. Set `0` for no retry attempts. |
+| `--llm-retry-codes` | `408,429,500,502,503,504` | HTTP status codes retried for model calls. Deterministic 400/401/403/404 failures are not retried unless explicitly listed. |
+| `--llm-retry-base-delay` | `2s` | First retry backoff. |
+| `--llm-retry-max-delay` | `30s` | Maximum exponential backoff. |
+| `--llm-cold-load-timeout` | `2m` | Non-streaming model-call timeout. |
+| `--llm-stream-idle-timeout` | `5m` | Streaming no-token idle timeout. |
 | `--no-think` | `false` | Ask compatible OpenAI-style backends to disable thinking/reasoning by sending `reasoning_effort: "none"` on chat requests. |
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
 | `--allowed-dirs` | _(unset)_ | Directories **outside** the workspace that an `AGENTS.md` [`@import`](#project-instructions-agentsmd) may read from. Repeatable or comma-separated. Read-only and load-time only — it never widens the model's file tools. |
 | `--allow-env` | _(unset)_ | Env var **names** to forward from kloo's own environment into `run_command` (repeatable/comma-separated). By default executed commands get a least-privilege env (`PATH/HOME/LANG/…`) so a model-proposed command can't exfiltrate secrets; this is the deliberate, user-granted passthrough for a **trusted deploy/CI step** that needs a specific secret (e.g. `--allow-env CLOUDFLARE_API_TOKEN,ADMIN_PASSWORD`). The value is read from kloo's env at run time — it never appears in the model's prompt or transcript. |
 | `--profile` | _(unset)_ | Path to `profiles.json`; defaults to `~/.config/kloo/profiles.json`. |
+
+For copy-pasteable benchmark harness commands and artifact capture recipes, see
+[benchmarking.md](benchmarking.md).
+
+## Doctor dry-run
+
+`kloo doctor` resolves the same config as a real run, then exits without building an
+LLM client, launching the TUI/task loop, dialing MCP servers, fetching models,
+or running verify:
+
+```sh
+kloo doctor --provider openrouter --model deepseek/deepseek-v4-flash
+kloo doctor --json --provider openrouter --model deepseek/deepseek-v4-flash
+```
+
+Human output is stable, line-oriented text. `--json` emits one JSON object with:
+
+- `profile`: path and whether it exists
+- `provider`, `model`, `endpoint`, `ctx`, `effort`, budget knobs, `temperature`,
+  `no_think`, and `tool_format`
+- `api_key`: only `set` and `redacted`, never the value
+- `verify`: resolved command and source (`override`, `auto-detect`, or `none`)
+- `lint`: resolved advisory lint command and source
+- `mcp`: disabled flag, configured server count, enabled server names, and max exposed tools
+- `retry`: resolved model-call retry and timeout policy
+- `memory`: resolved BYO memory hook state; doctor does not dial the MCP server
+- `allowed_import_dirs_count` and `allowed_env_names`
+
+Secrets are never printed. Provider API keys and MCP header/env values are reduced
+to set/unset metadata; `--allow-env` exposes only environment variable names.
+
+## Capability probe
+
+`kloo probe` runs three cheap checks in a temporary workspace and removes it before
+returning:
+
+```sh
+kloo probe --model local --endpoint http://127.0.0.1:8080/v1
+kloo probe --json --model local --endpoint http://127.0.0.1:8080/v1
+```
+
+Human output includes `tool_call`, `file_edit`, and `json_only` PASS/FAIL lines.
+JSON output includes the same checks as booleans with `failure_code` and bounded
+messages on failures. The probe never mutates the user's current workspace.
 
 ## Environment variables
 
@@ -64,6 +114,12 @@ churn detection as the primary guard).
 | `KLOO_PROVIDER` | Named provider from the profile's `providers` block (same as `--provider`). |
 | `KLOO_CONTEXT_TOKENS` | Per-step context window (same as `--ctx`). |
 | `KLOO_EFFORT` | Effort tier (same as `--effort`). |
+| `KLOO_LLM_MAX_RETRIES` | Extra model-call retry attempts after the first. |
+| `KLOO_LLM_RETRY_CODES` | Comma-separated retryable HTTP status codes. |
+| `KLOO_LLM_RETRY_BASE_DELAY` | First retry backoff (`500ms`, `2s`, or plain seconds). |
+| `KLOO_LLM_RETRY_MAX_DELAY` | Maximum retry backoff. |
+| `KLOO_LLM_COLD_LOAD_TIMEOUT` | Non-streaming model-call timeout. |
+| `KLOO_LLM_STREAM_IDLE_TIMEOUT` | Streaming no-token idle timeout. |
 | `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); not needed for a local llama.cpp / Ollama server, which has no auth. |
 | `OPENAI_API_KEY` | Fallback bearer token used only when `KLOO_API_KEY` is unset. |
 | `KLOO_MCP` | Set to `0` / `false` to disable all [MCP servers](mcp.md). `--no-mcp` overrides it; both override the profile. |
@@ -126,7 +182,7 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
   one means aggressive, early compaction — the manager manufactures a bigger
   effective window for small local models.
 
-A headless run prints `compactions: N` in its report only when memory compacted
+A task-loop run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
 
 ## Choosing and changing models
@@ -202,37 +258,79 @@ larger output budget instead of silently spinning.
 `--no-think` has CLI precedence and is preserved across runtime `/model` switches
 in the TUI (a raw model switch never changes the thinking setting).
 
-## Headless and TUI benchmark output
+## Task Loop And Benchmark Output
 
-Use `--json` for headless benchmark harnesses:
+Passing a task argument runs the autonomous loop non-interactively. Use `--json`
+when a harness needs the final parseable result line:
 
 ```sh
-kloo --headless --json "fix the failing test"
+kloo --json "fix the failing test"
 ```
 
 At the end of the run, kloo prints one line:
 
 ```text
-KLOO_RESULT_JSON {"model":"...","endpoint":"...","ctx":8000,"reason":"...","success":false,"steps":1,"tokens":123,"elapsed_seconds":1.23,"tokens_per_sec":100,"compactions":0,"verify":{"command":"npm run build","passed":false,"exit_code":1},"error":"...","transcript_tail":"..."}
+KLOO_RESULT_JSON {"model":"...","endpoint":"...","ctx":8000,"reason":"...","success":false,"steps":1,"tokens":123,"elapsed_seconds":1.23,"tokens_per_sec":100,"compactions":0,"verify":{"command":"npm run build","passed":false,"exit_code":1},"failure_code":"verify_failed","failure_detail":{"source":"verify","reason":"answered","class":"verify_failed","message":"FAIL"},"tool_counters":{"invalid_tool_calls":0,"repeated_read_file":0,"repeated_edits":0,"failed_edits":0,"no_op_edits":0,"verify_attempts":1,"tool_errors":0},"error":"...","transcript_tail":"..."}
 ```
 
 The JSON shape is:
 
 | Field | Meaning |
 |---|---|
+| `benchmark_mode` | Present and true when `--benchmark` was used. |
 | `model`, `endpoint`, `ctx` | Model id, endpoint base URL, and per-step context window used for the run. |
 | `reason`, `success` | Terminal report reason and whether it was a verified success. |
 | `steps`, `tokens`, `elapsed_seconds`, `tokens_per_sec`, `compactions` | Run counters for benchmark comparison. |
 | `verify` | Optional final verify command, pass flag, and exit code. |
 | `error` | Optional report/model/validation error. Upstream model errors include endpoint/model and a bounded upstream body tail, not API keys. |
-| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human `--headless` footer prints the same as a `rails:` line. |
+| `failure_code` | Stable automation category for non-success outcomes. Omitted on verified success. |
+| `failure_detail` | Sparse redacted detail for the category: source, reason, class, tool, HTTP status, and bounded message when available. |
+| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file`, `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, and `tool_errors`. Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
+| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
 | `transcript_tail` | A short role-prefixed tail of the run transcript for diagnostics. |
+
+`failure_code` values are a stable public automation contract:
+
+| Code | Meaning |
+|---|---|
+| `verify_failed` | A final verify command ran and failed. |
+| `unverified` | The model finished but no verify command was available. |
+| `model_error` | Model transport, API, streaming, or retry-exhaustion failure. |
+| `tool_call_invalid` | Malformed tool call, unknown tool, or invalid tool arguments. |
+| `tool_error` | Non-edit tool dispatch error that materially affected the run. |
+| `edit_failed` | Failed edit/write application or edit-failed churn. |
+| `repetition_halt` | Repetition/exploration/no-progress halt. |
+| `context_too_small` | Configured context window cannot fit the irreducible prompt. |
+| `json_invalid` | `--json-only` rejected the final answer. |
+| `budget_exceeded` | Step/token/wall-clock budget stopped the run. |
+| `interrupted` | User/context cancellation. |
+| `config_error` | Config/profile/CLI setup failed before a run. |
+| `internal_error` | Unexpected setup, dependency, marshal, or nil-report error. |
+| `answered` | Calm prose answer with no better failure category. |
+
+`--benchmark` implies `--json` and maps the final `failure_code` to stable process
+exit codes:
+
+| Exit | Meaning |
+|---:|---|
+| 0 | Verified success. |
+| 10 | `verify_failed` or `unverified`. |
+| 11 | `model_error`. |
+| 12 | `tool_call_invalid` or `tool_error`. |
+| 13 | `context_too_small`. |
+| 14 | `repetition_halt` or `edit_failed`. |
+| 15 | `json_invalid`. |
+| 16 | `budget_exceeded`. |
+| 17 | `config_error` or CLI/profile usage error. |
+| 18 | `interrupted`. |
+| 19 | `internal_error`. |
+| 20 | `answered`. |
 
 `--json-only` is useful when a benchmark expects the final assistant answer to be
 machine-readable:
 
 ```sh
-kloo --headless --json --json-only "return a JSON object with the diagnosis"
+kloo --json --json-only "return a JSON object with the diagnosis"
 ```
 
 The final assistant answer must be exactly one JSON value after trimming
@@ -374,12 +472,14 @@ Optional. Default location `~/.config/kloo/profiles.json` (or
 `$XDG_CONFIG_HOME/kloo/profiles.json`). A **missing** file is not an error —
 defaults apply. A malformed file is an error.
 
-Two sections, both optional:
+Common sections, all optional:
 
 - **Per-model entries** (keyed by model name) — overrides applied when that model
   is the resolved model.
 - **`efforts`** — per-tier budget overrides applied to the built-in tier before the
   env/flag layers.
+- **`providers`**, **`mcpServers`**, **`mcp`**, and **`memory`** — reserved
+  top-level integration/config blocks, never model names.
 
 ```jsonc
 {
@@ -392,6 +492,12 @@ Two sections, both optional:
     "maxTokens": 200000,
     "maxWallClockSeconds": 600,
     "churnRounds": 3,
+    "llmMaxRetries": 2,
+    "llmRetryCodes": [408, 429, 500, 502, 503, 504],
+    "llmRetryBaseDelay": "2s",
+    "llmRetryMaxDelay": "30s",
+    "llmColdLoadTimeout": "2m",
+    "llmStreamIdleTimeout": "5m",
     "noThink": true                 // ask compatible backends to disable reasoning
   },
   "deepseek/deepseek-v4-flash": {
@@ -411,8 +517,29 @@ Two sections, both optional:
 }
 ```
 
+Reserved top-level `memory` config enables optional MCP recall/store lifecycle
+hooks around task runs:
+
+```jsonc
+{
+  "mcpServers": {
+    "memory": {"command": "mempalace-mcp", "expose": ["recall", "store"]}
+  },
+  "memory": {
+    "enabled": true,
+    "server": "memory",
+    "recallTool": "recall",
+    "storeTool": "store",
+    "maxRecallBytes": 4096,
+    "storeOnFailure": true
+  }
+}
+```
+
 Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
-`maxTokens`, `maxWallClockSeconds`, `churnRounds`, `noThink`.
+`maxTokens`, `maxWallClockSeconds`, `churnRounds`, `llmMaxRetries`,
+`llmRetryCodes`, `llmRetryBaseDelay`, `llmRetryMaxDelay`,
+`llmColdLoadTimeout`, `llmStreamIdleTimeout`, `noThink`.
 Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,
 `maxWallClockSeconds` (budgets only — no model).
 

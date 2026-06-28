@@ -30,7 +30,7 @@ func TestWireMCPNonFatalBadServer(t *testing.T) {
 		MCPServers:         map[string]config.MCPServerEntry{"bad": {Command: "kloo-definitely-not-real-zzz"}},
 		MCPMaxExposedTools: 16,
 	}
-	reg, closeMCP := wireMCP(context.Background(), cfg, ws, logf)
+	reg, _, closeMCP := wireMCP(context.Background(), cfg, ws, logf)
 	defer closeMCP()
 
 	if _, ok := reg.Lookup("read_file"); !ok {
@@ -60,7 +60,7 @@ func TestWireMCPDisabledIsSilent(t *testing.T) {
 		MCPDisabled: true,
 		MCPServers:  map[string]config.MCPServerEntry{"x": {Command: "whatever"}},
 	}
-	reg, closeMCP := wireMCP(context.Background(), cfg, ws, logf)
+	reg, _, closeMCP := wireMCP(context.Background(), cfg, ws, logf)
 	if len(lines) != 0 {
 		t.Errorf("disabled MCP must log nothing, got: %v", lines)
 	}
