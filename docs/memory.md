@@ -127,3 +127,17 @@ fresh current-file + verify) are what keep it anchored. To help further:
 
 See [docs/configuration.md](configuration.md) for the `maxContextTokens` knob and
 [docs/tui.md](tui.md) for the `⟲` indicator.
+
+## Optional MCP memory hooks
+
+kloo's deterministic in-process working memory remains the core compaction model.
+You can optionally supplement it with an MCP memory server:
+
+- before a task run, kloo calls the configured `recallTool` and appends bounded
+  recall text to the system prompt;
+- after a task run, kloo calls `storeTool` with model, endpoint, verify summary,
+  failure code, and touched files;
+- failures are non-fatal and redacted.
+
+Configure this with the reserved `memory` profile block and an `mcpServers` entry.
+See [mcp.md](mcp.md) for the schema and trust boundary.

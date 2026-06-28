@@ -136,13 +136,18 @@ type Loop struct {
 	OnBeforeEdit func(call tools.Call) bool
 	OnRetry      func(attempt, max int, err error, wait time.Duration)
 
-	// LLMRetries is how many EXTRA model-call attempts to make after the first when
-	// a call fails transiently (endpoint timeout, cold model load, 5xx, dropped
-	// connection). 0 ⇒ DefaultLLMRetries. A negative value disables retry.
+	// LLMRetries is the resolved number of EXTRA model-call attempts to make after
+	// the first when a call fails transiently (endpoint timeout, cold model load,
+	// 5xx, dropped connection). Config resolution supplies the default; 0 disables
+	// retry.
 	LLMRetries int
 	// RetryBaseDelay is the first backoff wait; it doubles each attempt. 0 ⇒
 	// DefaultRetryBaseDelay. (Tests set it tiny to stay fast.)
 	RetryBaseDelay time.Duration
+	// RetryMaxDelay caps exponential retry backoff. 0 ⇒ no cap.
+	RetryMaxDelay time.Duration
+	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
+	RetryableStatusCodes []int
 }
 
 func (l *Loop) onState(s State) {
@@ -383,6 +388,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		repeatKeyLast string
 		repeatStreak  int
 		repeatNudged  bool
+		editSigLast   string
 
 		// Exploration rail state: consecutive read-only turns (read_file/list_dir) with
 		// no edit/run_command, and whether the one-shot nudge fired. Catches a weak
@@ -416,6 +422,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// into Report.RailFires at finish (nil when empty). Makes self-corrections
 		// observable in the summary/JSON. recordRail bumps a name's count.
 		railFires = map[string]int{}
+		counters  ToolCounters
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
@@ -429,17 +436,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			compactions = l.Memory.Stats().Compactions
 		}
 		rep := &Report{
-			Reason:      reason,
-			Steps:       step,
-			FinalVerify: lastVerify,
-			Budget:      be,
-			Churn:       ce,
-			Err:         runErr,
-			TokensUsed:  st.Tokens,
-			Elapsed:     st.Elapsed,
-			Compactions: compactions,
-			Ignored:     ignoredAll,
-			Transcript:  append([]llm.Message(nil), convo...), // this run's task + steps, for the session
+			Reason:       reason,
+			Steps:        step,
+			FinalVerify:  lastVerify,
+			Budget:       be,
+			Churn:        ce,
+			Err:          runErr,
+			TokensUsed:   st.Tokens,
+			Elapsed:      st.Elapsed,
+			Compactions:  compactions,
+			Ignored:      ignoredAll,
+			Transcript:   append([]llm.Message(nil), convo...), // this run's task + steps, for the session
+			ToolCounters: counters,
 		}
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
@@ -534,6 +542,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// streamed to the transcript — stop calmly rather than error/churn.
 				return finish(ReasonAnswered, nil, nil, nil)
 			}
+			if errors.Is(err, tools.ErrMalformedToolCall) || strings.Contains(err.Error(), "no usable tool call") {
+				counters.InvalidToolCalls++
+			}
 			return finish(ReasonError, err, nil, nil)
 		}
 		l.Budget.AddTokens(usage.TotalTokens)
@@ -558,6 +569,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				return finish(ReasonUnverified, nil, nil, nil)
 			}
 			lastVerify = l.Verifier.Verify(ctx)
+			counters.VerifyAttempts++
 			if lastVerify.Err == nil && lastVerify.Passed {
 				return finish(ReasonSuccess, nil, nil, nil)
 			}
@@ -582,9 +594,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// ── APPLY ───────────────────────────────────────────────────────────
 		l.onState(StateApply)
 		var (
-			result tools.Result
-			derr   error
+			result   tools.Result
+			derr     error
+			before   string
+			beforeOK bool
 		)
+		if isEditTool(call.Name) {
+			before, beforeOK = l.currentFileContents(str(call.Args["path"]))
+		}
 		switch {
 		case isEditTool(call.Name) && l.OnBeforeEdit != nil && !l.OnBeforeEdit(call):
 			// approve-each rejected this edit: skip the apply, record it.
@@ -599,6 +616,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		}
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
+		}
+		if derr != nil {
+			counters.ToolErrors++
+			if errors.Is(derr, tools.ErrUnknownTool) || errors.Is(derr, tools.ErrInvalidArgs) {
+				counters.InvalidToolCalls++
+			}
 		}
 
 		// Track files whose CONTENT the model has now seen (read/edited/written OK), so a
@@ -636,6 +659,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if derr == nil {
 				edited = true // a real change landed this run
 				editFailStreak = 0
+				if beforeOK {
+					if after, ok := l.currentFileContents(str(call.Args["path"])); ok && after == before {
+						counters.NoOpEdits++
+					}
+				}
 			} else {
 				// An edit that FAILED to apply (malformed block, no-match, rejected).
 				// Tracked across turns — reads in between don't reset it — so a model
@@ -643,6 +671,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// (the churn-flail-gap) is caught even though no single rail's signal
 				// (identical call / read-only spin / repeated verify) fires.
 				editFailStreak++
+				counters.FailedEdits++
 			}
 		}
 
@@ -703,6 +732,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if l.Verifier != nil {
 			l.onState(StateVerify)
 			lastVerify = l.Verifier.Verify(ctx)
+			counters.VerifyAttempts++
 
 			// A non-runnable verify command is an error outcome, never a false pass.
 			if lastVerify.Err != nil {
@@ -771,20 +801,35 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if key := repeatKey(call); key != "" {
 			if key == repeatKeyLast {
 				repeatStreak++
+				if call.Name == tools.NameReadFile {
+					counters.RepeatedReadFile++
+				}
 			} else {
 				repeatKeyLast, repeatStreak, repeatNudged = key, 1, false
 			}
 			switch {
 			case repeatStreak >= l.repeatAbortRounds():
-				return finish(ReasonChurn, nil, nil, &ChurnEvidence{
+				ev := &ChurnEvidence{
 					Kind:     ChurnRepeatedCall,
 					Artifact: repeatArtifact(call, repeatStreak),
-				})
+				}
+				if call.Name == tools.NameReadFile {
+					ev.Class = "repeated_read_file"
+					ev.Tool = tools.NameReadFile
+					ev.Artifact = l.repeatedReadArtifact(call, repeatStreak)
+				}
+				return finish(ReasonChurn, nil, nil, ev)
 			case repeatStreak >= l.repeatNudgeRounds() && !repeatNudged:
 				repeatNudged = true
 				recordRail(RailRepeatedCall)
-				convo = append(convo, repeatCorrective(call, repeatStreak))
+				convo = append(convo, l.repeatCorrective(call, repeatStreak))
 			}
+		}
+		if sig := editSignature(call); sig != "" {
+			if sig == editSigLast {
+				counters.RepeatedEdits++
+			}
+			editSigLast = sig
 		}
 
 		// Exploration rail: a weak model (e.g. a 2B ollama model) inspects file after
@@ -1071,6 +1116,21 @@ func (l *Loop) reread(path string) string {
 	return content
 }
 
+func (l *Loop) currentFileContents(path string) (string, bool) {
+	if path == "" || l.Root == "" {
+		return "", false
+	}
+	ws, err := tools.NewWorkspace(l.Root)
+	if err != nil {
+		return "", false
+	}
+	content, err := tools.ReadFile(ws, path)
+	if err != nil {
+		return "", false
+	}
+	return content, true
+}
+
 // budgetEvidence renders the tripped budget's limit vs observed for the report.
 func (l *Loop) budgetEvidence(kind BudgetKind) *BudgetEvidence {
 	st := l.Budget.Stats()
@@ -1149,11 +1209,31 @@ func repeatArtifact(call tools.Call, n int) string {
 	return fmt.Sprintf("%s (×%d)", call.Name, n)
 }
 
+func (l *Loop) repeatedReadArtifact(call tools.Call, n int) string {
+	path := str(call.Args["path"])
+	state := "state unknown"
+	if path != "" && l.Root != "" {
+		if content, ok := l.currentFileContents(path); ok {
+			if strings.TrimSpace(content) == "" {
+				state = "empty file"
+			} else {
+				state = fmt.Sprintf("unchanged content, %d bytes", len(content))
+			}
+		} else {
+			state = "missing or unreadable file"
+		}
+	}
+	if path == "" {
+		return fmt.Sprintf("read_file repeated %d times with unchanged arguments (%s)", n, state)
+	}
+	return fmt.Sprintf("read_file %s repeated %d times with unchanged arguments (%s)", path, n, state)
+}
+
 // repeatCorrective is the one-shot nudge injected the first time a call repeats
 // repeatNudgeRounds times: it names the stuck call and points at the usual escape
 // (an empty file needs write_file, not another read), so a weak model can break
 // the loop instead of riding it to the abort threshold.
-func repeatCorrective(call tools.Call, n int) llm.Message {
+func (l *Loop) repeatCorrective(call tools.Call, n int) llm.Message {
 	target := str(call.Args["path"])
 	var b strings.Builder
 	fmt.Fprintf(&b, "STOP — you have called %s", call.Name)
@@ -1163,7 +1243,20 @@ func repeatCorrective(call tools.Call, n int) llm.Message {
 	fmt.Fprintf(&b, " %d times in a row with the SAME arguments, and nothing changed. Repeating it will not help.\n", n)
 	b.WriteString("Take a DIFFERENT action now:\n")
 	if call.Name == tools.NameReadFile {
-		b.WriteString("- If that file is empty or missing, create its contents with write_file — do NOT read it again.\n")
+		if target != "" && l.Root != "" {
+			if content, ok := l.currentFileContents(target); ok {
+				if strings.TrimSpace(content) == "" {
+					fmt.Fprintf(&b, "- %s is empty. Create its contents with write_file — do NOT read it again.\n", target)
+				} else {
+					fmt.Fprintf(&b, "- %s has already been read and is unchanged. Use edit_file for a surgical change, or inspect a DIFFERENT path with search/list_dir only if the task needs more context.\n", target)
+				}
+			} else {
+				fmt.Fprintf(&b, "- %s is missing or unreadable. Create it with write_file if the task requires it, or inspect a DIFFERENT path with search/list_dir.\n", target)
+			}
+		} else {
+			b.WriteString("- If that file is empty or missing, create its contents with write_file — do NOT read it again.\n")
+			b.WriteString("- If it has known content, use edit_file for a surgical change, or search/list_dir only to inspect a DIFFERENT target.\n")
+		}
 	}
 	b.WriteString("- Otherwise make the change the task actually needs, or call finish if the work is already done.\n")
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
@@ -1379,13 +1472,8 @@ func isTaskVerdict(text string) bool {
 	return first == chatSentinel
 }
 
-// llmRetries / retryBaseDelay are the effective retry knobs (mirror the stallLimit
-// 0-⇒-default seam; a NEGATIVE LLMRetries disables retry entirely).
 func (l *Loop) llmRetries() int {
-	if l.LLMRetries != 0 {
-		return l.LLMRetries
-	}
-	return DefaultLLMRetries
+	return l.LLMRetries
 }
 
 func (l *Loop) retryBaseDelay() time.Duration {
@@ -1403,7 +1491,7 @@ func (l *Loop) retryBaseDelay() time.Duration {
 // error is deterministic (4xx, auth, parse), or a stream already emitted tokens —
 // retrying then would duplicate the visible output.
 func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-	attempts := max(1, l.llmRetries()+1) // a negative LLMRetries disables retry (1 try)
+	attempts := max(1, l.llmRetries()+1)
 	var (
 		resp llm.ChatResponse
 		err  error
@@ -1421,10 +1509,13 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 				return nil
 			})
 		}
-		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !isRetryableLLMError(err) {
+		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !l.isRetryableLLMError(err) {
 			return resp, l.modelCallError(err)
 		}
 		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
+		if l.RetryMaxDelay > 0 && wait > l.RetryMaxDelay {
+			wait = l.RetryMaxDelay
+		}
 		if l.OnRetry != nil {
 			l.OnRetry(attempt, attempts-1, err, wait)
 		}
@@ -1464,6 +1555,14 @@ func (l *Loop) modelCallError(err error) error {
 // so a context.DeadlineExceeded reaching here is the request's OWN timeout (slow
 // prefill / cold load), which is retryable.
 func isRetryableLLMError(err error) bool {
+	return retryableLLMError(err, nil)
+}
+
+func (l *Loop) isRetryableLLMError(err error) bool {
+	return retryableLLMError(err, l.RetryableStatusCodes)
+}
+
+func retryableLLMError(err error, retryCodes []int) bool {
 	if err == nil {
 		return false
 	}
@@ -1489,7 +1588,15 @@ func isRetryableLLMError(err error) bool {
 	// Upstream 5xx / 429 / 408 are server-side transient; other 4xx are not.
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode >= 500 || apiErr.StatusCode == 408 || apiErr.StatusCode == 429
+		if retryCodes == nil {
+			retryCodes = []int{408, 429, 500, 502, 503, 504}
+		}
+		for _, code := range retryCodes {
+			if apiErr.StatusCode == code {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }

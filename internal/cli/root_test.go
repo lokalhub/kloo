@@ -3,40 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/config"
-	"github.com/lokalhub/kloo/internal/llm"
 )
-
-// fakeClient is an offline llm.LLMClient that records what it was asked to do
-// and replays a canned streamed reply.
-type fakeClient struct {
-	reply    string
-	gotReq   llm.ChatRequest
-	streamed bool
-}
-
-func (f *fakeClient) Complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-	f.gotReq = req
-	return llm.ChatResponse{
-		Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: f.reply}}},
-	}, nil
-}
-
-func (f *fakeClient) Stream(ctx context.Context, req llm.ChatRequest, onDelta func(llm.Delta) error) (llm.ChatResponse, error) {
-	f.streamed = true
-	f.gotReq = req
-	if onDelta != nil {
-		if err := onDelta(llm.Delta{Role: llm.RoleAssistant, Content: f.reply}); err != nil {
-			return llm.ChatResponse{}, err
-		}
-	}
-	return llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: f.reply}}}}, nil
-}
 
 // runCmd builds the root command with injected deps and the given args.
 func runCmd(t *testing.T, deps Deps, args ...string) (out, errOut *bytes.Buffer, err error) {
@@ -55,12 +31,16 @@ func runCmd(t *testing.T, deps Deps, args ...string) (out, errOut *bytes.Buffer,
 }
 
 // TestFlagsMapToConfig: every documented flag parses and reaches config.Resolve,
-// and the task argument is forwarded to the client.
+// and the task argument is forwarded to the autonomous loop.
 func TestFlagsMapToConfig(t *testing.T) {
 	var gotCfg config.Config
-	fake := &fakeClient{reply: "ok"}
+	var gotTask string
 	deps := Deps{
-		NewClient: func(cfg config.Config) llm.LLMClient { gotCfg = cfg; return fake },
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+			gotCfg = cfg
+			gotTask = task
+			return nil
+		},
 	}
 
 	out, _, err := runCmd(t, deps,
@@ -69,6 +49,7 @@ func TestFlagsMapToConfig(t *testing.T) {
 		"--mode", "manual",
 		"--max-steps", "9",
 		"--temperature", "0.5",
+		"--llm-max-retries", "0",
 		"--no-think",
 		"--json-only",
 		"--status-file", filepath.Join(t.TempDir(), "status.json"),
@@ -93,20 +74,20 @@ func TestFlagsMapToConfig(t *testing.T) {
 	if gotCfg.Temperature != 0.5 {
 		t.Errorf("temperature = %v, want 0.5", gotCfg.Temperature)
 	}
-	if !fake.streamed {
-		t.Error("expected the client to be streamed")
+	if gotCfg.LLMMaxRetries != 0 {
+		t.Errorf("llm max retries = %d, want explicit zero", gotCfg.LLMMaxRetries)
 	}
-	if got := fake.gotReq.Messages[len(fake.gotReq.Messages)-1].Content; got != "say hi" {
-		t.Errorf("task forwarded = %q, want \"say hi\"", got)
+	if gotTask != "say hi" {
+		t.Errorf("task forwarded = %q, want \"say hi\"", gotTask)
 	}
-	if !gotCfg.NoThink || fake.gotReq.ReasoningEffort != "none" {
-		t.Errorf("--no-think should reach config and one-shot request, cfg=%+v req=%+v", gotCfg, fake.gotReq)
+	if !gotCfg.NoThink {
+		t.Errorf("--no-think should reach config, cfg=%+v", gotCfg)
 	}
 	if !gotCfg.JSONOnly || gotCfg.StatusFile == "" {
 		t.Errorf("--json-only/--status-file should reach config, cfg=%+v", gotCfg)
 	}
-	if !strings.Contains(out.String(), "ok") {
-		t.Errorf("streamed reply not printed; out = %q", out.String())
+	if out.Len() != 0 {
+		t.Errorf("stubbed loop should not print, out = %q", out.String())
 	}
 }
 
@@ -114,7 +95,10 @@ func TestFlagsMapToConfig(t *testing.T) {
 // defaults (proves unset flags do NOT override via Changed()-gating).
 func TestDefaultsWhenNoFlags(t *testing.T) {
 	var gotCfg config.Config
-	deps := Deps{NewClient: func(cfg config.Config) llm.LLMClient { gotCfg = cfg; return &fakeClient{reply: "hi"} }}
+	deps := Deps{RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+		gotCfg = cfg
+		return nil
+	}}
 
 	if _, _, err := runCmd(t, deps, "do a thing"); err != nil {
 		t.Fatalf("Execute error: %v", err)
@@ -125,7 +109,7 @@ func TestDefaultsWhenNoFlags(t *testing.T) {
 }
 
 // TestNoArgsLaunchesTUI: no task argument launches the interactive TUI session
-// (with the resolved config + the default verify command), not the one-shot path.
+// (with the resolved config + the default verify command), not a single-call path.
 func TestNoArgsLaunchesTUI(t *testing.T) {
 	var launched bool
 	var gotCfg config.Config
@@ -133,7 +117,6 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	var gotLint lintOpts
 	var gotProfile string
 	var gotGetenv func(string) string
-	clientCalled := false
 	profile := filepath.Join(t.TempDir(), "profiles.json")
 	getenv := func(k string) string {
 		if k == "KLOO_TEST_THREAD" {
@@ -142,7 +125,6 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 		return ""
 	}
 	deps := Deps{
-		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
 		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			launched = true
 			gotCfg = cfg
@@ -161,9 +143,6 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	}
 	if !launched {
 		t.Error("no task argument should launch the TUI")
-	}
-	if clientCalled {
-		t.Error("the one-shot client should not be constructed for the interactive session")
 	}
 	if gotCfg.Model != config.DefaultModel {
 		t.Errorf("TUI should receive resolved config, got model %q", gotCfg.Model)
@@ -191,17 +170,16 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 	}
 }
 
-// TestHeadlessWithTaskRoutesToRunHeadless: a task arg + --headless runs the
-// non-interactive autonomous loop (not the one-shot stream, not the TUI), passing
+// TestTaskRoutesToRunHeadless: any task arg runs the non-interactive autonomous
+// loop (not the TUI), passing
 // the resolved config, task, and verify command.
-func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
+func TestTaskRoutesToRunHeadless(t *testing.T) {
 	var ran bool
 	var gotTask, gotVerify string
 	var gotLint lintOpts
 	var gotCfg config.Config
-	clientCalled, tuiCalled := false, false
+	tuiCalled := false
 	deps := Deps{
-		NewClient: func(cfg config.Config) llm.LLMClient { clientCalled = true; return &fakeClient{} },
 		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			tuiCalled = true
 			return nil
@@ -213,14 +191,14 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 	}
 
 	statusFile := filepath.Join(t.TempDir(), "status.json")
-	if _, _, err := runCmd(t, deps, "--headless", "--no-think", "--json-only", "--status-file", statusFile, "--verify", "npm run build", "--lint", "golangci-lint run", "rework the tabs"); err != nil {
-		t.Fatalf("--headless with a task should exit 0, got %v", err)
+	if _, _, err := runCmd(t, deps, "--no-think", "--json-only", "--status-file", statusFile, "--verify", "npm run build", "--lint", "golangci-lint run", "rework the tabs"); err != nil {
+		t.Fatalf("task should run autonomous loop, got %v", err)
 	}
 	if !ran {
-		t.Fatal("--headless with a task should route to RunHeadless")
+		t.Fatal("task should route to RunHeadless")
 	}
-	if clientCalled || tuiCalled {
-		t.Error("--headless must not use the one-shot client or the TUI")
+	if tuiCalled {
+		t.Error("task must not use the TUI")
 	}
 	if gotTask != "rework the tabs" {
 		t.Errorf("task = %q, want \"rework the tabs\"", gotTask)
@@ -232,32 +210,72 @@ func TestHeadlessWithTaskRoutesToRunHeadless(t *testing.T) {
 		t.Errorf("--lint should thread into RunHeadless as an override, got %+v", gotLint)
 	}
 	if gotCfg.Model != config.DefaultModel {
-		t.Errorf("headless should receive resolved config, got model %q", gotCfg.Model)
+		t.Errorf("loop should receive resolved config, got model %q", gotCfg.Model)
 	}
 	if !gotCfg.NoThink {
-		t.Errorf("headless should receive --no-think in resolved config")
+		t.Errorf("loop should receive --no-think in resolved config")
 	}
 	if !gotCfg.JSONOnly || gotCfg.StatusFile != statusFile {
-		t.Errorf("headless should receive observability flags, cfg=%+v", gotCfg)
+		t.Errorf("loop should receive observability flags, cfg=%+v", gotCfg)
 	}
 }
 
-// TestHeadlessWithoutTaskErrors: --headless with no task argument is a usage
-// error (it must not silently launch the TUI).
-func TestHeadlessWithoutTaskErrors(t *testing.T) {
-	tuiCalled := false
+func TestVerifyRoutingNoDeprecationWarning(t *testing.T) {
+	var gotVerify string
 	deps := Deps{
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
-			tuiCalled = true
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+			gotVerify = verifyCmd
 			return nil
 		},
-		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error { return nil },
 	}
-	if _, _, err := runCmd(t, deps, "--headless"); err == nil {
-		t.Fatal("--headless with no task should be an error")
+	out, errOut, err := runCmd(t, deps, "--verify", "go test ./...", "fix x")
+	if err != nil {
+		t.Fatalf("--verify task should run loop: %v", err)
 	}
-	if tuiCalled {
-		t.Error("--headless with no task must not fall back to launching the TUI")
+	if gotVerify != "go test ./..." {
+		t.Fatalf("verify override = %q, want go test ./...", gotVerify)
+	}
+	if strings.Contains(out.String(), "deprecated") || strings.Contains(errOut.String(), "deprecated") {
+		t.Fatalf("--verify should not emit deprecation warnings\nstdout=%s\nstderr=%s", out.String(), errOut.String())
+	}
+}
+
+func TestBenchmarkModeRoutesAndImpliesJSON(t *testing.T) {
+	var gotCfg config.Config
+	var gotTask string
+	deps := Deps{
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+			gotCfg = cfg
+			gotTask = task
+			return nil
+		},
+	}
+	if _, _, err := runCmd(t, deps, "--benchmark", "fix benchmark"); err != nil {
+		t.Fatalf("--benchmark task should run loop: %v", err)
+	}
+	if gotTask != "fix benchmark" {
+		t.Fatalf("task = %q", gotTask)
+	}
+	if !gotCfg.BenchmarkMode || !gotCfg.JSONSummary {
+		t.Fatalf("--benchmark should set BenchmarkMode and JSONSummary, cfg=%+v", gotCfg)
+	}
+}
+
+func TestBenchmarkWithoutTaskReturnsExit17(t *testing.T) {
+	_, _, err := runCmd(t, Deps{}, "--benchmark")
+	var ee exitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("want exitError, got %T %v", err, err)
+	}
+	if ee.code != benchmarkExitConfigError {
+		t.Fatalf("exit code = %d, want %d", ee.code, benchmarkExitConfigError)
+	}
+}
+
+func TestHeadlessFlagRemoved(t *testing.T) {
+	_, _, err := runCmd(t, Deps{}, "--headless", "x")
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("--headless should be removed as an unknown flag, got %v", err)
 	}
 }
 
@@ -321,6 +339,79 @@ func TestHelpFlagExitsZero(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("help missing flag %s; out = %q", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "--headless") || strings.Contains(out.String(), "deprecated") {
+		t.Errorf("help should not mention --headless or deprecated verify, out = %q", out.String())
+	}
+}
+
+func TestDoctorJSONRedactsAndDoesNotRun(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(root, "profiles.json")
+	if err := os.WriteFile(profile, []byte(`{
+		"providers": {"hosted": {"endpoint": "https://example.test/v1", "apiKey": "${SECRET_KEY}"}},
+		"mcpServers": {"memory": {"command": "mem", "env": {"TOKEN": "${SECRET_KEY}"}}},
+		"local": {"maxContextTokens": 12345, "toolFormat": "xml"},
+		"memory": {"enabled": true, "server": "memory", "recallTool": "recall", "storeTool": "store", "maxRecallBytes": 4096, "storeOnFailure": true}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SECRET_KEY", "test-token-value")
+	tuiCalled, headlessCalled := false, false
+	deps := Deps{
+		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
+			tuiCalled = true
+			return nil
+		},
+		RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+			headlessCalled = true
+			return nil
+		},
+		Getenv: func(k string) string { return "" },
+	}
+	out, _, err := runCmd(t, deps, "doctor", "--json", "--profile", profile, "--provider", "hosted", "--model", "local",
+		"--llm-max-retries", "0",
+		"--llm-retry-base-delay", "500ms",
+		"--llm-retry-max-delay", "5s",
+		"--llm-cold-load-timeout", "7m",
+		"--llm-stream-idle-timeout", "3m",
+		"--allow-env", "ADMIN_PASSWORD")
+	if err != nil {
+		t.Fatalf("doctor --json: %v", err)
+	}
+	if tuiCalled || headlessCalled {
+		t.Fatalf("doctor must not start run deps: tui=%t headless=%t", tuiCalled, headlessCalled)
+	}
+	if strings.Contains(out.String(), "test-token-value") {
+		t.Fatalf("doctor leaked a secret:\n%s", out.String())
+	}
+	var got resolvedConfigDiagnostic
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("doctor emitted invalid JSON: %v\n%s", err, out.String())
+	}
+	if got.Provider != "hosted" || got.Endpoint != "https://example.test/v1" || got.APIKey != (secretState{Set: true, Redacted: true}) {
+		t.Fatalf("provider/API key diagnostics wrong: %+v", got)
+	}
+	if got.Verify.Source != "auto-detect" || got.Verify.Command != "go test ./..." {
+		t.Fatalf("verify diagnostic wrong: %+v", got.Verify)
+	}
+	if got.MCP.ConfiguredServers != 1 || len(got.MCP.EnabledServers) != 1 || got.MCP.EnabledServers[0] != "memory" {
+		t.Fatalf("mcp diagnostic wrong: %+v", got.MCP)
+	}
+	if got.Memory != (memoryDiagnostic{Enabled: true, Server: "memory", RecallTool: "recall", StoreTool: "store", MaxRecallBytes: 4096, StoreOnFailure: true}) {
+		t.Fatalf("memory diagnostic wrong: %+v", got.Memory)
+	}
+	if len(got.AllowedEnvNames) != 1 || got.AllowedEnvNames[0] != "ADMIN_PASSWORD" {
+		t.Fatalf("allowed env should expose names only, got %+v", got.AllowedEnvNames)
+	}
+	if got.Retry.LLMMaxRetries != 0 || got.Retry.LLMRetryBaseDelay != "500ms" ||
+		got.Retry.LLMRetryMaxDelay != "5s" || got.Retry.LLMColdLoadTimeout != "7m" ||
+		got.Retry.LLMStreamIdleTimeout != "3m" {
+		t.Fatalf("retry diagnostic wrong: %+v", got.Retry)
 	}
 }
 

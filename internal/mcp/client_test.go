@@ -1,12 +1,16 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -405,6 +409,44 @@ func TestDialConnectTimeout(t *testing.T) {
 		}
 	case <-time.After(25 * time.Second):
 		t.Fatal("dial did not return: connect timeout not honored (hung past 25s)")
+	}
+}
+
+func TestConnectSkipsServerWhenListToolsHangs(t *testing.T) {
+	oldTimeout := DefaultConnectTimeout
+	DefaultConnectTimeout = 120 * time.Millisecond
+	t.Cleanup(func() { DefaultConnectTimeout = oldTimeout })
+
+	srv := newEchoAddServer(nil)
+	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if strings.Contains(string(body), `"tools/list"`) {
+			<-r.Context().Done()
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+
+	var logs []string
+	start := time.Now()
+	m := Connect(context.Background(), Config{Servers: []ServerConfig{{Name: "hung-list", URL: ts.URL}}}, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	elapsed := time.Since(start)
+	defer m.Close()
+
+	if len(m.servers) != 0 {
+		t.Fatalf("hung tools/list server should be skipped, got %d connected server(s)", len(m.servers))
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, `skipped "hung-list"`) || !strings.Contains(joined, "list tools") {
+		t.Fatalf("skip log should mention hung list-tools failure, got:\n%s", joined)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Connect took %v; tools/list discovery was not bounded", elapsed)
 	}
 }
 

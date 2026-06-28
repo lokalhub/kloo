@@ -38,6 +38,9 @@ func TestLoopRepetitionRailHaltsIdenticalCalls(t *testing.T) {
 	if rep.Churn == nil || rep.Churn.Kind != ChurnRepeatedCall {
 		t.Fatalf("churn kind = %v, want repeated-call", rep.Churn)
 	}
+	if rep.Churn.Class != "repeated_read_file" || rep.Churn.Tool != "read_file" {
+		t.Fatalf("repeated-read detail missing: %+v", rep.Churn)
+	}
 	if rep.Steps != 3 {
 		t.Errorf("steps = %d, want 3 (halts on the 3rd identical call)", rep.Steps)
 	}
@@ -47,7 +50,10 @@ func TestLoopRepetitionRailHaltsIdenticalCalls(t *testing.T) {
 	// The one-shot corrective nudge must have been injected into the transcript.
 	var nudged bool
 	for _, m := range rep.Transcript {
-		if strings.Contains(m.Content, "times in a row") {
+		if strings.Contains(m.Content, "times in a row") &&
+			strings.Contains(m.Content, "tab1.page.scss") &&
+			strings.Contains(m.Content, "write_file") &&
+			strings.Contains(m.Content, "edit_file") {
 			nudged = true
 		}
 	}

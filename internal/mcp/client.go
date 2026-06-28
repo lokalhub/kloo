@@ -6,6 +6,8 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // Client is one connected MCP server session: the live SDK session, a snapshot of
@@ -24,10 +26,15 @@ type Client struct {
 // Phase 02 maps these into tools.Tool values).
 func (c *Client) Tools() []*sdk.Tool { return c.tools }
 
+func (c *Client) Call(ctx context.Context, tool string, args map[string]any) (tools.Result, error) {
+	return invokeRemote(ctx, c, tool, c.Name+":"+tool, args)
+}
+
 // dial connects one server and snapshots its full (paginated) tool list, bounded
-// by connectTimeout on the connect+initialize handshake. A connect or list
-// failure is returned as an error (never a panic) for the Manager to log and skip
-// non-fatally (Phase 03). The returned Client owns the session until Close.
+// by connectTimeout on the connect+initialize+ListTools startup path. A connect
+// or list failure is returned as an error (never a panic) for the Manager to log
+// and skip non-fatally (Phase 03). The returned Client owns the session until
+// Close.
 func dial(ctx context.Context, cfg ServerConfig, connectTimeout time.Duration) (*Client, error) {
 	transport, err := cfg.transport()
 	if err != nil {
@@ -39,8 +46,8 @@ func dial(ctx context.Context, cfg ServerConfig, connectTimeout time.Duration) (
 
 	client := sdk.NewClient(&sdk.Implementation{Name: clientImplName, Version: clientVersion}, nil)
 
-	// Bound only the connect/initialize handshake; the parent ctx governs the
-	// subsequent ListTools (a hung server can't stall startup past the timeout).
+	// Bound connect/initialize and initial ListTools discovery under the same
+	// startup deadline so a server that hangs after initializing is still skipped.
 	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	session, err := client.Connect(cctx, transport, nil)
@@ -48,7 +55,7 @@ func dial(ctx context.Context, cfg ServerConfig, connectTimeout time.Duration) (
 		return nil, fmt.Errorf("mcp: connect %q: %w", cfg.Name, err)
 	}
 
-	tools, err := listAllTools(ctx, session)
+	tools, err := listAllTools(cctx, session)
 	if err != nil {
 		_ = session.Close()
 		return nil, fmt.Errorf("mcp: list tools %q: %w", cfg.Name, err)

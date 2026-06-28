@@ -90,7 +90,7 @@ Or build from a checkout:
 ```sh
 make binary          # build ./bin/kloo  (needs Go 1.25+ on PATH)
 ./bin/kloo           # interactive TUI session
-./bin/kloo "say hi"  # one-shot, streamed to stdout
+./bin/kloo "fix the failing test"  # runs the autonomous loop
 ```
 
 kloo talks to an OpenAI-compatible endpoint (default
@@ -121,8 +121,10 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | Invocation | What it does |
 |---|---|
 | `kloo` | Launch the interactive TUI session (autonomous loop under the UI). |
-| `kloo "<task>"` | One-shot: stream a single completion to stdout (scripting). |
-| `kloo --headless "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout (verify auto-detected; `--verify` to override). |
+| `kloo doctor [--json]` | Print the resolved, redacted config without starting a model, MCP, TUI, task loop, or verify command. |
+| `kloo probe [--json]` | Run cheap tool-call, temp edit, and JSON-only capability checks in a temporary workspace. |
+| `kloo "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout. |
+| `kloo --benchmark "<task>"` | Automation preset: task loop + JSON summary + stable exit codes. |
 
 ### Common flags
 
@@ -137,9 +139,9 @@ and **[docs/configuration.md](docs/configuration.md)** for the `providers` schem
 | `--ctx` | `8000` | Per-step context window. The TUI reads it from `/v1/models` when the endpoint reports a context length; set this to override, or for endpoints that don't report one (e.g. match your llama.cpp `-c`) — otherwise kloo over-compacts to 8k on a larger server. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
+| `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. |
 | `--lint` | _(auto-detected)_ | Override the fast **advisory** lint command run on edited files after each edit (see below); auto-detected from the project when unset. |
 | `--no-lint` | `false` | Disable the fast advisory lint step (lint is on by default when a linter is detected). |
-| `--headless` | `false` | Run the loop non-interactively (requires a task arg). |
 | `--new` | `false` | Start a fresh session (the default; saved sessions are no longer auto-resumed). |
 | `--resume` | _(unset)_ | Resume a specific saved session by id (printed on exit; see `{workspace}/.kloo/sessions`). |
 | `--no-mcp` | `false` | Disable all [MCP servers](docs/mcp.md) for this run (overrides `KLOO_MCP` + profile). |
@@ -156,6 +158,13 @@ Env vars include `KLOO_ENDPOINT`, `KLOO_MODEL`, `KLOO_PROVIDER`, `KLOO_EFFORT`, 
 `OPENAI_API_KEY`); `KLOO_MCP=0` disables [MCP](docs/mcp.md); `KLOO_LINT=<cmd>`
 overrides the advisory lint command and `KLOO_NO_LINT=1` disables it; `NO_COLOR`
 disables all TUI colour (see below).
+
+For benchmark automation, `kloo doctor --json` exposes the redacted resolved
+config, and benchmark/status JSON includes stable `failure_code`,
+`failure_detail`, and `tool_counters` fields. See
+[docs/configuration.md](docs/configuration.md#doctor-dry-run) for the schemas.
+For a copy-pasteable benchmark harness recipe, see
+[docs/benchmarking.md](docs/benchmarking.md).
 
 ### Fast advisory lint
 

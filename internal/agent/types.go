@@ -132,6 +132,19 @@ type VerifyResult struct {
 	Err error
 }
 
+// ToolCounters records loop-quality metrics for benchmark comparisons. It is
+// separate from RailFires: rails are model-facing corrections, while counters are
+// observed tool/edit/verify outcomes.
+type ToolCounters struct {
+	InvalidToolCalls int
+	RepeatedReadFile int
+	RepeatedEdits    int
+	FailedEdits      int
+	NoOpEdits        int
+	VerifyAttempts   int
+	ToolErrors       int
+}
+
 // Verifier runs the configured verify command and returns the real result.
 // (Seam implemented in verify.go.)
 type Verifier interface {
@@ -266,6 +279,8 @@ type BudgetEvidence struct {
 // ChurnEvidence is the report detail for a churn stop.
 type ChurnEvidence struct {
 	Kind     ChurnKind
+	Class    string // optional stable diagnostic class for JSON summaries
+	Tool     string // optional tool name involved in the churn
 	Artifact string // the repeated failure output / edit
 }
 
@@ -293,6 +308,8 @@ type Report struct {
 	// a benchmark assert e.g. that an acted multi-step run was rescued by exactly one
 	// confirm-finish nudge) instead of eyeballing transcript wording.
 	RailFires map[string]int
+	// ToolCounters contains benchmark-visible loop quality metrics.
+	ToolCounters ToolCounters
 	// Transcript is this run's full conversation (task + every step). The TUI
 	// accumulates it into the session so the next submission carries context
 	// (seeded back via Loop.SessionHistory). Empty for callers that don't read it.

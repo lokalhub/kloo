@@ -55,13 +55,13 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 	// whole TUI session and is cancelled (and sessions closed) on exit.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	reg, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(os.Stderr))
+	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(os.Stderr))
 	defer closeMCP()
 
 	clientFactory := func(endpoint, model, apiKey string) llm.LLMClient {
-		return llm.New(endpoint, model, llm.WithAPIKey(apiKey))
+		return llm.New(endpoint, model, llm.WithAPIKey(apiKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
 	}
-	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey))
+	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
 
 	loop := &agent.Loop{
 		Client:        client,
@@ -78,22 +78,33 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		System:        defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
-		StallRounds: cfg.ChurnRounds,
-		Endpoint:    cfg.Endpoint,
-		Model:       cfg.Model,
-		Temperature: cfg.Temperature,
-		NoThink:     cfg.NoThink,
+		StallRounds:          cfg.ChurnRounds,
+		Endpoint:             cfg.Endpoint,
+		Model:                cfg.Model,
+		Temperature:          cfg.Temperature,
+		NoThink:              cfg.NoThink,
+		LLMRetries:           cfg.LLMMaxRetries,
+		RetryBaseDelay:       cfg.LLMRetryBaseDelay,
+		RetryMaxDelay:        cfg.LLMRetryMaxDelay,
+		RetryableStatusCodes: cfg.LLMRetryableStatusCodes,
 	}
 
 	runner := tui.NewLoopRunner(loop, ws, cfg.MaxTokens).WithSession(store, sess)
+	runner.WithRunHooks(
+		func(ctx context.Context, task string, runtime tui.RuntimeConfig) string {
+			runCfg := tuiRuntimeConfig(cfg, runtime)
+			return memoryRecallSystemSection(memoryRecall(ctx, runCfg, mcpMgr, cwd, task, writerLogf(os.Stderr)))
+		},
+		func(ctx context.Context, task string, runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) {
+			runCfg := tuiRuntimeConfig(cfg, runtime)
+			summary := buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil)
+			memoryStore(ctx, runCfg, mcpMgr, cwd, task, summary, rep, writerLogf(os.Stderr))
+		},
+	)
 	if cfg.StatusFile != "" {
 		statusPath := cfg.StatusFile
 		runner.WithStatusWriter(func(runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) error {
-			runCfg := cfg
-			runCfg.Provider = runtime.Provider
-			runCfg.Endpoint = runtime.Endpoint
-			runCfg.Model = runtime.Model
-			runCfg.MaxContextTokens = runtime.ContextTokens
+			runCfg := tuiRuntimeConfig(cfg, runtime)
 			return writeRunSummaryFile(statusPath, buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil))
 		})
 	}
@@ -123,6 +134,19 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		fmt.Fprintf(os.Stderr, "\nsession %s saved · resume it with:  kloo --resume %s\n", sess.ID, sess.ID)
 	}
 	return runErr
+}
+
+func tuiRuntimeConfig(base config.Config, runtime tui.RuntimeConfig) config.Config {
+	runCfg := base
+	runCfg.Provider = runtime.Provider
+	runCfg.Endpoint = runtime.Endpoint
+	runCfg.APIKey = runtime.APIKey
+	runCfg.Model = runtime.Model
+	runCfg.MaxContextTokens = runtime.ContextTokens
+	runCfg.Temperature = runtime.Temperature
+	runCfg.ToolFormat = runtime.ToolFormat
+	runCfg.NoThink = runtime.NoThink
+	return runCfg
 }
 
 // chooseSession resolves which session a TUI launch uses. Every launch is a FRESH

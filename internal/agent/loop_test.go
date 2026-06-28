@@ -159,6 +159,9 @@ func newLoop(t *testing.T, srv *llmtest.Server, v Verifier, b Budget, c ChurnDet
 		Endpoint: srv.URL + "/v1",
 		Model:    "test-model",
 		System:   "you are kloo",
+		// Production config.Resolve supplies this default. Individual tests set 0
+		// explicitly when they need to prove retry is disabled.
+		LLMRetries: DefaultLLMRetries,
 	}, &calls
 }
 
