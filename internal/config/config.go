@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -288,6 +289,45 @@ func loadProviders(profilePath string) (map[string]providerEntry, error) {
 		return nil, fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
 	}
 	return file.Providers, nil
+}
+
+// ProviderInfo is a named provider's resolved endpoint + key, suitable for
+// live provider switching in the TUI without re-parsing the full config.
+type ProviderInfo struct {
+	Name     string
+	Endpoint string
+	APIKey   string
+}
+
+// ListProviders returns all providers from the profile in sorted name order.
+// Used by the TUI's /provider command to offer live endpoint+key switching.
+// A missing or empty providers block returns nil without error.
+func ListProviders(profilePath string, getenv func(string) string) ([]ProviderInfo, error) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	providers, err := loadProviders(profilePath)
+	if err != nil || len(providers) == 0 {
+		return nil, err
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ProviderInfo, 0, len(names))
+	for _, name := range names {
+		p := providers[name]
+		key := ""
+		if p.APIKey != "" {
+			key = expandValue(p.APIKey)
+		}
+		if v := getenv(EnvAPIKey); v != "" {
+			key = v
+		}
+		out = append(out, ProviderInfo{Name: name, Endpoint: p.Endpoint, APIKey: key})
+	}
+	return out, nil
 }
 
 // applyModelTuning layers a per-model entry's non-nil tuning fields onto cfg

@@ -2,10 +2,13 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lokalhub/kloo/internal/config"
 )
 
 // isSlash reports whether a submitted line is a slash command.
@@ -102,6 +105,8 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashModel(arg), nil
 	case "/mode":
 		return m.slashMode(arg), nil
+	case "/provider":
+		return m.slashProvider(arg), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
@@ -133,6 +138,48 @@ func (m Model) slashMode(value string) Model {
 	default:
 		return m.appendItem(infoItem{text: "invalid mode: " + value + " (valid: auto, accept-edits, approve-each)"})
 	}
+}
+
+// slashProvider switches the active provider (endpoint+key) for the next run
+// without restarting kloo. With no argument it lists available providers from
+// the profile. With a name it applies that provider's endpoint+key immediately.
+func (m Model) slashProvider(name string) Model {
+	name = strings.TrimSpace(name)
+	providers, err := config.ListProviders(m.profilePath, m.getenv)
+	if err != nil {
+		return m.appendItem(infoItem{text: "provider: could not load profile: " + err.Error()})
+	}
+	if len(providers) == 0 {
+		return m.appendItem(infoItem{text: "provider: no providers defined in profile (add a \"providers\" block to your profiles.json)"})
+	}
+	if name == "" {
+		// list available providers
+		lines := []string{"providers:"}
+		for _, p := range providers {
+			active := ""
+			if p.Name == m.runtime.Provider {
+				active = " ← active"
+			}
+			lines = append(lines, fmt.Sprintf("  %s  %s%s", p.Name, p.Endpoint, active))
+		}
+		return m.appendItem(infoItem{text: strings.Join(lines, "\n")})
+	}
+	// find the named provider
+	for _, p := range providers {
+		if p.Name == name {
+			m.runtime.Provider = p.Name
+			m.runtime.Endpoint = p.Endpoint
+			m.runtime.APIKey = p.APIKey
+			m.status.provider = p.Name
+			return m.appendItem(infoItem{text: fmt.Sprintf("provider: %s (%s)", p.Name, p.Endpoint)})
+		}
+	}
+	// not found — show options
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
+		names = append(names, p.Name)
+	}
+	return m.appendItem(infoItem{text: fmt.Sprintf("provider %q not found (available: %s)", name, strings.Join(names, ", "))})
 }
 
 // submitTask appends the user line and, if a Runner is wired, launches an

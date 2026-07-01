@@ -21,6 +21,7 @@ type slashCommand struct {
 var slashCommands = []slashCommand{
 	{name: "/model", desc: "switch the active model"},
 	{name: "/models", desc: "list available models", noArg: true},
+	{name: "/provider", desc: "switch provider (endpoint+key)"},
 	{name: "/add", desc: "pin a file to context"},
 	{name: "/mode", desc: "set permission dial"},
 }
@@ -95,14 +96,18 @@ func (m Model) handleSlashMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return nm, cmd, true
 	case tea.KeyEnter:
 		c := m.menu.items[m.menu.index]
-		// When the highlighted command is already FULLY typed, Enter runs it the
-		// normal way — so bare "/model" opens the picker, "/add" reports its missing
-		// arg, etc. (the menu only completes a PARTIAL name). Otherwise Enter selects
-		// the highlight: a no-arg command executes, an arg-taking one is inserted.
-		if strings.TrimSpace(m.input.Value()) == c.name {
-			m.menu = nil
-			nm, cmd := m.submit()
-			return nm, cmd, true
+		// When the typed text is an exact match for ANY menu item (not just the
+		// highlighted one), run it directly — so "/mode" submits as /mode even
+		// when /model is highlighted at index 0. Without this, "/mode" would
+		// incorrectly select /model because both start with "mode" and /model
+		// sorts first in the filtered list.
+		typed := strings.TrimSpace(m.input.Value())
+		for _, item := range m.menu.items {
+			if typed == item.name {
+				m.menu = nil
+				nm, cmd := m.submit()
+				return nm, cmd, true
+			}
 		}
 		nm, cmd := m.selectSlashCommand(c, true)
 		return nm, cmd, true

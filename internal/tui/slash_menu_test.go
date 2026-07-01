@@ -28,7 +28,7 @@ func menuNames(m Model) []string {
 func TestSlashMenuTypingSlashShowsAllCommands(t *testing.T) {
 	m := typeRunes(newSized(), "/")
 	got := menuNames(m)
-	want := []string{"/model", "/models", "/add", "/mode"}
+	want := []string{"/model", "/models", "/provider", "/add", "/mode"}
 	if len(got) != len(want) {
 		t.Fatalf("typing / should show all %d commands, got %v", len(want), got)
 	}
@@ -97,6 +97,41 @@ func TestSlashMenuEnterOnNoArgCommandExecutes(t *testing.T) {
 	}
 	if !contains(m.View(), "openai/gpt-4.1-mini") {
 		t.Errorf("Enter on /models should list models:\n%s", m.View())
+	}
+}
+
+// TestSlashMenuModeExactMatchSubmits is the regression test for the /mode bug:
+// typing "/mode" exactly and pressing Enter should SUBMIT /mode (opening the
+// mode dialog), NOT select the highlighted /model (which sorts first in the
+// filtered list because "model" also starts with "mode").
+func TestSlashMenuModeExactMatchSubmits(t *testing.T) {
+	m := typeRunes(newSized(), "/mode")
+	if m.menu == nil {
+		t.Fatal("/mode should keep the menu open (both /model and /mode match)")
+	}
+	// index 0 is /model (comes first); the bug was: Enter selected /model instead of running /mode
+	if m.menu.items[0].name != "/model" {
+		t.Fatalf("first item should be /model (prefix match), got %q", m.menu.items[0].name)
+	}
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	out := m2.(Model)
+	// menu must close and the input must be cleared (submitted), not inserted
+	if out.menu != nil {
+		t.Error("Enter on fully-typed /mode should close the menu")
+	}
+	// /mode with no arg produces an error message — confirm it ran /mode, not /model
+	if contains(out.View(), "/model ") {
+		t.Error("Enter should have submitted /mode, not inserted /model")
+	}
+}
+
+// TestSlashProviderListNoProfile: /provider with no profile configured returns
+// a friendly message rather than crashing.
+func TestSlashProviderListNoProfile(t *testing.T) {
+	m := newSized() // no profilePath set
+	m2 := m.slashProvider("")
+	if !contains(m2.View(), "provider") {
+		t.Errorf("bare /provider should mention 'provider', got:\n%s", m2.View())
 	}
 }
 
