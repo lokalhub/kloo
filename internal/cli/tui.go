@@ -126,6 +126,8 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		NoThink:       cfg.NoThink,
 		NoThinkLocked: cfg.NoThinkExplicit,
 		NewClient:     clientFactory,
+		ProfilePath:   profilePath,
+		Getenv:        getenv,
 		History:       sess.Transcript, // replay prior turns on resume (empty for a fresh session)
 	})
 	// Sessions are fresh by default, so on exit print the id (only once something

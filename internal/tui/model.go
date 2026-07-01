@@ -81,6 +81,11 @@ type Model struct {
 	picker       *modelPicker
 	runtime      RuntimeConfig
 
+	// profilePath + getenv let /provider load the profile's providers block live
+	// for switching endpoint+key without restarting kloo.
+	profilePath string
+	getenv      func(string) string
+
 	// menu is the inline, filterable slash-command menu shown above the input when
 	// the current line starts with "/" and no run is active (slash_menu.go); nil
 	// when closed.
@@ -120,6 +125,10 @@ type Config struct {
 	NoThink       bool
 	NoThinkLocked bool
 	NewClient     func(endpoint, model, apiKey string) llm.LLMClient
+	// ProfilePath and Getenv let the TUI load the profile's providers block live
+	// for the /provider command (switch endpoint+key without restarting kloo).
+	ProfilePath string
+	Getenv      func(string) string
 	// History is the prior conversation to replay on resume (compact display items
 	// from the saved session). Rendered above the banner so a resumed session shows
 	// what happened before, not just a one-line notice. Empty for a fresh session.
@@ -185,6 +194,11 @@ func New(cfg Config) Model {
 	m.source = cfg.Source
 	if m.source == nil {
 		m.source = keyboardSource{} // the one v1 implementation of TaskSource
+	}
+	m.profilePath = cfg.ProfilePath
+	m.getenv = cfg.Getenv
+	if m.getenv == nil {
+		m.getenv = func(string) string { return "" }
 	}
 	// Replay the prior conversation (resume), then the banner as the boundary line
 	// between "earlier" and the live prompt.
