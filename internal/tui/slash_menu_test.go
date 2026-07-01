@@ -101,37 +101,60 @@ func TestSlashMenuEnterOnNoArgCommandExecutes(t *testing.T) {
 }
 
 // TestSlashMenuModeExactMatchSubmits is the regression test for the /mode bug:
-// typing "/mode" exactly and pressing Enter should SUBMIT /mode (opening the
-// mode dialog), NOT select the highlighted /model (which sorts first in the
-// filtered list because "model" also starts with "mode").
+// typing "/mode" exactly and pressing Enter should SUBMIT /mode, NOT select the
+// highlighted /model (which sorts first because "model" also starts with "mode").
+// The positive assertion is that /mode's "invalid mode" error appears — proving
+// slashMode ran, not slashModel (which would have inserted "/model " into the input).
 func TestSlashMenuModeExactMatchSubmits(t *testing.T) {
 	m := typeRunes(newSized(), "/mode")
 	if m.menu == nil {
-		t.Fatal("/mode should keep the menu open (both /model and /mode match)")
+		t.Fatal("/mode should keep the menu open (both /model and /mode match the prefix)")
 	}
-	// index 0 is /model (comes first); the bug was: Enter selected /model instead of running /mode
 	if m.menu.items[0].name != "/model" {
-		t.Fatalf("first item should be /model (prefix match), got %q", m.menu.items[0].name)
+		t.Fatalf("first filtered item should be /model (alphabetic prefix order), got %q", m.menu.items[0].name)
 	}
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	out := m2.(Model)
-	// menu must close and the input must be cleared (submitted), not inserted
 	if out.menu != nil {
 		t.Error("Enter on fully-typed /mode should close the menu")
 	}
-	// /mode with no arg produces an error message — confirm it ran /mode, not /model
-	if contains(out.View(), "/model ") {
-		t.Error("Enter should have submitted /mode, not inserted /model")
+	if out.input.Value() != "" {
+		t.Errorf("input should be cleared after submitting /mode, got %q", out.input.Value())
+	}
+	// /mode with no arg runs slashMode("") which emits "invalid mode:" —
+	// that message confirms /mode ran. If /model had been selected it would
+	// have inserted "/model " into the input (non-empty) and shown no error.
+	if !contains(out.View(), "invalid mode") {
+		t.Errorf("Enter on /mode should have run slashMode (expects 'invalid mode' error for empty arg), view:\n%s", out.View())
 	}
 }
 
-// TestSlashProviderListNoProfile: /provider with no profile configured returns
-// a friendly message rather than crashing.
-func TestSlashProviderListNoProfile(t *testing.T) {
-	m := newSized() // no profilePath set
-	m2 := m.slashProvider("")
-	if !contains(m2.View(), "provider") {
-		t.Errorf("bare /provider should mention 'provider', got:\n%s", m2.View())
+// TestSlashMenuModeWithArgSubmitsCorrectly: /mode approve-each (with a space,
+// menu closed) still dispatches correctly and isn't confused by /model.
+func TestSlashMenuModeWithArgSubmitsCorrectly(t *testing.T) {
+	m := typeAndEnter(newSized(), "/mode approve-each")
+	if !contains(m.View(), "approve-each") {
+		t.Errorf("/mode approve-each should confirm the mode change, view:\n%s", m.View())
+	}
+	if m.mode != ModeApproveEach {
+		t.Errorf("mode should be approve-each, got %q", m.mode)
+	}
+}
+
+// TestSlashMenuProviderAppearsInMenu: /provider appears in the slash menu.
+func TestSlashMenuProviderAppearsInMenu(t *testing.T) {
+	m := typeRunes(newSized(), "/pro")
+	if m.menu == nil {
+		t.Fatal("/pro should open the slash menu")
+	}
+	found := false
+	for _, item := range m.menu.items {
+		if item.name == "/provider" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("/provider should appear in the filtered menu for '/pro', got %v", menuNames(m))
 	}
 }
 

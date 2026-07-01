@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -297,6 +299,107 @@ func TestSlashAddMissingPath(t *testing.T) {
 	}
 	if !contains(m.View(), "/add needs a path") {
 		t.Errorf("expected a missing-path message:\n%s", m.View())
+	}
+}
+
+// providerProfile writes a temporary profile with two providers and returns its path.
+func providerProfile(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.json")
+	body := `{
+		"providers": {
+			"local":      {"endpoint": "http://127.0.0.1:8080/v1"},
+			"openrouter": {"endpoint": "https://openrouter.ai/api/v1", "apiKey": "sk-or-test"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	return path
+}
+
+// modelWithProfile builds a TUI model wired to a temp profile for /provider tests.
+func modelWithProfile(t *testing.T) Model {
+	t.Helper()
+	return sized(New(Config{
+		Model:       "test-model",
+		MaxSteps:    40,
+		ProfilePath: providerProfile(t),
+		Getenv:      func(string) string { return "" },
+	}), tw, th)
+}
+
+func TestSlashProviderListShowsAllProviders(t *testing.T) {
+	m := modelWithProfile(t)
+	m2 := typeAndEnter(m, "/provider")
+	if !contains(m2.View(), "local") || !contains(m2.View(), "openrouter") {
+		t.Errorf("/provider should list both providers, got:\n%s", m2.View())
+	}
+	if !contains(m2.View(), "http://127.0.0.1:8080/v1") {
+		t.Errorf("/provider list should show endpoints, got:\n%s", m2.View())
+	}
+}
+
+func TestSlashProviderSwitchUpdatesRuntimeEndpointAndKey(t *testing.T) {
+	m := modelWithProfile(t)
+	// initial provider is not set
+	if m.runtime.Endpoint == "https://openrouter.ai/api/v1" {
+		t.Fatal("precondition: runtime should not start on openrouter")
+	}
+	m2 := typeAndEnter(m, "/provider openrouter")
+	if m2.runtime.Endpoint != "https://openrouter.ai/api/v1" {
+		t.Errorf("runtime.Endpoint should be openrouter, got %q", m2.runtime.Endpoint)
+	}
+	if m2.runtime.Provider != "openrouter" {
+		t.Errorf("runtime.Provider should be openrouter, got %q", m2.runtime.Provider)
+	}
+	if m2.runtime.APIKey != "sk-or-test" {
+		t.Errorf("runtime.APIKey should be sk-or-test, got %q", m2.runtime.APIKey)
+	}
+	if !contains(m2.View(), "openrouter") {
+		t.Errorf("/provider switch should confirm the new provider, got:\n%s", m2.View())
+	}
+}
+
+func TestSlashProviderSwitchBack(t *testing.T) {
+	m := modelWithProfile(t)
+	m = typeAndEnter(m, "/provider openrouter")
+	if m.runtime.Endpoint != "https://openrouter.ai/api/v1" {
+		t.Fatalf("precondition: should be on openrouter after first switch")
+	}
+	m = typeAndEnter(m, "/provider local")
+	if m.runtime.Endpoint != "http://127.0.0.1:8080/v1" {
+		t.Errorf("switching back to local should update endpoint, got %q", m.runtime.Endpoint)
+	}
+	if m.runtime.APIKey != "" {
+		t.Errorf("local has no apiKey, runtime.APIKey should be empty, got %q", m.runtime.APIKey)
+	}
+}
+
+func TestSlashProviderUnknownNameShowsOptions(t *testing.T) {
+	m := modelWithProfile(t)
+	m2 := typeAndEnter(m, "/provider bogus")
+	if !contains(m2.View(), "bogus") {
+		t.Errorf("unknown provider should echo the bad name, got:\n%s", m2.View())
+	}
+	if !contains(m2.View(), "local") || !contains(m2.View(), "openrouter") {
+		t.Errorf("unknown provider error should list available names, got:\n%s", m2.View())
+	}
+	// runtime must be unchanged
+	if m2.runtime.Provider == "bogus" {
+		t.Error("runtime.Provider must not be set to an unknown name")
+	}
+}
+
+func TestSlashProviderNoProfileGraceful(t *testing.T) {
+	m := newSized() // no profilePath
+	m2 := typeAndEnter(m, "/provider openrouter")
+	if !contains(m2.View(), "provider") {
+		t.Errorf("/provider with no profile should show a friendly message, got:\n%s", m2.View())
+	}
+	if m2.runtime.Provider == "openrouter" {
+		t.Error("runtime.Provider must not change when no profile is configured")
 	}
 }
 
