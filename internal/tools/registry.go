@@ -130,6 +130,17 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
 }
 
+// registerHidden makes t dispatchable (Lookup/Dispatch find it) WITHOUT adding it
+// to the advertised vocabulary (Tools() / the OpenAI tools param). It is used to
+// withhold the model-facing run_command in scoped / patch-only runs while still
+// rejecting a fallback-adapter run_command call before execution (disabled_shell.go),
+// instead of surfacing a generic unknown-tool error. Last write wins; a name here
+// never appears in `order`.
+func (r *Registry) registerHidden(t Tool) {
+	delete(r.tools, t.Name())
+	r.tools[t.Name()] = t
+}
+
 // Lookup returns the tool registered under name.
 func (r *Registry) Lookup(name string) (Tool, bool) {
 	t, ok := r.tools[name]

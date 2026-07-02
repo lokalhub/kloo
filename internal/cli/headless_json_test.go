@@ -15,6 +15,7 @@ import (
 	"github.com/lokalhub/kloo/internal/config"
 	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 func TestPrintHeadlessJSON(t *testing.T) {
@@ -449,6 +450,7 @@ func TestBenchmarkExitCodeMap(t *testing.T) {
 		"interrupted":       benchmarkExitInterrupted,
 		"internal_error":    benchmarkExitInternal,
 		"answered":          benchmarkExitAnswered,
+		"off_scope_edit":    benchmarkExitScope,
 	}
 	for code, want := range cases {
 		t.Run(code, func(t *testing.T) {
@@ -459,5 +461,122 @@ func TestBenchmarkExitCodeMap(t *testing.T) {
 	}
 	if got := benchmarkExitCode(runSummary{Success: true}); got != 0 {
 		t.Fatalf("success exit = %d, want 0", got)
+	}
+}
+
+// TestClassifyOffScopeSafetyStop: an A7 safety-stop on an off-scope edit classifies
+// as off_scope_edit with source=scope and the denial class/tool/message.
+func TestClassifyOffScopeSafetyStop(t *testing.T) {
+	rep := &agent.Report{
+		Reason: agent.ReasonSafetyStop,
+		Safety: &agent.SafetyEvidence{
+			Rule:    "off-scope-edit",
+			Class:   "outside_allow",
+			Tool:    "write_file",
+			Message: "write denied: README.md is outside the allowed edit scope",
+		},
+	}
+	code, detail := classifyFailure(rep, nil)
+	if code != "off_scope_edit" {
+		t.Fatalf("code = %q, want off_scope_edit", code)
+	}
+	if detail.Source != "scope" || detail.Class != "outside_allow" || detail.Tool != "write_file" {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if detail.Message == "" {
+		t.Fatal("expected a bounded message naming the path/policy")
+	}
+}
+
+// TestClassifyReadOnlySafetyStop: a read-only safety-stop carries class read_only.
+func TestClassifyReadOnlySafetyStop(t *testing.T) {
+	rep := &agent.Report{
+		Reason: agent.ReasonSafetyStop,
+		Safety: &agent.SafetyEvidence{Rule: "read-only-edit", Class: "read_only", Tool: "edit_file", Message: "write denied: tests/x_test.go is read-only"},
+	}
+	code, detail := classifyFailure(rep, nil)
+	if code != "off_scope_edit" || detail.Class != "read_only" {
+		t.Fatalf("code=%q detail=%+v, want off_scope_edit/read_only", code, detail)
+	}
+}
+
+// TestClassifyRepeatedVerifySafetyStop: the repeated-verify stop preserves
+// verify_failed as "final failed verify" and maps to repetition_halt with class
+// repeated_verify_failure.
+func TestClassifyRepeatedVerifySafetyStop(t *testing.T) {
+	rep := &agent.Report{
+		Reason: agent.ReasonSafetyStop,
+		Safety: &agent.SafetyEvidence{Rule: "repeated-verify", Class: "repeated_verify_failure", Message: "verify failed 2 times"},
+	}
+	code, detail := classifyFailure(rep, nil)
+	if code != "repetition_halt" || detail.Class != "repeated_verify_failure" {
+		t.Fatalf("code=%q detail=%+v, want repetition_halt/repeated_verify_failure", code, detail)
+	}
+}
+
+// TestClassifyScopeDenialWithoutStopRule: a run that was denied and then ended
+// calmly (unverified) is still classified off_scope_edit via LastScopeDenial.
+func TestClassifyScopeDenialWithoutStopRule(t *testing.T) {
+	rep := &agent.Report{
+		Reason:          agent.ReasonUnverified,
+		LastScopeDenial: &agent.ScopeDenial{Class: "outside_allow", Tool: "write_file", Message: "write denied: README.md is outside the allowed edit scope"},
+	}
+	code, detail := classifyFailure(rep, nil)
+	if code != "off_scope_edit" || detail.Source != "scope" || detail.Class != "outside_allow" {
+		t.Fatalf("code=%q detail=%+v, want off_scope_edit/scope/outside_allow", code, detail)
+	}
+}
+
+// TestOffScopeCountersInJSON: the off_scope/read_only counters surface in the
+// KLOO_RESULT_JSON tool_counters block.
+func TestOffScopeCountersInJSON(t *testing.T) {
+	cfg := config.Config{Model: "m", Endpoint: "http://x/v1"}
+	rep := &agent.Report{
+		Reason:       agent.ReasonSafetyStop,
+		Safety:       &agent.SafetyEvidence{Rule: "off-scope-edit", Class: "deny", Tool: "edit_file", Message: "denied"},
+		ToolCounters: agent.ToolCounters{OffScopeEdits: 2, ReadOnlyEdits: 1},
+	}
+	var buf bytes.Buffer
+	printHeadlessJSON(&buf, cfg, "", rep, time.Second, nil)
+	line := strings.TrimPrefix(strings.TrimSpace(buf.String()), "KLOO_RESULT_JSON ")
+	var s map[string]any
+	if err := json.Unmarshal([]byte(line), &s); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if s["failure_code"] != "off_scope_edit" {
+		t.Fatalf("failure_code = %v", s["failure_code"])
+	}
+	tc, _ := s["tool_counters"].(map[string]any)
+	if tc == nil || tc["off_scope_edits"].(float64) != 2 || tc["read_only_edits"].(float64) != 1 {
+		t.Fatalf("tool_counters = %v", s["tool_counters"])
+	}
+}
+
+// TestClassifyPatchOnlyRejectCalmEnd: a run that ended calmly (unverified) after a
+// patch-only run_command rejection classifies as tool_call_invalid with class
+// patch_only_forbidden_tool (the A4 machine-readable contract, spec line 34).
+func TestClassifyPatchOnlyRejectCalmEnd(t *testing.T) {
+	rep := &agent.Report{
+		Reason:          agent.ReasonUnverified,
+		PatchOnlyReject: &agent.ToolReject{Tool: "run_command", Class: "patch_only_forbidden_tool", Message: "run_command is disabled in patch-only mode"},
+	}
+	code, detail := classifyFailure(rep, nil)
+	if code != "tool_call_invalid" || detail.Class != "patch_only_forbidden_tool" || detail.Source != "tool" {
+		t.Fatalf("code=%q detail=%+v, want tool_call_invalid/patch_only_forbidden_tool/tool", code, detail)
+	}
+	if detail.Tool != "run_command" {
+		t.Fatalf("detail.Tool = %q, want run_command", detail.Tool)
+	}
+}
+
+// TestClassifyPatchOnlyForbiddenTerminalError: when ErrPatchOnlyForbidden is the
+// terminal run error, classifyErrorFailure maps it to tool_call_invalid /
+// patch_only_forbidden_tool.
+func TestClassifyPatchOnlyForbiddenTerminalError(t *testing.T) {
+	err := fmt.Errorf("wrap: %w", tools.ErrPatchOnlyForbidden)
+	rep := &agent.Report{Reason: agent.ReasonError, Err: err}
+	code, detail := classifyFailure(rep, err)
+	if code != "tool_call_invalid" || detail.Class != "patch_only_forbidden_tool" {
+		t.Fatalf("code=%q detail=%+v, want tool_call_invalid/patch_only_forbidden_tool", code, detail)
 	}
 }

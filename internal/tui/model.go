@@ -57,6 +57,16 @@ type Model struct {
 	// activity is the display-only in-flight phrase ("editing <file>", "running
 	// <cmd>") shown in the thinking line, set from each tool event (task 06).
 	activity string
+
+	// C8 active-run visibility (view.go renderRunningRegions):
+	//   activeTask    — the original request, pinned in the task header while running.
+	//   latestSummary — the latest finalized assistant prose line, pinned above input.
+	//   activityLog   — a compact rolling log of per-tool/step entries (last few shown).
+	// All are display-only, derived from existing loop signals; the full transcript
+	// still records every card and assistant turn.
+	activeTask    string
+	latestSummary string
+	activityLog   []activityEntry
 	// expanded toggles full vs truncated run-command output (ctrl+o, task 03).
 	expanded bool
 
@@ -85,6 +95,12 @@ type Model struct {
 	// for switching endpoint+key without restarting kloo.
 	profilePath string
 	getenv      func(string) string
+
+	// reloadProfile re-resolves the runtime from a DIFFERENT profiles.json for the
+	// /profile command (C6). It preserves the launch CLI flags (flags > env > profile
+	// precedence) and returns the new runtime plus a redacted one-line summary; on
+	// error the caller keeps the current runtime intact. nil ⇒ /profile unavailable.
+	reloadProfile func(path string) (RuntimeConfig, string, error)
 
 	// menu is the inline, filterable slash-command menu shown above the input when
 	// the current line starts with "/" and no run is active (slash_menu.go); nil
@@ -129,6 +145,10 @@ type Config struct {
 	// for the /provider command (switch endpoint+key without restarting kloo).
 	ProfilePath string
 	Getenv      func(string) string
+	// ReloadProfile backs the /profile <path> command (C6): re-resolve the runtime
+	// from a different profiles.json (preserving launch flags) for subsequent runs.
+	// Returns the new runtime + a redacted summary; nil ⇒ /profile is unavailable.
+	ReloadProfile func(path string) (RuntimeConfig, string, error)
 	// History is the prior conversation to replay on resume (compact display items
 	// from the saved session). Rendered above the banner so a resumed session shows
 	// what happened before, not just a one-line notice. Empty for a fresh session.
@@ -200,6 +220,7 @@ func New(cfg Config) Model {
 	if m.getenv == nil {
 		m.getenv = func(string) string { return "" }
 	}
+	m.reloadProfile = cfg.ReloadProfile
 	// Replay the prior conversation (resume), then the banner as the boundary line
 	// between "earlier" and the live prompt.
 	for _, d := range cfg.History {
@@ -249,6 +270,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolEventMsg:
 		return m.handleToolEvent(msg)
 	case noticeMsg:
+		// C8: a transient notice (e.g. a model-call retry) also lands in the compact
+		// active-run log so a slow/cold endpoint reads as progress, not a stall.
+		if m.running {
+			m = m.pushActivity(actInfo, msg.text)
+		}
 		return m.appendItem(infoItem{text: msg.text}), nil
 	case progressMsg:
 		return m.handleProgress(msg)

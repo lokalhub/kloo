@@ -14,6 +14,7 @@ const (
 	benchmarkExitInterrupted = 18
 	benchmarkExitInternal    = 19
 	benchmarkExitAnswered    = 20
+	benchmarkExitScope       = 21
 )
 
 type exitError struct {
@@ -45,6 +46,12 @@ func benchmarkExitCode(summary runSummary) int {
 		return benchmarkExitContext
 	case "repetition_halt", "edit_failed":
 		return benchmarkExitRepetition
+	case "off_scope_edit":
+		return benchmarkExitScope
+	case "precheck_failed", "postcheck_failed":
+		// Hook gate failures are verify-family (a gate around verify did not pass);
+		// the specific failure_code distinguishes them for analysis.
+		return benchmarkExitVerify
 	case "json_invalid":
 		return benchmarkExitJSON
 	case "budget_exceeded":

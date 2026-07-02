@@ -65,7 +65,62 @@ const (
 	// nothing was checked. Pass --verify (or work in a recognised project) to gate
 	// on a real command.
 	ReasonUnverified Reason = "unverified"
+	// ReasonSafetyStop: an A7 --stop-on hard-stop rule fired on a DETECTABLE unsafe
+	// pattern (an off-scope edit, a read-only write, or repeated verifier failures),
+	// terminating the run early. The specific rule + class is carried in
+	// Report.Safety; the headless classifier maps it to a stable failure code.
+	ReasonSafetyStop Reason = "safety-stop"
 )
+
+// StopPolicy is the resolved A7 hard-stop configuration the loop enforces. It
+// mirrors config.StopPolicy (kept separate so the agent package does not import
+// config): every trigger is DETECTABLE, never a subjective heuristic.
+type StopPolicy struct {
+	OffScopeEdit   bool // stop on the first off-scope denial (incl. a scoped run_command rejection)
+	ReadOnlyEdit   bool // stop on the first read-only write attempt
+	RepeatedVerify int  // stop after this many repeated verifier failures (0 ⇒ off)
+}
+
+// Active reports whether any stop rule is configured.
+func (s StopPolicy) Active() bool {
+	return s.OffScopeEdit || s.ReadOnlyEdit || s.RepeatedVerify > 0
+}
+
+// ScopeDenial is the bounded detail of a model write the scope policy rejected this
+// run — recorded on the Report so a non-stop run that ends calmly after a denial can
+// still be classified off_scope_edit in KLOO_RESULT_JSON. It mirrors tools.ScopeError.
+type ScopeDenial struct {
+	Class   string // deny | outside_allow | read_only | run_command_disabled_for_scope
+	Tool    string
+	Path    string
+	Rule    string
+	Message string
+}
+
+// patchOnlyForbiddenClass is the stable failure_detail.class for a model-facing
+// run_command rejected because patch-only mode (A4) is active (spec line 34).
+const patchOnlyForbiddenClass = "patch_only_forbidden_tool"
+
+// ToolReject is the bounded detail of a model tool call rejected by a run-mode
+// restriction that is NOT a scope denial — currently the A4 patch-only run_command
+// rejection. Recorded on the Report so a run ending calmly after such a rejection
+// still classifies as tool_call_invalid / class patch_only_forbidden_tool in
+// KLOO_RESULT_JSON. It mirrors ScopeDenial (which covers the scope path).
+type ToolReject struct {
+	Tool    string
+	Class   string // e.g. patch_only_forbidden_tool
+	Message string
+}
+
+// SafetyEvidence is the report detail for a ReasonSafetyStop (A7): which rule fired
+// and its stable class, plus the tool/path/message when a scope denial triggered it.
+type SafetyEvidence struct {
+	Rule    string // off-scope-edit | read-only-edit | repeated-verify
+	Class   string // scope class, or repeated_verify_failure
+	Tool    string
+	Path    string
+	Message string
+}
 
 // BudgetKind names which budget tripped.
 type BudgetKind string
@@ -130,6 +185,37 @@ type VerifyResult struct {
 	// non-zero. The loop turns a non-nil Err into an `error` outcome, never a
 	// false pass.
 	Err error
+
+	// --- B5 layered verifier hooks (all zero/empty for a plain CommandVerifier,
+	// so an un-hooked run's report/JSON is byte-identical) ---
+	//
+	// Passed above is the OVERALL gate: precheck(s) AND verify AND postcheck(s) all
+	// passed. Command/ExitCode/Stdout/Stderr describe the stage that DETERMINED the
+	// outcome (the verify command when it decides; the failing hook when a hook
+	// short-circuits), so the existing report line stays meaningful.
+	//
+	// FailedStage names which layer produced a non-success outcome: "precheck" or
+	// "postcheck". It is "" when the verify command itself decided (pass, or the
+	// existing verify_failed path) — so hook failures classify distinctly without
+	// disturbing verify_failed.
+	FailedStage string
+	// VerifyRan / VerifyPassed record the verify command's OWN outcome, independent
+	// of hooks (VerifyRan is false when a precheck short-circuited before verify).
+	VerifyRan    bool
+	VerifyPassed bool
+	// Prechecks / Postchecks are the per-hook results actually attempted this verify,
+	// in order, for JSON observability.
+	Prechecks  []HookResult
+	Postchecks []HookResult
+}
+
+// HookResult is one precheck/postcheck command's outcome within a LayeredVerifier
+// (B5). It is surfaced in the run summary so a benchmark can see each gate.
+type HookResult struct {
+	Command  string
+	Stage    string // "precheck" | "postcheck"
+	Passed   bool
+	ExitCode int
 }
 
 // ToolCounters records loop-quality metrics for benchmark comparisons. It is
@@ -143,6 +229,11 @@ type ToolCounters struct {
 	NoOpEdits        int
 	VerifyAttempts   int
 	ToolErrors       int
+	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
+	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
+	// that hit a read-only file specifically (A2).
+	OffScopeEdits int
+	ReadOnlyEdits int
 }
 
 // Verifier runs the configured verify command and returns the real result.
@@ -292,10 +383,20 @@ type Report struct {
 	FinalVerify VerifyResult // the last real verify signal
 	Budget      *BudgetEvidence
 	Churn       *ChurnEvidence
-	Err         error
-	RolledBack  bool
-	TokensUsed  int
-	Elapsed     time.Duration
+	// Safety is set when the run ended via an A7 --stop-on rule (ReasonSafetyStop).
+	Safety *SafetyEvidence
+	// LastScopeDenial is the most recent scope denial this run (nil when none), so a
+	// run that was denied and then ended calmly (answered/unverified) can still be
+	// classified off_scope_edit in the headless JSON even without a --stop-on rule.
+	LastScopeDenial *ScopeDenial
+	// PatchOnlyReject is the most recent model-facing run_command rejected by
+	// patch-only mode (A4), so a run ending calmly afterwards classifies as
+	// tool_call_invalid / patch_only_forbidden_tool. nil when none.
+	PatchOnlyReject *ToolReject
+	Err             error
+	RolledBack      bool
+	TokensUsed      int
+	Elapsed         time.Duration
 	// Compactions is how many times working memory folded cold turns into the
 	// running summary this run (0 when memory is off or never triggered). The
 	// report/UI print it only when > 0, so the no-compaction output is unchanged.

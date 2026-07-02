@@ -50,6 +50,8 @@ func editsOf(msg toolEventMsg) []editPair {
 // signal, no internal/agent change).
 func (m Model) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
 	m.activity = activityPhrase(msg)
+	// C8: also fold the completed tool into the compact active-run log.
+	m = m.pushActivity(activityFromTool(msg))
 	var it item
 	switch msg.Name {
 	case "edit_file":

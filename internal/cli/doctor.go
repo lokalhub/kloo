@@ -76,6 +76,22 @@ type resolvedConfigDiagnostic struct {
 	Memory                 memoryDiagnostic  `json:"memory"`
 	AllowedImportDirsCount int               `json:"allowed_import_dirs_count"`
 	AllowedEnvNames        []string          `json:"allowed_env_names"`
+	PatchOnly              bool              `json:"patch_only"`
+	Scope                  scopeDiagnostic   `json:"scope"`
+	StopOn                 stopOnDiagnostic  `json:"stop_on"`
+}
+
+type scopeDiagnostic struct {
+	Active   bool     `json:"active"`
+	Allow    []string `json:"allow,omitempty"`
+	Deny     []string `json:"deny,omitempty"`
+	ReadOnly []string `json:"read_only,omitempty"`
+}
+
+type stopOnDiagnostic struct {
+	OffScopeEdit   bool `json:"off_scope_edit"`
+	ReadOnlyEdit   bool `json:"read_only_edit"`
+	RepeatedVerify int  `json:"repeated_verify"`
 }
 
 func newDoctorCmd(deps *Deps) *cobra.Command {
@@ -160,6 +176,13 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 	sort.Strings(enabled)
 	allowedEnv := append([]string(nil), cfg.AllowedEnv...)
 	sort.Strings(allowedEnv)
+	// Resolve the effective scope (CLI flags overlaid on .kloo/scope.yaml under cwd),
+	// so doctor reflects exactly what a run would enforce. A manifest error degrades
+	// to "no scope" rather than failing the diagnostic.
+	scopeDiag := scopeDiagnostic{}
+	if sc, err := config.ResolveScope(config.ScopeFlags{Allow: cfg.ScopeAllow, Deny: cfg.ScopeDeny, ReadOnly: cfg.ScopeReadOnly}, cwd); err == nil {
+		scopeDiag = scopeDiagnostic{Active: sc.Active(), Allow: sc.Allow, Deny: sc.Deny, ReadOnly: sc.ReadOnly}
+	}
 	return resolvedConfigDiagnostic{
 		Profile:             profileDiagnostic{Path: path, Exists: exists},
 		Provider:            cfg.Provider,
@@ -196,6 +219,13 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		},
 		AllowedImportDirsCount: len(cfg.AllowedImportDirs),
 		AllowedEnvNames:        allowedEnv,
+		PatchOnly:              cfg.PatchOnly,
+		Scope:                  scopeDiag,
+		StopOn: stopOnDiagnostic{
+			OffScopeEdit:   cfg.StopOn.OffScopeEdit,
+			ReadOnlyEdit:   cfg.StopOn.ReadOnlyEdit,
+			RepeatedVerify: cfg.StopOn.RepeatedVerify,
+		},
 	}
 }
 
@@ -251,6 +281,11 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 		noneDash(diag.Memory.StoreTool), diag.Memory.MaxRecallBytes, diag.Memory.StoreOnFailure)
 	fmt.Fprintf(out, "allowed_import_dirs: %d\n", diag.AllowedImportDirsCount)
 	fmt.Fprintf(out, "allowed_env: %d names=%q\n", len(diag.AllowedEnvNames), diag.AllowedEnvNames)
+	fmt.Fprintf(out, "patch_only: %t\n", diag.PatchOnly)
+	fmt.Fprintf(out, "scope: active=%t allow=%v deny=%v read_only=%v\n",
+		diag.Scope.Active, diag.Scope.Allow, diag.Scope.Deny, diag.Scope.ReadOnly)
+	fmt.Fprintf(out, "stop_on: off_scope_edit=%t read_only_edit=%t repeated_verify=%d\n",
+		diag.StopOn.OffScopeEdit, diag.StopOn.ReadOnlyEdit, diag.StopOn.RepeatedVerify)
 }
 
 func noneDash(s string) string {

@@ -26,7 +26,13 @@ func (m Model) View() string {
 	menu := m.renderSlashMenu()
 	input := m.renderInput()
 	hint := m.renderHint()
-	parts := []string{header, transcript, activity}
+	parts := []string{header, transcript}
+	// C8: while a run is active, pin the task header, latest assistant summary, and
+	// compact activity log between the transcript and the thinking line (mock order).
+	if rr := m.renderRunningRegions(); rr != "" {
+		parts = append(parts, rr)
+	}
+	parts = append(parts, activity)
 	if picker != "" {
 		parts = append(parts, picker)
 	}
@@ -49,6 +55,20 @@ func (m Model) renderTranscriptRegion() string {
 		if m.menu != nil {
 			if h := vp.Height - lipgloss.Height(m.renderSlashMenu()); h > 1 {
 				vp.Height = h
+			}
+		}
+		// C8: the pinned running regions consume viewport rows while active — shrink a
+		// COPY for rendering (like the picker/menu) so scroll math on the real vp is
+		// untouched and header/input never overlap at small sizes. Because the copy is
+		// shorter than the real vp, re-anchor it to the tail when the user is at the
+		// bottom, so the newest content stays visible (not clipped off the bottom).
+		if rr := m.renderRunningRegions(); rr != "" {
+			atBottom := m.vp.AtBottom()
+			if h := vp.Height - lipgloss.Height(rr); h > 1 {
+				vp.Height = h
+			}
+			if atBottom {
+				vp.GotoBottom()
 			}
 		}
 		return vp.View()
@@ -122,4 +142,45 @@ func (m Model) renderHint() string {
 	dial := "permission dial: auto › accept-edits › approve-each"
 	line := "Esc/Ctrl-C interrupt · " + dial
 	return truncate(line, m.width)
+}
+
+// renderRunningRegions renders the C8 active-run panels shown between the transcript
+// and the thinking line while a run is in flight: a task header (original request +
+// current in-flight activity), the pinned latest assistant summary, and a compact
+// activity log (the most recent few tool/step entries). Returns "" when idle so the
+// idle layout (and its golden) is unchanged. Height is deterministic (line count),
+// so the viewport math in renderTranscriptRegion can subtract it exactly.
+func (m Model) renderRunningRegions() string {
+	if !m.running {
+		return ""
+	}
+	w := m.width
+	var lines []string
+
+	// Task header: "Task: <request>" + a dim " · <current activity>" when known.
+	if t := strings.TrimSpace(m.activeTask); t != "" {
+		head := muted.Render("Task: ") + t
+		if a := strings.TrimSpace(m.activity); a != "" {
+			head += muted.Render("  · " + a)
+		}
+		lines = append(lines, truncate(head, w))
+	}
+
+	// Latest assistant summary (amber label per the mock), pinned until run end.
+	if s := strings.TrimSpace(m.latestSummary); s != "" {
+		lines = append(lines, truncate(warning.Render("Latest: ")+s, w))
+	}
+
+	// Compact activity log: the most recent entries (oldest of the window first).
+	if n := len(m.activityLog); n > 0 {
+		start := max(n-activityLogVisible, 0)
+		for _, e := range m.activityLog[start:] {
+			lines = append(lines, truncate(e.styled(), w))
+		}
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }

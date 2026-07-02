@@ -59,12 +59,17 @@ kloo --benchmark --provider local --model qwen3-coder "fix fixture" \
 ```sh
 rg '^KLOO_RESULT_JSON ' runs/qwen3/001/stdout.log \
   | sed 's/^KLOO_RESULT_JSON //' \
-  | jq '{success, failure_code, steps, tokens, tool_counters, rail_fires}'
+  | jq '{success, failure_code, final_reason, steps, tokens, tool_counters, rail_fires, files_changed, off_scope_edits, correction_count}'
 ```
 
 The summary includes `failure_code`, `failure_detail`, `tool_counters`,
-`rail_fires`, verify result, token/step counts, and transcript tail. The same
-schema is documented in [configuration.md](configuration.md#task-loop-and-benchmark-output).
+`rail_fires`, verify result, and transcript tail, plus the accounting deltas
+`files_changed` (`{count, paths}`), `off_scope_edits`, `correction_count` (sum of
+`rail_fires`), and `final_reason` (the most specific terminal class). Layered
+[verifier hooks](configuration.md#verifier-hooks---precheck----postcheck)
+(`--precheck`/`--postcheck`) add `prechecks`/`postchecks` arrays and the
+`precheck_failed`/`postcheck_failed` failure codes. The same schema is documented in
+[configuration.md](configuration.md#task-loop-and-benchmark-output).
 
 ## Exit codes and failure codes
 
@@ -77,9 +82,10 @@ analysis. Important benchmark exits:
 | 10 | Verify failed or run was unverified. |
 | 11 | Model transport/API/retry failure. |
 | 12 | Tool-call/tool-dispatch failure. |
-| 14 | Repetition/edit halt. |
+| 14 | Repetition/edit halt (incl. `--stop-on repeated-verify`). |
 | 15 | JSON-only failure. |
 | 17 | Config or CLI usage error. |
+| 21 | Off-scope/read-only edit denied, or a scoped `run_command` rejected (`--allow`/`--deny`/`--read-only`/`--stop-on off-scope-edit`). |
 
 See [configuration.md](configuration.md#task-loop-and-benchmark-output) for the
 full exit-code and `failure_code` tables.

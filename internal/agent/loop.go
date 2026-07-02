@@ -110,6 +110,11 @@ type Loop struct {
 	// edit between) before the run halts as churn. 0 ⇒ DefaultEditFailLimit.
 	EditFailLimit int
 
+	// StopOn is the A7 hard-stop policy: detectable early terminations for off-scope
+	// edits, read-only writes, and repeated verifier failures. The zero value (no
+	// rule active) leaves all existing churn/budget behaviour unchanged.
+	StopOn StopPolicy
+
 	// PromiseNudgeLimit is how many times a turn that narrates a next action with no
 	// tool call is nudged to actually emit the call before the run accepts the calm
 	// answered-stop. 0 falls back to DefaultPromiseNudgeLimit.
@@ -400,6 +405,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
 		editFailStreak int
 
+		// A7 safety-stop state. safetyEv/lastScopeDenial are copied onto the Report at
+		// finish; verifyFailStreak/verifyFailKey track consecutive identical verifier
+		// failures for the repeated-verify stop rule (independent of the churn rail).
+		safetyEv         *SafetyEvidence
+		lastScopeDenial  *ScopeDenial
+		patchOnlyReject  *ToolReject
+		verifyFailStreak int
+		verifyFailKey    string
+
 		// Promised-but-didn't-act rail state: how many times the model ended a turn by
 		// NARRATING a next action ("let me run X") with no tool call — OR gave up in prose
 		// right after a FAILING action (lastActionFailed). Reset only by a SUCCESSFUL
@@ -452,6 +466,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
 		}
+		rep.Safety = safetyEv
+		rep.LastScopeDenial = lastScopeDenial
+		rep.PatchOnlyReject = patchOnlyReject
 		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
 			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
 				rep.RolledBack = true
@@ -624,6 +641,53 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 
+		// A7 scope observation + hard stops. A denied edit/write, or a scoped
+		// run_command rejection, surfaces as a *tools.ScopeError (wrapping ErrOffScope).
+		// Count it (B3), record the latest denial for the JSON classifier, and — when a
+		// matching --stop-on rule is configured — terminalize IMMEDIATELY (before the
+		// observation is even fed back), with no file mutation having occurred.
+		var scopeErr *tools.ScopeError
+		if errors.As(derr, &scopeErr) {
+			counters.OffScopeEdits++
+			if scopeErr.Class == tools.ScopeClassReadOnly {
+				counters.ReadOnlyEdits++
+			}
+			lastScopeDenial = &ScopeDenial{
+				Class:   scopeErr.Class,
+				Tool:    scopeErr.Tool,
+				Path:    scopeErr.Path,
+				Rule:    scopeErr.Rule,
+				Message: scopeErr.Message,
+			}
+			readOnlyHit := scopeErr.Class == tools.ScopeClassReadOnly
+			if l.StopOn.OffScopeEdit || (l.StopOn.ReadOnlyEdit && readOnlyHit) {
+				rule := "off-scope-edit"
+				if readOnlyHit && l.StopOn.ReadOnlyEdit && !l.StopOn.OffScopeEdit {
+					rule = "read-only-edit"
+				}
+				safetyEv = &SafetyEvidence{
+					Rule:    rule,
+					Class:   scopeErr.Class,
+					Tool:    scopeErr.Tool,
+					Path:    scopeErr.Path,
+					Message: scopeErr.Message,
+				}
+				convo = append(convo, observation(call, result, derr))
+				return finish(ReasonSafetyStop, nil, nil, nil)
+			}
+		}
+
+		// A4 patch-only rejection: a model-facing run_command withheld by patch-only
+		// mode (no scope policy) surfaces as ErrPatchOnlyForbidden. It IS an invalid
+		// tool call for this run mode, so count it and record it for the JSON
+		// classifier (a run that ends calmly afterwards reports tool_call_invalid /
+		// class patch_only_forbidden_tool). The run continues — patch-only has no hard
+		// stop of its own.
+		if errors.Is(derr, tools.ErrPatchOnlyForbidden) {
+			counters.InvalidToolCalls++
+			patchOnlyReject = &ToolReject{Tool: call.Name, Class: patchOnlyForbiddenClass, Message: derr.Error()}
+		}
+
 		// Track files whose CONTENT the model has now seen (read/edited/written OK), so a
 		// later write_file to one of them is an informed overwrite, not a blind clobber.
 		if derr == nil {
@@ -740,6 +804,29 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					return finish(ReasonInterrupted, nil, nil, nil)
 				}
 				return finish(ReasonError, fmt.Errorf("verify: %w", lastVerify.Err), nil, nil)
+			}
+
+			// A7 repeated-verify stop: count CONSECUTIVE identical verifier failures
+			// (normalised, so volatile bits don't defeat the match). A pass or a
+			// different failure resets the streak. When --stop-on repeated-verify=N is
+			// set and the streak reaches N, halt early rather than churning to the step
+			// budget. Independent of the churn rail (which stays the default backstop).
+			if l.StopOn.RepeatedVerify > 0 {
+				if lastVerify.Passed {
+					verifyFailStreak, verifyFailKey = 0, ""
+				} else if key := normalizeChurn(failingOutput(lastVerify)); key != "" && key == verifyFailKey {
+					verifyFailStreak++
+				} else {
+					verifyFailStreak, verifyFailKey = 1, key
+				}
+				if verifyFailStreak >= l.StopOn.RepeatedVerify {
+					safetyEv = &SafetyEvidence{
+						Rule:    "repeated-verify",
+						Class:   "repeated_verify_failure",
+						Message: fmt.Sprintf("verify %q failed %d times in a row with no progress", lastVerify.Command, verifyFailStreak),
+					}
+					return finish(ReasonSafetyStop, nil, nil, nil)
+				}
 			}
 		}
 

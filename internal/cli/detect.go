@@ -21,6 +21,41 @@ func buildVerifier(ws tools.Workspace, command string, opts ...agent.VerifyOptio
 	return agent.NewCommandVerifier(ws, command, opts...)
 }
 
+// buildLayeredVerifier (B5) wraps the verify command with optional precheck/postcheck
+// gates (precheck → verify → postcheck). Each hook is a jailed CommandVerifier that
+// inherits the same opts (timeout) as verify, so hooks run through harness-owned
+// execution — this does NOT re-expose the model-facing run_command in scoped runs.
+// When no hooks are configured it returns the plain verifier unchanged (byte-identical
+// behaviour). In unverified mode (no verify command) hooks are IGNORED — verify is the
+// only positive success signal, so hooks with no verify could never prove success; the
+// choice is logged so the user is never surprised.
+func buildLayeredVerifier(ws tools.Workspace, command string, prechecks, postchecks []string, logf func(string, ...any), opts ...agent.VerifyOption) agent.Verifier {
+	base := buildVerifier(ws, command, opts...)
+	if base == nil {
+		if len(prechecks) > 0 || len(postchecks) > 0 {
+			logf("verify: no verify command detected — --precheck/--postcheck are IGNORED (unverified mode marks no run success; pass --verify to gate on a command)")
+		}
+		return nil
+	}
+	if len(prechecks) == 0 && len(postchecks) == 0 {
+		return base
+	}
+	toVerifiers := func(cmds []string) []agent.Verifier {
+		out := make([]agent.Verifier, 0, len(cmds))
+		for _, c := range cmds {
+			if strings.TrimSpace(c) == "" {
+				continue
+			}
+			out = append(out, agent.NewCommandVerifier(ws, c, opts...))
+		}
+		return out
+	}
+	pre := toVerifiers(prechecks)
+	post := toVerifiers(postchecks)
+	logf("verify: layered gates active — %d precheck(s) → verify → %d postcheck(s); verify remains the only success signal", len(pre), len(post))
+	return agent.NewLayeredVerifier(pre, base, post)
+}
+
 // buildLinter returns the loop's fast advisory Linter for command, or a nil Linter
 // when command is empty — which the loop reads as "no lint step" (byte-identical to
 // pre-lint behaviour). perFile (from resolveLintCommand) decides whether the edited

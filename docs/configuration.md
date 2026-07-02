@@ -59,10 +59,163 @@ churn detection as the primary guard).
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
 | `--allowed-dirs` | _(unset)_ | Directories **outside** the workspace that an `AGENTS.md` [`@import`](#project-instructions-agentsmd) may read from. Repeatable or comma-separated. Read-only and load-time only — it never widens the model's file tools. |
 | `--allow-env` | _(unset)_ | Env var **names** to forward from kloo's own environment into `run_command` (repeatable/comma-separated). By default executed commands get a least-privilege env (`PATH/HOME/LANG/…`) so a model-proposed command can't exfiltrate secrets; this is the deliberate, user-granted passthrough for a **trusted deploy/CI step** that needs a specific secret (e.g. `--allow-env CLOUDFLARE_API_TOKEN,ADMIN_PASSWORD`). The value is read from kloo's env at run time — it never appears in the model's prompt or transcript. |
+| `--allow` | _(unset)_ | Glob(s) the model **may edit** (repeatable/comma-separated). See [file scope](#file-scope---allow----deny----read-only). An empty allow set means all in-jail files are editable unless `--deny`/`--read-only` narrows it. **Setting any scope flag disables the model-facing `run_command`.** |
+| `--deny` | _(unset)_ | Glob(s) the model **may not edit** (repeatable/comma-separated). `deny` wins over `--allow`. |
+| `--read-only` | _(unset)_ | Glob(s) the model **may read but not edit** (repeatable/comma-separated). Wins over `--allow`; loses to `--deny`. |
+| `--patch-only` | `false` | Restrict model changes to `edit_file`/`write_file` exact edits and **withhold the model-facing `run_command`** — even without a scope policy. See [patch-only](#patch-only-mode---patch-only). |
+| `--stop-on` | _(unset)_ | Detectable hard-stop rule(s) (repeatable/comma-separated): `off-scope-edit`, `read-only-edit`, `repeated-verify=N`. See [stop rules](#hard-stop-rules---stop-on). |
+| `--precheck` | _(unset)_ | Harness command run **before** verify each turn (repeatable; **not** comma-split — a command may contain commas). A failing precheck blocks verify+postcheck and is non-success. See [verifier hooks](#verifier-hooks---precheck----postcheck). |
+| `--postcheck` | _(unset)_ | Harness command run **after** a passing verify (repeatable). A failing postcheck is non-success even though verify passed. |
 | `--profile` | _(unset)_ | Path to `profiles.json`; defaults to `~/.config/kloo/profiles.json`. |
 
 For copy-pasteable benchmark harness commands and artifact capture recipes, see
 [benchmarking.md](benchmarking.md).
+
+## File scope (`--allow` / `--deny` / `--read-only`)
+
+The workspace jail (kloo never reads or writes outside the launch directory) is
+always on. **File scope** is a second, narrower layer *inside* the jail: it
+constrains which in-jail files the model may **edit**, so a weak model can't quietly
+modify lockfiles, generated output, tests, or unrelated source and still make verify
+pass for the wrong reason. It is off by default — a bare `kloo` run has no scope.
+
+```sh
+# Only files under src/ (and cmd/) are editable; nothing else in the repo is.
+kloo --allow 'src/**,cmd/**' "implement the parser"
+
+# Everything editable except these; tests are read-only context.
+kloo --deny '.env,dist/**' --read-only 'tests/**' "fix the bug"
+```
+
+- Patterns are **globs** on slash-normalized, workspace-relative paths:
+  - `**` matches any number of path segments (a trailing `/**`, e.g. `src/**`,
+    also matches the bare `src` directory).
+  - `*` matches within a single path segment (does not cross `/`); `?` matches one
+    non-`/` character.
+- Flags are **repeatable and comma-separated** — `--allow a --allow b` and
+  `--allow a,b` produce the same list.
+- **Precedence is deterministic:** `deny` → `read_only` → `outside_allow`. `deny`
+  wins over everything; a file matching both `--allow` and `--read-only` is
+  read-only (writes are refused); an **empty allow** set means every in-jail file
+  is editable unless `--deny`/`--read-only` narrows it.
+- **Reads are unaffected:** `read_file`/`list_dir`/`search` can still read a
+  `read-only` file — the point is to give the model context it may not weaken.
+- A denied `edit_file`/`write_file` fails **before touching disk** (the target is
+  byte-identical) with `failure_code:"off_scope_edit"` and a bounded
+  `failure_detail` naming the path and matching rule (class
+  `deny`/`outside_allow`/`read_only`).
+
+**Shell is disabled while scope is active.** A shell command can mutate any in-jail
+path (`sed -i`, `rm`, `mv`, generators) without going through `edit_file`/
+`write_file`, so whenever any scope flag (or [`.kloo/scope.yaml`](#kloscopeyaml--per-workspace-scope-manifest))
+is set, the model-facing `run_command` is **removed from the tool vocabulary**. If a
+model emits `run_command` anyway (via a fallback adapter), kloo rejects it **before**
+any process runs, with class `run_command_disabled_for_scope`. Harness-owned command
+runners — **verify, lint, and internal probes** — build their own trusted
+`run_command` and keep working; only the *model-facing* shell is withheld.
+
+> Default-deny examples worth configuring per project: `.env`, `package-lock.json`,
+> `go.sum`, `dist/**`, `generated/**`. kloo does **not** apply any deny globs unless
+> you configure them.
+
+### `.kloo/scope.yaml` — per-workspace scope manifest
+
+Instead of flags, commit a manifest at `.kloo/scope.yaml` in the workspace root:
+
+```yaml
+allow:
+  - "src/**"
+deny:
+  - ".env"
+  - "dist/**"
+read_only:
+  - "tests/**"
+```
+
+- All three keys are optional; each holds a list of globs (block-list `- item`
+  form or inline `[a, b]` form).
+- **CLI flags override the manifest key-by-key**: passing `--allow` *replaces* the
+  manifest's `allow` list (it is a replacement, never a silent append); a key with
+  no flag keeps its manifest value.
+- A missing manifest is not an error. (kloo parses this narrow, fixed shape itself
+  — it adds no YAML dependency; see the phase `decisions.md`.)
+
+## Patch-only mode (`--patch-only`)
+
+`--patch-only` restricts the model to changing files **only** through the exact-edit
+tools (`edit_file` SEARCH/REPLACE, or `write_file` full-content), and withholds the
+model-facing `run_command` — the same no-shell rule as scope, but applied even when
+no scope policy is set. Combine it with scope for a conservative, inspectable run:
+
+```sh
+kloo --patch-only --allow 'src/**' "refactor the tokenizer"
+```
+
+Verify/lint still run through the harness. A stray `run_command` in patch-only mode
+is rejected with a patch-only error (`tool_call_invalid`,
+`failure_detail.class:"patch_only_forbidden_tool"`). `kloo doctor` reports
+`patch_only`.
+
+## Hard-stop rules (`--stop-on`)
+
+`--stop-on` adds **detectable** early terminations so a benchmark run stops as soon
+as the harness has enough evidence, instead of looping to the step/token budget.
+Rules are repeatable/comma-separated:
+
+| Rule | Stops when… | Reported as |
+|---|---|---|
+| `off-scope-edit` | the first scope denial (an off-scope/denied/read-only write, **or** a rejected scoped `run_command`) | `failure_code:"off_scope_edit"` |
+| `read-only-edit` | the first write to a `read-only` file | `off_scope_edit`, `failure_detail.class:"read_only"` |
+| `repeated-verify=N` | the verifier fails `N` times in a row with no progress | `failure_code:"repetition_halt"`, `class:"repeated_verify_failure"` |
+
+```sh
+kloo --benchmark --allow 'src/**' --stop-on off-scope-edit,repeated-verify=3 "the task"
+```
+
+Every trigger is detectable — there are no subjective heuristics (no "architecture
+invention", no "suspicious rewrite"). With no `--stop-on`, the existing churn/budget
+behaviour is unchanged. An unknown rule name or a malformed threshold fails config
+resolution with `failure_code:"config_error"`.
+
+## Verifier hooks (`--precheck` / `--postcheck`)
+
+Benchmarks often want cheap gates around the real verify command — a precheck for
+scope/compile/test-integrity, a postcheck for an e2e or diff-contract check. kloo runs
+them in a fixed order around the single verify seam:
+
+```text
+precheck(s) -> verify -> postcheck(s)
+```
+
+- **Verify stays the only positive success proof.** A run succeeds only when the
+  verify command passes **and** every configured hook passes. Hooks add failure
+  evidence; they never make a run succeed on their own.
+- **Precheck** runs first. If a precheck fails, **verify and postcheck do not run**
+  that turn — the run is non-success with `failure_code:"precheck_failed"` and
+  `failure_detail.source:"precheck"`.
+- **Verify** runs next. A failing verify keeps the existing `verify_failed` behaviour
+  and skips postchecks.
+- **Postcheck** runs only after verify exits 0. A failing postcheck makes the run
+  non-success even though verify passed — `failure_code:"postcheck_failed"`,
+  `failure_detail.source:"postcheck"`.
+- Hooks are **repeatable** and each is run verbatim (not comma-split): `--precheck
+  'go vet ./...' --precheck 'gofmt -l .'`.
+
+```sh
+kloo --benchmark --verify 'go test ./...' \
+  --precheck 'gofmt -l . | (! grep .)' \
+  --postcheck 'go build ./...' "implement the feature"
+```
+
+Hook commands run through the **same jailed, timeout-bounded** command execution as
+verify (harness-owned) — this does **not** re-expose the model-facing `run_command`
+in [scoped](#file-scope---allow----deny----read-only) or patch-only runs; A1's
+restriction is on the model tool vocabulary only. In **unverified** mode (no verify
+command detected and none passed via `--verify`), hooks are **ignored** with a logged
+notice — with no verify there is no positive success signal for them to gate, and
+kloo never marks a run success without one. The final `KLOO_RESULT_JSON` includes
+`prechecks`/`postchecks` arrays (`command`/`passed`/`exit_code`) for the gates
+attempted; both are omitted when no hooks are configured.
 
 ## Doctor dry-run
 
@@ -87,6 +240,9 @@ Human output is stable, line-oriented text. `--json` emits one JSON object with:
 - `retry`: resolved model-call retry and timeout policy
 - `memory`: resolved BYO memory hook state; doctor does not dial the MCP server
 - `allowed_import_dirs_count` and `allowed_env_names`
+- `patch_only`: whether patch-only mode is active
+- `scope`: the resolved file scope (`active` plus the `allow`/`deny`/`read_only` globs, CLI flags overlaid on `.kloo/scope.yaml`)
+- `stop_on`: the resolved hard-stop rules (`off_scope_edit`, `read_only_edit`, `repeated_verify`)
 
 Secrets are never printed. Provider API keys and MCP header/env values are reduced
 to set/unset metadata; `--allow-env` exposes only environment variable names.
@@ -225,11 +381,20 @@ kloo --provider openrouter --model deepseek/deepseek-v4-flash
 /models
 /model
 /model qwen2.5-coder-32b-instruct
+/provider openrouter                 # switch endpoint+key within the loaded profile
+/profile ~/.kloo/bench-profiles.json # reload a DIFFERENT profiles.json for later runs
 ```
 
 The status line and transcript report the selected model, and the next run
 rebuilds the LLM client from the current endpoint/key/model. API keys are never
-printed in `/models`, status files, JSON summaries, or error messages.
+printed in `/models`, `/provider`, `/profile`, status files, JSON summaries, or error
+messages.
+
+`/provider <name>` switches the endpoint+key within the **currently loaded** profile;
+`/profile <path>` reloads a **different** `profiles.json` and re-resolves the runtime
+for subsequent runs (preserving your launch flags, never writing to disk, keeping the
+current runtime if the file fails to load). See **[profiles.md](profiles.md)** for
+copy-paste provider/model entries.
 
 Live context lengths are used when available, otherwise the bundled per-model
 default for the model id, before falling back to the built-in default.
@@ -285,8 +450,13 @@ The JSON shape is:
 | `error` | Optional report/model/validation error. Upstream model errors include endpoint/model and a bounded upstream body tail, not API keys. |
 | `failure_code` | Stable automation category for non-success outcomes. Omitted on verified success. |
 | `failure_detail` | Sparse redacted detail for the category: source, reason, class, tool, HTTP status, and bounded message when available. |
-| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file`, `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, and `tool_errors`. Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
+| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file`, `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, `tool_errors`, `off_scope_edits` (scope-denied writes + rejected scoped `run_command`), and `read_only_edits` (the read-only subset). Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
 | `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
+| `prechecks`, `postchecks` | Optional arrays of the [verifier-hook](#verifier-hooks---precheck----postcheck) gates attempted for the final verify — each `{command, passed, exit_code}`. Omitted when no hooks are configured. |
+| `files_changed` | Changed-file accounting for the run: `{count, paths}` with workspace-relative paths (git working tree vs HEAD, plus untracked, sorted). Present in `--json`/`--benchmark`; `count:0` with an empty list for a clean tree or a non-git workspace. |
+| `off_scope_edits` | Count of model writes (and scoped `run_command` calls) the scope policy denied this run — from the counter, not transcript scraping. Incremented even when no file changed. Mirrors `tool_counters.off_scope_edits`. |
+| `correction_count` | Deterministic sum of all `rail_fires` values (total soft corrections). `rail_fires` itself is unchanged. |
+| `final_reason` | The most specific terminal class for the run: `failure_detail.class` when a failure was classified, else `reason` (e.g. `success`). One field a harness can read instead of composing `reason` + `failure_code` + `failure_detail.class`. |
 | `transcript_tail` | A short role-prefixed tail of the run transcript for diagnostics. |
 
 `failure_code` values are a stable public automation contract:
@@ -299,7 +469,10 @@ The JSON shape is:
 | `tool_call_invalid` | Malformed tool call, unknown tool, or invalid tool arguments. |
 | `tool_error` | Non-edit tool dispatch error that materially affected the run. |
 | `edit_failed` | Failed edit/write application or edit-failed churn. |
-| `repetition_halt` | Repetition/exploration/no-progress halt. |
+| `off_scope_edit` | A model write (or a scoped `run_command`) was denied by the [file scope](#file-scope---allow----deny----read-only) policy — `failure_detail.class` is `deny`/`outside_allow`/`read_only`/`run_command_disabled_for_scope`. Emitted for a `--stop-on off-scope-edit`/`read-only-edit` hard stop and for a non-stop run that ended calmly after a denial. |
+| `precheck_failed` | A [precheck](#verifier-hooks---precheck----postcheck) hook failed, so verify never ran (`failure_detail.source:"precheck"`). |
+| `postcheck_failed` | Verify passed but a [postcheck](#verifier-hooks---precheck----postcheck) hook failed, so the run is still non-success (`failure_detail.source:"postcheck"`). |
+| `repetition_halt` | Repetition/exploration/no-progress halt, incl. a `--stop-on repeated-verify=N` stop (`failure_detail.class:"repeated_verify_failure"`). |
 | `context_too_small` | Configured context window cannot fit the irreducible prompt. |
 | `json_invalid` | `--json-only` rejected the final answer. |
 | `budget_exceeded` | Step/token/wall-clock budget stopped the run. |
@@ -314,7 +487,7 @@ exit codes:
 | Exit | Meaning |
 |---:|---|
 | 0 | Verified success. |
-| 10 | `verify_failed` or `unverified`. |
+| 10 | `verify_failed`, `unverified`, `precheck_failed`, or `postcheck_failed` (verify-family gate). |
 | 11 | `model_error`. |
 | 12 | `tool_call_invalid` or `tool_error`. |
 | 13 | `context_too_small`. |
@@ -325,6 +498,7 @@ exit codes:
 | 18 | `interrupted`. |
 | 19 | `internal_error`. |
 | 20 | `answered`. |
+| 21 | `off_scope_edit` (scope/read-only denial or scoped-shell rejection). |
 
 `--json-only` is useful when a benchmark expects the final assistant answer to be
 machine-readable:

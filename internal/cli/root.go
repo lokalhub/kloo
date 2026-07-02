@@ -82,7 +82,7 @@ type Deps struct {
 	// under the Bubble Tea UI). sess carries the user's session choice (--new /
 	// --resume); lint carries the fast-advisory-lint config (--lint/--no-lint +
 	// env). Injected so tests stay offline.
-	LaunchTUI func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error
+	LaunchTUI func(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error
 	// RunHeadless runs the autonomous loop NON-interactively (no TTY), streaming
 	// progress to out and returning the loop's terminal report. Used for the
 	// Phase-06 acceptance benchmark and any scripted/CI autonomous run. lint carries
@@ -139,6 +139,13 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagJSONOnly    bool
 		flagStatusFile  string
 		flagNoThink     bool
+		flagAllow       []string
+		flagDeny        []string
+		flagReadOnly    []string
+		flagPatchOnly   bool
+		flagStopOn      []string
+		flagPrecheck    []string
+		flagPostcheck   []string
 		flagRetryCodes  []int
 		flagRetryBase   time.Duration
 		flagRetryMax    time.Duration
@@ -211,6 +218,27 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("no-think") {
 				flags.NoThink = &flagNoThink
 			}
+			if fs.Changed("allow") {
+				flags.ScopeAllow = flagAllow
+			}
+			if fs.Changed("deny") {
+				flags.ScopeDeny = flagDeny
+			}
+			if fs.Changed("read-only") {
+				flags.ScopeReadOnly = flagReadOnly
+			}
+			if fs.Changed("patch-only") {
+				flags.PatchOnly = &flagPatchOnly
+			}
+			if fs.Changed("stop-on") {
+				flags.StopOn = flagStopOn
+			}
+			if fs.Changed("precheck") {
+				flags.Prechecks = flagPrecheck
+			}
+			if fs.Changed("postcheck") {
+				flags.Postchecks = flagPostcheck
+			}
 			if fs.Changed("benchmark") {
 				flags.BenchmarkMode = &flagBenchmark
 			}
@@ -252,7 +280,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				}
 				// No task argument → launch the interactive TUI session (the
 				// autonomous loop under the Bubble Tea UI).
-				return deps.LaunchTUI(cfg, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume}, flagProfile, deps.Getenv)
+				return deps.LaunchTUI(cfg, flags, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume}, flagProfile, deps.Getenv)
 			}
 
 			return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
@@ -282,6 +310,13 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagJSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
 	f.StringVar(&flagStatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
 	f.BoolVar(&flagNoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
+	f.StringSliceVar(&flagAllow, "allow", nil, "glob(s) the model MAY edit (repeatable/comma-separated); empty ⇒ all in-jail files unless narrowed. Any scope flag disables model-facing run_command")
+	f.StringSliceVar(&flagDeny, "deny", nil, "glob(s) the model may NOT edit (repeatable/comma-separated); deny wins over --allow")
+	f.StringSliceVar(&flagReadOnly, "read-only", nil, "glob(s) the model may READ but not edit (repeatable/comma-separated); wins over --allow")
+	f.BoolVar(&flagPatchOnly, "patch-only", false, "restrict model changes to edit_file/write_file exact edits; withhold model-facing run_command")
+	f.StringSliceVar(&flagStopOn, "stop-on", nil, "hard-stop rule(s) (repeatable/comma-separated): off-scope-edit, read-only-edit, repeated-verify=N")
+	f.StringArrayVar(&flagPrecheck, "precheck", nil, "harness command run BEFORE verify each turn (repeatable); a failure blocks verify/postcheck and is non-success. Verify stays the only success signal")
+	f.StringArrayVar(&flagPostcheck, "postcheck", nil, "harness command run AFTER a passing verify (repeatable); a failure is non-success even though verify passed")
 	f.IntVar(&flagMaxRetries, "llm-max-retries", config.DefaultLLMMaxRetries, "extra model-call retry attempts after the first")
 	f.IntSliceVar(&flagRetryCodes, "llm-retry-codes", config.DefaultLLMRetryableStatusCodes, "HTTP status codes retryable for model calls")
 	f.DurationVar(&flagRetryBase, "llm-retry-base-delay", config.DefaultLLMRetryBaseDelay, "first model-call retry backoff")
@@ -346,6 +381,27 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	if fs.Changed("no-think") {
 		flags.NoThink = &values.NoThink
 	}
+	if fs.Changed("allow") {
+		flags.ScopeAllow = values.Allow
+	}
+	if fs.Changed("deny") {
+		flags.ScopeDeny = values.Deny
+	}
+	if fs.Changed("read-only") {
+		flags.ScopeReadOnly = values.ReadOnly
+	}
+	if fs.Changed("patch-only") {
+		flags.PatchOnly = &values.PatchOnly
+	}
+	if fs.Changed("stop-on") {
+		flags.StopOn = values.StopOn
+	}
+	if fs.Changed("precheck") {
+		flags.Prechecks = values.Prechecks
+	}
+	if fs.Changed("postcheck") {
+		flags.Postchecks = values.Postchecks
+	}
 	if fs.Changed("benchmark") {
 		flags.BenchmarkMode = &values.Benchmark
 	}
@@ -387,6 +443,13 @@ type configFlagValues struct {
 	JSONOnly             bool
 	StatusFile           string
 	NoThink              bool
+	Allow                []string
+	Deny                 []string
+	ReadOnly             []string
+	PatchOnly            bool
+	StopOn               []string
+	Prechecks            []string
+	Postchecks           []string
 	Benchmark            bool
 	LLMMaxRetries        int
 	LLMRetryCodes        []int
@@ -413,6 +476,13 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.BoolVar(&v.JSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
 	f.StringVar(&v.StatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
 	f.BoolVar(&v.NoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
+	f.StringSliceVar(&v.Allow, "allow", nil, "glob(s) the model MAY edit (repeatable/comma-separated); any scope flag disables model-facing run_command")
+	f.StringSliceVar(&v.Deny, "deny", nil, "glob(s) the model may NOT edit (repeatable/comma-separated); deny wins over --allow")
+	f.StringSliceVar(&v.ReadOnly, "read-only", nil, "glob(s) the model may READ but not edit (repeatable/comma-separated); wins over --allow")
+	f.BoolVar(&v.PatchOnly, "patch-only", false, "restrict model changes to edit_file/write_file exact edits; withhold model-facing run_command")
+	f.StringSliceVar(&v.StopOn, "stop-on", nil, "hard-stop rule(s) (repeatable/comma-separated): off-scope-edit, read-only-edit, repeated-verify=N")
+	f.StringArrayVar(&v.Prechecks, "precheck", nil, "harness command run BEFORE verify each turn (repeatable); a failure blocks verify/postcheck and is non-success")
+	f.StringArrayVar(&v.Postchecks, "postcheck", nil, "harness command run AFTER a passing verify (repeatable); a failure is non-success even though verify passed")
 	f.BoolVar(&v.Benchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
 	f.IntVar(&v.LLMMaxRetries, "llm-max-retries", config.DefaultLLMMaxRetries, "extra model-call retry attempts after the first")
 	f.IntSliceVar(&v.LLMRetryCodes, "llm-retry-codes", config.DefaultLLMRetryableStatusCodes, "HTTP status codes retryable for model calls")
