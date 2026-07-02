@@ -118,12 +118,17 @@ func TestLoopUnverifiedShellProgressDoesNotChurn(t *testing.T) {
 	}
 }
 
-// TestLoopStallBackstopOnGreenSpin: a model that never calls finish and instead
-// spins on a no-op read while verify stays GREEN (no edit, no tree change) is
-// stopped by the stall backstop as ReasonAnswered — at a small N (seed + 3), far
-// below the step budget, proving the two ceilings never overlap.
+// TestLoopStallBackstopOnGreenSpin: a model that has already acted (everActed=true)
+// and then spins on no-op reads while verify stays GREEN is stopped by the stall
+// backstop as ReasonAnswered — at a small N (seed + 3), far below the step budget.
+// The stall only counts AFTER a real action so initial exploration is not penalised.
 func TestLoopStallBackstopOnGreenSpin(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	// Model first runs a command (everActed=true), then spins on reads.
+	// recordTool requires "path" in its schema, so pass it for run_command too.
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"run_command", map[string]any{"path": "echo"}})},
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})},
+	)
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
 	loop.StallRounds = 3
 
@@ -134,8 +139,33 @@ func TestLoopStallBackstopOnGreenSpin(t *testing.T) {
 	if rep.Reason != ReasonAnswered {
 		t.Fatalf("reason = %q, want answered (stall backstop)", rep.Reason)
 	}
-	if rep.Steps != 4 { // turn 1 seeds; turns 2,3,4 climb to stallLimit=3
-		t.Errorf("steps = %d, want 4 (fires at seed + stallLimit, not the budget)", rep.Steps)
+	// Step 1: run_command (seeds stall, sets everActed=true)
+	// Steps 2,3,4: read_file "a" (stall climbs 1,2,3 = stallLimit → stop)
+	if rep.Steps != 4 {
+		t.Errorf("steps = %d, want 4 (seed + stallLimit=3)", rep.Steps)
+	}
+}
+
+// TestLoopStallNotTrippedBeforeFirstAction: a model that only reads files without
+// acting first is governed by the explore rail (higher ceiling), not the stall
+// backstop. Pre-action exploration with a green verify must never be terminated
+// early by stall — that would cut off initial file-gathering before implementation.
+func TestLoopStallNotTrippedBeforeFirstAction(t *testing.T) {
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+	loop.StallRounds = 3
+	// Disable explore rail so only stall and budget gates can fire.
+	loop.ExploreNudgeRounds, loop.ExploreAbortRounds = 1000, 1000
+	// Disable repetition rail so only stall and budget can stop this.
+	loop.RepeatNudgeRounds, loop.RepeatAbortRounds = 1000, 1000
+
+	rep, err := loop.Run(context.Background(), "explore the workspace")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Without a real action, stall must not fire — only the budget stops it.
+	if rep.Reason != ReasonBudgetExceeded {
+		t.Fatalf("reason = %q, want budget-exceeded (stall must not fire before everActed)", rep.Reason)
 	}
 }
 
