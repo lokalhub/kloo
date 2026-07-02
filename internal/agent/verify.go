@@ -82,5 +82,84 @@ func (v *CommandVerifier) Verify(ctx context.Context) VerifyResult {
 	if vr.Passed && v.structural != nil && !v.structural(vr) {
 		vr.Passed = false // exit 0 but the structural gate failed
 	}
+	// A plain verify IS the verify stage: record its own outcome so a LayeredVerifier
+	// (and the JSON verify block) can distinguish the verify command from hooks.
+	vr.VerifyRan = true
+	vr.VerifyPassed = vr.Passed
 	return vr
+}
+
+// LayeredVerifier (B5) wraps an inner verify command with optional precheck and
+// postcheck command gates, running them in the fixed order:
+//
+//	precheck(s) -> verify -> postcheck(s)
+//
+// It preserves verify as the ONLY positive success signal: success requires the
+// verify command to pass AND every configured hook to pass. Hooks add failure
+// evidence; they never make a run succeed on their own. Ordering rules:
+//
+//   - A failing precheck short-circuits: verify and postchecks do NOT run.
+//   - Verify runs next; a failing verify short-circuits postchecks (existing
+//     verify_failed behaviour is unchanged — FailedStage stays "").
+//   - Postchecks run only after verify exits 0. A failing postcheck makes the run
+//     non-success even though verify passed, reported distinctly (FailedStage).
+//
+// Every hook is itself a CommandVerifier, so hooks reuse the same jailed,
+// timeout-bounded run_command execution as verify (no forked runner).
+type LayeredVerifier struct {
+	prechecks  []Verifier
+	inner      Verifier
+	postchecks []Verifier
+}
+
+// NewLayeredVerifier wraps inner with the given precheck/postcheck verifiers (each a
+// Verifier — the CLI builds CommandVerifiers, tests may inject stubs). When both hook
+// slices are empty it still delegates to inner unchanged.
+func NewLayeredVerifier(prechecks []Verifier, inner Verifier, postchecks []Verifier) *LayeredVerifier {
+	return &LayeredVerifier{prechecks: prechecks, inner: inner, postchecks: postchecks}
+}
+
+// Verify runs precheck(s) -> verify -> postcheck(s) with the short-circuiting above
+// and returns a single VerifyResult whose Passed is the overall gate.
+func (l *LayeredVerifier) Verify(ctx context.Context) VerifyResult {
+	var pres []HookResult
+	for _, pc := range l.prechecks {
+		r := pc.Verify(ctx)
+		pres = append(pres, HookResult{Command: r.Command, Stage: "precheck", Passed: r.Passed, ExitCode: r.ExitCode})
+		if r.Err != nil || !r.Passed {
+			// Precheck decided the outcome; verify/postcheck do not run.
+			r.Passed = false
+			r.FailedStage = "precheck"
+			r.VerifyRan = false
+			r.VerifyPassed = false
+			r.Prechecks = pres
+			return r
+		}
+	}
+
+	vr := l.inner.Verify(ctx)
+	vr.Prechecks = pres
+	if vr.Err != nil || !vr.Passed {
+		// Verify failed → existing verify_failed path (FailedStage stays ""), no postcheck.
+		return vr
+	}
+
+	var posts []HookResult
+	for _, pc := range l.postchecks {
+		r := pc.Verify(ctx)
+		posts = append(posts, HookResult{Command: r.Command, Stage: "postcheck", Passed: r.Passed, ExitCode: r.ExitCode})
+		if r.Err != nil || !r.Passed {
+			// Verify passed but a postcheck failed ⇒ overall non-success, reported as
+			// the postcheck stage. Keep the verify command's own outcome available.
+			r.Passed = false
+			r.FailedStage = "postcheck"
+			r.VerifyRan = true
+			r.VerifyPassed = true
+			r.Prechecks = pres
+			r.Postchecks = posts
+			return r
+		}
+	}
+	vr.Postchecks = posts
+	return vr // all gates green: Passed=true, FailedStage=""
 }

@@ -22,6 +22,7 @@ var slashCommands = []slashCommand{
 	{name: "/model", desc: "switch the active model"},
 	{name: "/models", desc: "list available models", noArg: true},
 	{name: "/provider", desc: "switch provider (endpoint+key)"},
+	{name: "/profile", desc: "switch profiles.json"},
 	{name: "/add", desc: "pin a file to context"},
 	{name: "/mode", desc: "set permission dial"},
 }

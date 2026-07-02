@@ -23,8 +23,16 @@ var ErrPathEscape = errors.New("tools: path escapes workspace root")
 // Workspace confines file access to a single root directory. The root is stored
 // as a cleaned, absolute, symlink-evaluated canonical path so containment checks
 // are exact.
+//
+// It optionally carries the model-facing write policy — a ScopePolicy (A1/A2) and
+// the patch-only flag (A4) — used to gate WriteFile/EditFile and to decide whether
+// the model-facing run_command is exposed. These are attached with WithScope /
+// WithPatchOnly and default to "no policy" (the jail is the only boundary), so an
+// unscoped workspace behaves exactly as before.
 type Workspace struct {
-	root string
+	root      string
+	scope     *ScopePolicy
+	patchOnly bool
 }
 
 // NewWorkspace canonicalises root (absolute + symlink-resolved) once and returns
@@ -45,6 +53,51 @@ func NewWorkspace(root string) (Workspace, error) {
 
 // Root returns the canonical workspace root.
 func (w Workspace) Root() string { return w.root }
+
+// WithScope returns a copy of the workspace carrying policy as its model-facing
+// write scope (A1/A2). A nil policy clears any scope (the jail is the only
+// boundary). The policy is shared, not copied — callers build it once.
+func (w Workspace) WithScope(policy *ScopePolicy) Workspace {
+	w.scope = policy
+	return w
+}
+
+// WithPatchOnly returns a copy of the workspace with patch-only mode set (A4).
+// In patch-only mode the model-facing run_command is not exposed, so the model can
+// only change files through edit_file/write_file.
+func (w Workspace) WithPatchOnly(on bool) Workspace {
+	w.patchOnly = on
+	return w
+}
+
+// ScopeActive reports whether a scope policy constrains this workspace's writes.
+func (w Workspace) ScopeActive() bool { return w.scope.Active() }
+
+// ModelShellDisabled reports whether the model-facing run_command must be withheld
+// from the tool vocabulary for this workspace — true when a scope policy is active
+// (A1: the shell could bypass the write checks) OR patch-only mode is set (A4).
+// Harness-owned command runners (verify/lint/precheck) build their own
+// RunCommandTool directly and are unaffected.
+func (w Workspace) ModelShellDisabled() bool { return w.ScopeActive() || w.patchOnly }
+
+// checkWrite enforces the scope policy for a resolved, in-jail absolute path abs
+// targeted by tool (edit_file/write_file). It returns a *ScopeError to reject the
+// write, or nil to allow it (including when no policy is attached). Callers invoke
+// it AFTER Resolve and BEFORE any disk mutation.
+func (w Workspace) checkWrite(abs, tool string) *ScopeError {
+	if !w.ScopeActive() {
+		return nil
+	}
+	rel, err := filepath.Rel(w.root, abs)
+	if err != nil {
+		rel = abs
+	}
+	d := w.scope.CanWrite(filepath.ToSlash(rel))
+	if d.Allowed {
+		return nil
+	}
+	return scopeError(d, tool)
+}
 
 // Resolve maps a tool's path (relative to the workspace, or absolute) to an
 // absolute path inside the jail, or returns ErrPathEscape. It is the single

@@ -112,9 +112,13 @@ Better, name your endpoints once in `profiles.json` under a **`providers`** bloc
 kloo --provider openrouter --model deepseek/deepseek-v4-flash   # endpoint + key from the profile
 ```
 
+Switch the endpoint+key live in the TUI with `/provider <name>`, or reload a whole
+different profile with `/profile <path>`.
+
 (No `--verify` needed — kloo auto-detects the project's build/test; see below.) See
 **[docs/setup.md](docs/setup.md)** for prerequisites and the local/hosted recipes,
-and **[docs/configuration.md](docs/configuration.md)** for the `providers` schema.
+**[docs/profiles.md](docs/profiles.md)** for copy-paste provider/model entries, and
+**[docs/configuration.md](docs/configuration.md)** for the `providers` schema.
 
 ## Usage
 

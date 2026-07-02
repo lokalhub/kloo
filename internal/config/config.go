@@ -162,6 +162,26 @@ type Config struct {
 	// NoThinkExplicit is true when --no-think was explicitly provided. TUI runtime
 	// alias switches use this to preserve CLI flag precedence over profile aliases.
 	NoThinkExplicit bool
+	// ScopeAllow/ScopeDeny/ScopeReadOnly are the raw CLI scope-glob overrides
+	// (--allow/--deny/--read-only). nil ⇒ the flag was not set (the .kloo/scope.yaml
+	// value for that key stands); a non-nil slice REPLACES the manifest list for that
+	// key. The final policy (manifest overlaid with these) is resolved by the CLI via
+	// ResolveScope, which needs the workspace dir; Resolve only carries the flags.
+	ScopeAllow    []string
+	ScopeDeny     []string
+	ScopeReadOnly []string
+	// PatchOnly (A4) restricts model file changes to edit_file/write_file and
+	// withholds the model-facing run_command.
+	PatchOnly bool
+	// Prechecks/Postchecks (B5) are harness-owned command gates run around the
+	// verify command (precheck → verify → postcheck). They are CLI-only, repeatable,
+	// and NOT comma-split (a command may contain commas). Verify remains the only
+	// positive success signal; a failing hook is non-success with distinct detail.
+	Prechecks  []string
+	Postchecks []string
+	// StopOn (A7) is the resolved hard-stop policy (--stop-on): detectable early
+	// terminations for off-scope edits, read-only writes, and repeated verify fails.
+	StopOn StopPolicy
 	// BenchmarkMode enables automation preset behavior in the CLI runner.
 	BenchmarkMode           bool
 	Memory                  MemoryConfig
@@ -230,7 +250,21 @@ type Flags struct {
 	// StatusFile (--status-file) writes the reusable run summary JSON. nil ⇒ unset.
 	StatusFile *string
 	// NoThink (--no-think) asks compatible backends to disable reasoning. nil ⇒ unset.
-	NoThink                 *bool
+	NoThink *bool
+	// ScopeAllow/ScopeDeny/ScopeReadOnly (--allow/--deny/--read-only) are the raw
+	// scope-glob overrides. nil ⇒ flag not set (leaves the manifest key untouched).
+	ScopeAllow    []string
+	ScopeDeny     []string
+	ScopeReadOnly []string
+	// PatchOnly (--patch-only) restricts model file changes to the exact-edit tools.
+	PatchOnly *bool
+	// Prechecks/Postchecks (--precheck/--postcheck) are the harness-owned verify
+	// gates. nil ⇒ flag not set.
+	Prechecks  []string
+	Postchecks []string
+	// StopOn (--stop-on) carries the raw hard-stop rule tokens; parsed in Resolve so
+	// a bad rule surfaces as a config error.
+	StopOn                  []string
 	BenchmarkMode           *bool
 	LLMMaxRetries           *int
 	LLMRetryableStatusCodes []int
@@ -616,6 +650,33 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if flags.NoThink != nil {
 		cfg.NoThink = *flags.NoThink
 		cfg.NoThinkExplicit = true
+	}
+	// Scope flags are CLI-only (never from the profile); the manifest overlay happens
+	// in ResolveScope (needs the workspace dir). nil ⇒ unset (leave manifest key).
+	if flags.ScopeAllow != nil {
+		cfg.ScopeAllow = flags.ScopeAllow
+	}
+	if flags.ScopeDeny != nil {
+		cfg.ScopeDeny = flags.ScopeDeny
+	}
+	if flags.ScopeReadOnly != nil {
+		cfg.ScopeReadOnly = flags.ScopeReadOnly
+	}
+	if flags.PatchOnly != nil {
+		cfg.PatchOnly = *flags.PatchOnly
+	}
+	if flags.Prechecks != nil {
+		cfg.Prechecks = flags.Prechecks
+	}
+	if flags.Postchecks != nil {
+		cfg.Postchecks = flags.Postchecks
+	}
+	if flags.StopOn != nil {
+		sp, err := parseStopOn(flags.StopOn)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.StopOn = sp
 	}
 	if flags.BenchmarkMode != nil {
 		cfg.BenchmarkMode = *flags.BenchmarkMode

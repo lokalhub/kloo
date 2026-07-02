@@ -20,12 +20,17 @@ import (
 // under the Bubble Tea TUI (P05). verifyCmd is the deprecated --verify override
 // ("" ⇒ kloo auto-detects the project's build/test); when it resolves to "" the
 // loop runs unverified (the model's finish stops calmly, but nothing is success).
-func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt SessionOpts, profilePath string, getenv func(string) string) error {
+func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, opt SessionOpts, profilePath string, getenv func(string) string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	ws, err := tools.NewWorkspace(cwd)
+	if err != nil {
+		return err
+	}
+	// Attach the A1/A2 scope policy + A4 patch-only flag (see headless.go).
+	ws, err = applyScope(cfg, ws, cwd, writerLogf(os.Stderr))
 	if err != nil {
 		return err
 	}
@@ -63,11 +68,15 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 	}
 	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
 
+	// /profile <path> (C6): re-resolve the runtime from a different profiles.json for
+	// subsequent runs, preserving the launch CLI flags (flags > env > profile).
+	reloadProfile := buildReloadProfile(baseFlags, getenv, clientFactory)
+
 	loop := &agent.Loop{
 		Client:        client,
 		Adapter:       adapter,
 		Registry:      reg,
-		Verifier:      buildVerifier(ws, verifyCmd),
+		Verifier:      buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(os.Stderr)),
 		Linter:        buildLinter(ws, lintCmd, lintPerFile),
 		Budget:        agent.NewBudget(cfg, nil),
 		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
@@ -75,9 +84,10 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:        defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
+		System:        defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
+		StopOn:               agentStopPolicy(cfg.StopOn),
 		StallRounds:          cfg.ChurnRounds,
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
@@ -105,7 +115,9 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		statusPath := cfg.StatusFile
 		runner.WithStatusWriter(func(runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) error {
 			runCfg := tuiRuntimeConfig(cfg, runtime)
-			return writeRunSummaryFile(statusPath, buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil))
+			summary := buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil)
+			withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the status file
+			return writeRunSummaryFile(statusPath, summary)
 		})
 	}
 	runErr := tui.Run(tui.Config{
@@ -128,6 +140,7 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		NewClient:     clientFactory,
 		ProfilePath:   profilePath,
 		Getenv:        getenv,
+		ReloadProfile: reloadProfile,
 		History:       sess.Transcript, // replay prior turns on resume (empty for a fresh session)
 	})
 	// Sessions are fresh by default, so on exit print the id (only once something
@@ -136,6 +149,45 @@ func defaultLaunchTUI(cfg config.Config, verifyCmd string, lint lintOpts, opt Se
 		fmt.Fprintf(os.Stderr, "\nsession %s saved · resume it with:  kloo --resume %s\n", sess.ID, sess.ID)
 	}
 	return runErr
+}
+
+// buildReloadProfile returns the /profile <path> reload closure (C6): it re-resolves
+// the runtime from a DIFFERENT profiles.json preserving the launch CLI flags (flags >
+// env > profile), maps it to a TUI RuntimeConfig reusing the client factory, and
+// returns a SECRET-FREE one-line summary (provider/model/endpoint/ctx — never the API
+// key). A resolution error is returned so the TUI keeps its current runtime intact.
+func buildReloadProfile(baseFlags config.Flags, getenv func(string) string, clientFactory func(endpoint, model, apiKey string) llm.LLMClient) func(string) (tui.RuntimeConfig, string, error) {
+	return func(path string) (tui.RuntimeConfig, string, error) {
+		newCfg, err := config.Resolve(baseFlags, getenv, path)
+		if err != nil {
+			return tui.RuntimeConfig{}, "", err
+		}
+		rc := tui.RuntimeConfig{
+			Provider:      newCfg.Provider,
+			Endpoint:      newCfg.Endpoint,
+			APIKey:        newCfg.APIKey,
+			Model:         newCfg.Model,
+			ContextTokens: newCfg.MaxContextTokens,
+			Temperature:   newCfg.Temperature,
+			ToolFormat:    newCfg.ToolFormat,
+			NoThink:       newCfg.NoThink,
+			NoThinkLocked: newCfg.NoThinkExplicit,
+			NewClient:     clientFactory,
+			UseNewClient:  true,
+		}
+		summary := fmt.Sprintf("provider=%s model=%s endpoint=%s ctx=%d",
+			providerOrNone(newCfg.Provider), newCfg.Model, newCfg.Endpoint, newCfg.MaxContextTokens)
+		return rc, summary, nil
+	}
+}
+
+// providerOrNone renders a provider name for the redacted /profile summary, using
+// "none" when no provider is selected (a bare endpoint profile).
+func providerOrNone(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return "none"
+	}
+	return p
 }
 
 func tuiRuntimeConfig(base config.Config, runtime tui.RuntimeConfig) config.Config {

@@ -84,6 +84,11 @@ func WriteFile(ws Workspace, relPath, content string) error {
 	if err != nil {
 		return err
 	}
+	// Scope gate (A1/A2): reject a denied/read-only/outside-allow target BEFORE any
+	// disk side effect (no MkdirAll, no WriteFile), so the file bytes are unchanged.
+	if serr := ws.checkWrite(abs, NameWriteFile); serr != nil {
+		return serr
+	}
 	if dir := filepath.Dir(abs); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("tools: write_file mkdir for %s: %w", relPath, err)
@@ -109,6 +114,11 @@ func EditFile(ws Workspace, relPath, blockText string) error {
 	abs, err := ws.Resolve(relPath)
 	if err != nil {
 		return err
+	}
+	// Scope gate (A1/A2): reject a denied/read-only/outside-allow target BEFORE the
+	// edit engine parses or applies anything, so the file is left byte-identical.
+	if serr := ws.checkWrite(abs, NameEditFile); serr != nil {
+		return serr
 	}
 	// ParseFlexible accepts both fenced and BARE (unfenced) blocks — small models
 	// often drop the ``` fence, and strict Parse would then find nothing.

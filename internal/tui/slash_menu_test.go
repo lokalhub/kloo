@@ -28,7 +28,7 @@ func menuNames(m Model) []string {
 func TestSlashMenuTypingSlashShowsAllCommands(t *testing.T) {
 	m := typeRunes(newSized(), "/")
 	got := menuNames(m)
-	want := []string{"/model", "/models", "/provider", "/add", "/mode"}
+	want := []string{"/model", "/models", "/provider", "/profile", "/add", "/mode"}
 	if len(got) != len(want) {
 		t.Fatalf("typing / should show all %d commands, got %v", len(want), got)
 	}

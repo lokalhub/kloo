@@ -72,6 +72,10 @@ func (m Model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
 		nt = append(nt, m.transcript[m.streamIdx+1:]...)
 		m.transcript = nt
 		m.streamIdx = -1
+		// C8: pin the latest finalized assistant prose above the input while running.
+		if s := summaryLine(cur.content); s != "" {
+			m.latestSummary = s
+		}
 	}
 	return m.refreshViewport(), nil
 }

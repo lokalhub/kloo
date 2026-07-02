@@ -125,7 +125,7 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 		return ""
 	}
 	deps := Deps{
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
+		LaunchTUI: func(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			launched = true
 			gotCfg = cfg
 			gotVerify = verifyCmd
@@ -180,7 +180,7 @@ func TestTaskRoutesToRunHeadless(t *testing.T) {
 	var gotCfg config.Config
 	tuiCalled := false
 	deps := Deps{
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
+		LaunchTUI: func(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			tuiCalled = true
 			return nil
 		},
@@ -363,7 +363,7 @@ func TestDoctorJSONRedactsAndDoesNotRun(t *testing.T) {
 	t.Setenv("SECRET_KEY", "test-token-value")
 	tuiCalled, headlessCalled := false, false
 	deps := Deps{
-		LaunchTUI: func(cfg config.Config, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
+		LaunchTUI: func(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, sess SessionOpts, profilePath string, getenv func(string) string) error {
 			tuiCalled = true
 			return nil
 		},
@@ -423,5 +423,57 @@ func TestUnknownFlagErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown flag") {
 		t.Errorf("want unknown-flag error, got %v", err)
+	}
+}
+
+// TestScopeFlagsMapToConfig: the A1/A2/A4/A7 flags parse and reach config.Resolve.
+func TestScopeFlagsMapToConfig(t *testing.T) {
+	var gotCfg config.Config
+	deps := Deps{RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+		gotCfg = cfg
+		return nil
+	}}
+	_, _, err := runCmd(t, deps,
+		"--allow", "src/**,cmd/**",
+		"--deny", ".env",
+		"--read-only", "tests/**",
+		"--patch-only",
+		"--stop-on", "off-scope-edit,repeated-verify=3",
+		"do the thing",
+	)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(gotCfg.ScopeAllow) != 2 || gotCfg.ScopeAllow[0] != "src/**" || gotCfg.ScopeAllow[1] != "cmd/**" {
+		t.Errorf("ScopeAllow = %v (comma-split expected)", gotCfg.ScopeAllow)
+	}
+	if len(gotCfg.ScopeDeny) != 1 || gotCfg.ScopeDeny[0] != ".env" {
+		t.Errorf("ScopeDeny = %v", gotCfg.ScopeDeny)
+	}
+	if len(gotCfg.ScopeReadOnly) != 1 || gotCfg.ScopeReadOnly[0] != "tests/**" {
+		t.Errorf("ScopeReadOnly = %v", gotCfg.ScopeReadOnly)
+	}
+	if !gotCfg.PatchOnly {
+		t.Errorf("PatchOnly should be true")
+	}
+	if !gotCfg.StopOn.OffScopeEdit || gotCfg.StopOn.RepeatedVerify != 3 {
+		t.Errorf("StopOn = %+v", gotCfg.StopOn)
+	}
+}
+
+// TestInvalidStopOnRuleFailsResolution: a malformed --stop-on rule fails config
+// resolution (config_error) before any run starts.
+func TestInvalidStopOnRuleFailsResolution(t *testing.T) {
+	called := false
+	deps := Deps{RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+		called = true
+		return nil
+	}}
+	_, _, err := runCmd(t, deps, "--stop-on", "not-a-rule", "do it")
+	if err == nil {
+		t.Fatal("expected an error for an invalid --stop-on rule")
+	}
+	if called {
+		t.Fatal("the loop must not run when config resolution fails")
 	}
 }

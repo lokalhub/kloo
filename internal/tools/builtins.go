@@ -126,8 +126,14 @@ func (t editFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	return Result{Output: "edited " + path}, nil
 }
 
-// DefaultRegistry builds the registry with the five-tool vocabulary, all jailed
+// DefaultRegistry builds the registry with the builtin tool vocabulary, all jailed
 // to ws. opts configure run_command (timeout, output bound).
+//
+// When ws withholds the model-facing shell (ws.ModelShellDisabled — a scope policy
+// is active, or patch-only mode is set), run_command is NOT advertised to the
+// model: a hidden stand-in is registered instead, so a fallback-adapter run_command
+// call is rejected before any process runs (disabled_shell.go). The file tools
+// (edit_file/write_file) remain, still subject to the scope policy carried by ws.
 func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r := NewRegistry()
 	bg := NewBackgroundManager()
@@ -138,7 +144,13 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r.Register(editFileTool{ws})
 	r.Register(writeFileTool{ws})
 	r.Register(listDirTool{ws})
-	r.Register(NewRunCommandTool(ws, append(opts, WithBackground(bg))...))
+	if ws.ModelShellDisabled() {
+		// Hidden: dispatchable (so a stray run_command is rejected pre-exec) but not
+		// offered to the model. scope selects the failure shape (ScopeError vs patch-only).
+		r.registerHidden(disabledRunCommand{scope: ws.ScopeActive()})
+	} else {
+		r.Register(NewRunCommandTool(ws, append(opts, WithBackground(bg))...))
+	}
 	r.Register(commandOutputTool{bg}) // read/stop background commands
 	r.Register(finishTool{})          // explicit terminator; the loop intercepts it
 	return r

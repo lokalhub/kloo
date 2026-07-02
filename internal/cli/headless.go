@@ -42,6 +42,13 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	if err != nil {
 		return maybeBenchmarkSetupError(cfg, err)
 	}
+	// Attach the A1/A2 scope policy + A4 patch-only flag to the workspace, so the
+	// model's edit_file/write_file are gated and (when scope/patch-only is active)
+	// the model-facing run_command is withheld. The verifier/linter are unaffected.
+	ws, err = applyScope(cfg, ws, cwd, writerLogf(out))
+	if err != nil {
+		return maybeBenchmarkSetupError(cfg, err)
+	}
 	// Resolve the verify command: deprecated --verify override, else auto-detect,
 	// else "" (unverified — the run can only end in answered/unverified, not success).
 	verifyCmd = resolveVerifyCommand(verifyCmd, cwd, writerLogf(out))
@@ -59,14 +66,14 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
 	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
-	systemPrompt := defaultSystemPrompt + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
+	systemPrompt := defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
 	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
 		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout)),
 		Adapter:              adapter,
 		Registry:             reg,
-		Verifier:             buildVerifier(ws, verifyCmd, agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Verifier:             buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
 		Linter:               buildLinter(ws, lintCmd, lintPerFile),
 		Budget:               agent.NewBudget(cfg, nil),
 		Churn:                agent.NewChurnDetector(cfg.ChurnRounds),
@@ -75,6 +82,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ContextTokens:        cfg.MaxContextTokens,
 		Memory:               agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:               systemPrompt,
+		StopOn:               agentStopPolicy(cfg.StopOn),
 		StallRounds:          cfg.ChurnRounds,
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
@@ -129,6 +137,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	summary := buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr)
 	memoryStore(ctx, cfg, mcpMgr, cwd, task, summary, rep, writerLogf(out))
 	if cfg.JSONSummary || cfg.BenchmarkMode {
+		withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the JSON
 		printRunSummaryJSON(out, summary)
 	}
 	if cfg.BenchmarkMode {
@@ -268,6 +277,8 @@ type toolCountersSummary struct {
 	NoOpEdits        int `json:"no_op_edits"`
 	VerifyAttempts   int `json:"verify_attempts"`
 	ToolErrors       int `json:"tool_errors"`
+	OffScopeEdits    int `json:"off_scope_edits"`
+	ReadOnlyEdits    int `json:"read_only_edits"`
 }
 
 type runSummary struct {
@@ -292,6 +303,30 @@ type runSummary struct {
 	// unchanged. Lets a benchmark assert a run's self-corrections (e.g. confirm-finish=1).
 	RailFires    map[string]int       `json:"rail_fires,omitempty"`
 	ToolCounters *toolCountersSummary `json:"tool_counters,omitempty"`
+	// B5 layered verifier hooks: the precheck/postcheck gates attempted for the
+	// final verify (command/passed/exit_code). Omitted when no hooks are configured,
+	// so an un-hooked run's JSON is byte-identical.
+	Prechecks  []hookSummary `json:"prechecks,omitempty"`
+	Postchecks []hookSummary `json:"postchecks,omitempty"`
+	// B3 benchmark accounting deltas (missing accountability only; shipped metrics
+	// above are NOT duplicated). FilesChanged is emitted in benchmark mode (or when
+	// non-empty); OffScopeEdits mirrors the report counter; CorrectionCount is the sum
+	// of rail_fires; FinalReason is the most specific terminal class.
+	FilesChanged    *filesChangedSummary `json:"files_changed,omitempty"`
+	OffScopeEdits   int                  `json:"off_scope_edits"`
+	CorrectionCount int                  `json:"correction_count"`
+	FinalReason     string               `json:"final_reason"`
+}
+
+type hookSummary struct {
+	Command  string `json:"command"`
+	Passed   bool   `json:"passed"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type filesChangedSummary struct {
+	Count int      `json:"count"`
+	Paths []string `json:"paths"`
 }
 
 func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) runSummary {
@@ -324,8 +359,17 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				NoOpEdits:        tc.NoOpEdits,
 				VerifyAttempts:   tc.VerifyAttempts,
 				ToolErrors:       tc.ToolErrors,
+				OffScopeEdits:    tc.OffScopeEdits,
+				ReadOnlyEdits:    tc.ReadOnlyEdits,
 			}
 		}
+		// B5: surface the precheck/postcheck gates attempted for the final verify.
+		s.Prechecks = hookSummaries(rep.FinalVerify.Prechecks)
+		s.Postchecks = hookSummaries(rep.FinalVerify.Postchecks)
+		// B3 accounting deltas derived from the report (files_changed needs the git
+		// root and is filled by the CLI entry point via withFilesChanged).
+		s.OffScopeEdits = rep.ToolCounters.OffScopeEdits
+		s.CorrectionCount = correctionCount(rep.RailFires)
 	}
 	if runErr != nil && s.Error == "" {
 		s.Error = runErr.Error()
@@ -334,7 +378,55 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		s.Verify = &verifySummary{Command: verifyCmd}
 	}
 	s.FailureCode, s.FailureDetail = classifyFailure(rep, runErr)
+	// B3 final_reason: the most specific terminal class (failure_detail.class when a
+	// failure was classified), else the report reason (e.g. "success"). Lets a harness
+	// read one field instead of composing reason + failure_code + class.
+	s.FinalReason = finalReason(s)
 	return s
+}
+
+// hookSummaries converts agent HookResults to the JSON hook summary shape.
+func hookSummaries(hooks []agent.HookResult) []hookSummary {
+	if len(hooks) == 0 {
+		return nil
+	}
+	out := make([]hookSummary, 0, len(hooks))
+	for _, h := range hooks {
+		out = append(out, hookSummary{Command: h.Command, Passed: h.Passed, ExitCode: h.ExitCode})
+	}
+	return out
+}
+
+// correctionCount is the deterministic sum of all rail_fires values (B3): the soft
+// model-facing corrections that fired this run. rail_fires itself is unchanged.
+func correctionCount(railFires map[string]int) int {
+	n := 0
+	for _, v := range railFires {
+		n += v
+	}
+	return n
+}
+
+// finalReason returns the most specific terminal class for the run.
+func finalReason(s runSummary) string {
+	if s.FailureDetail != nil && s.FailureDetail.Class != "" {
+		return s.FailureDetail.Class
+	}
+	if s.FailureCode != "" {
+		return s.FailureCode
+	}
+	return s.Reason
+}
+
+// withFilesChanged fills the B3 files_changed accounting from the git working tree
+// at root (sorted, deterministic). It is a no-op when root is empty. Called by the
+// CLI entry points (which know the workspace root); a non-git repo yields count:0.
+func withFilesChanged(s *runSummary, root string) {
+	if root == "" {
+		return
+	}
+	paths := agent.ChangedFiles(context.Background(), root)
+	s.FilesChanged = &filesChangedSummary{Count: len(paths), Paths: paths}
 }
 
 func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
@@ -360,6 +452,13 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 		detail.Class = "nil_report"
 		detail.Message = msg
 		return "internal_error", detail
+	}
+	// B5: a precheck/postcheck hook failure classifies distinctly, regardless of the
+	// terminal reason (answered/churn/error), and takes precedence over verify_failed
+	// (the hook, not verify, is the salient failure). Verify's own failure keeps
+	// FailedStage="" and falls through to the existing verify_failed path.
+	if code, d := hookFailure(rep, detail); code != "" {
+		return code, d
 	}
 	switch rep.Reason {
 	case agent.ReasonBudgetExceeded:
@@ -388,9 +487,17 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 			}
 		}
 		return "repetition_halt", detail
+	case agent.ReasonSafetyStop:
+		return safetyStopFailure(rep, detail)
 	case agent.ReasonUnverified:
 		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
 			return verifyFailure(rep, detail)
+		}
+		if code, d := scopeDenialFailure(rep, detail); code != "" {
+			return code, d
+		}
+		if code, d := patchOnlyRejectFailure(rep, detail); code != "" {
+			return code, d
 		}
 		detail.Source = "verify"
 		detail.Class = "no_verify_command"
@@ -399,6 +506,12 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 	case agent.ReasonAnswered:
 		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
 			return verifyFailure(rep, detail)
+		}
+		if code, d := scopeDenialFailure(rep, detail); code != "" {
+			return code, d
+		}
+		if code, d := patchOnlyRejectFailure(rep, detail); code != "" {
+			return code, d
 		}
 		detail.Source = "internal"
 		detail.Class = "answered"
@@ -422,6 +535,92 @@ func verifyFailure(rep *agent.Report, detail *failureDetail) (string, *failureDe
 	return "verify_failed", detail
 }
 
+// hookFailure classifies a B5 precheck/postcheck gate failure. It returns
+// ("", nil) when no hook failed (FailedStage is "") so the caller uses its normal
+// classification (verify_failed etc.). A precheck failure → precheck_failed (verify
+// never ran); a postcheck failure → postcheck_failed (verify passed but the gate did
+// not, so success is still false).
+func hookFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
+	stage := rep.FinalVerify.FailedStage
+	if stage != "precheck" && stage != "postcheck" {
+		return "", nil
+	}
+	detail.Source = stage
+	detail.Class = stage + "_failed"
+	line := firstNonEmptyLine(rep.FinalVerify.Stdout, rep.FinalVerify.Stderr)
+	cmd := rep.FinalVerify.Command
+	switch {
+	case cmd != "" && line != "":
+		detail.Message = boundedString(cmd+": "+line, 240)
+	case cmd != "":
+		detail.Message = boundedString(cmd, 240)
+	default:
+		detail.Message = boundedString(line, 240)
+	}
+	if stage == "precheck" {
+		return "precheck_failed", detail
+	}
+	return "postcheck_failed", detail
+}
+
+// safetyStopFailure maps an A7 ReasonSafetyStop onto a stable failure code:
+// off_scope_edit for a scope/read-only stop (spec preserves off_scope_edit as the
+// shared scope-denial code), and repetition_halt (class repeated_verify_failure)
+// for the repeated-verify stop — keeping the shipped verify_failed meaning as
+// "final failed verify".
+func safetyStopFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
+	s := rep.Safety
+	if s == nil {
+		detail.Source = "rail"
+		detail.Class = "safety_stop"
+		return "off_scope_edit", detail
+	}
+	if s.Rule == "repeated-verify" {
+		detail.Source = "rail"
+		detail.Class = "repeated_verify_failure"
+		detail.Message = boundedString(s.Message, 240)
+		return "repetition_halt", detail
+	}
+	detail.Source = "scope"
+	detail.Class = s.Class
+	detail.Tool = s.Tool
+	detail.Message = boundedString(s.Message, 240)
+	return "off_scope_edit", detail
+}
+
+// scopeDenialFailure classifies a non-stop run that ended calmly (answered/
+// unverified) AFTER a scope denial as off_scope_edit — so the denial is visible in
+// KLOO_RESULT_JSON even without a --stop-on rule. Returns ("", nil) when the run had
+// no scope denial (the caller then uses its normal classification).
+func scopeDenialFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
+	d := rep.LastScopeDenial
+	if d == nil {
+		return "", nil
+	}
+	detail.Source = "scope"
+	detail.Class = d.Class
+	detail.Tool = d.Tool
+	detail.Message = boundedString(d.Message, 240)
+	return "off_scope_edit", detail
+}
+
+// patchOnlyRejectFailure classifies a run that ended calmly (answered/unverified)
+// AFTER a patch-only run_command rejection (A4) as tool_call_invalid with class
+// patch_only_forbidden_tool — so the machine-readable classification the spec
+// promises is present in KLOO_RESULT_JSON even without a terminal error. Returns
+// ("", nil) when the run had no patch-only rejection.
+func patchOnlyRejectFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
+	r := rep.PatchOnlyReject
+	if r == nil {
+		return "", nil
+	}
+	detail.Source = "tool"
+	detail.Class = r.Class
+	detail.Tool = r.Tool
+	detail.Message = boundedString(r.Message, 240)
+	return "tool_call_invalid", detail
+}
+
 func classifyErrorFailure(rep *agent.Report, err error, detail *failureDetail) (string, *failureDetail) {
 	detail.Message = boundedMessage(err)
 	switch {
@@ -436,6 +635,10 @@ func classifyErrorFailure(rep *agent.Report, err error, detail *failureDetail) (
 	case errors.Is(err, tools.ErrMalformedToolCall) || strings.Contains(detail.Message, "no usable tool call"):
 		detail.Source = "tool"
 		detail.Class = "malformed_tool_call"
+		return "tool_call_invalid", detail
+	case errors.Is(err, tools.ErrPatchOnlyForbidden):
+		detail.Source = "tool"
+		detail.Class = "patch_only_forbidden_tool"
 		return "tool_call_invalid", detail
 	case errors.Is(err, tools.ErrUnknownTool) || errors.Is(err, tools.ErrInvalidArgs):
 		detail.Source = "tool"
@@ -488,6 +691,8 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("no_op_edits", c.NoOpEdits)
 	add("verify_attempts", c.VerifyAttempts)
 	add("tool_errors", c.ToolErrors)
+	add("off_scope_edits", c.OffScopeEdits)
+	add("read_only_edits", c.ReadOnlyEdits)
 	return strings.Join(parts, " ")
 }
 

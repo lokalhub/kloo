@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -74,6 +75,42 @@ func (g *gitCheckpointer) Rollback(ctx context.Context, s Snapshot) error {
 		}
 	}
 	return nil
+}
+
+// ChangedFiles returns the workspace-relative paths changed in root's working tree
+// relative to HEAD (tracked modifications, staged or unstaged) plus new untracked
+// files (excluding .gitignored ones), sorted and de-duplicated for deterministic
+// benchmark accounting (B3). A non-git workspace, or a repo with no HEAD, degrades to
+// what it can report (often an empty list) rather than failing — accounting is
+// best-effort, never a run gate. The returned slice is non-nil (empty, not null).
+func ChangedFiles(ctx context.Context, root string) []string {
+	g := &gitCheckpointer{root: root}
+	paths := []string{}
+	if out, err := g.git(ctx, "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(out) != "true" {
+		return paths
+	}
+	set := map[string]bool{}
+	addLines := func(out string) {
+		for _, line := range strings.Split(out, "\n") {
+			if p := strings.TrimSpace(line); p != "" {
+				set[p] = true
+			}
+		}
+	}
+	// Tracked changes vs HEAD (both staged and unstaged). Skipped silently when the
+	// repo has no commits (rev-parse HEAD would fail) — untracked detection still runs.
+	if out, err := g.git(ctx, "diff", "--name-only", "HEAD"); err == nil {
+		addLines(out)
+	}
+	// New files not yet tracked, honouring .gitignore.
+	if out, err := g.git(ctx, "ls-files", "--others", "--exclude-standard"); err == nil {
+		addLines(out)
+	}
+	for p := range set {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // git runs a git command in the workspace root with a stable identity (so object

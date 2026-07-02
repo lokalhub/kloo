@@ -149,12 +149,55 @@ The animated **thinking line** is the primary in-flight signal:
 
 The line self-terminates when a run ends.
 
+## 5. Active-run layout
+
+While a run is in flight, kloo pins three compact panels between the transcript and
+the thinking line so you can follow the run without scrolling:
+
+```
+… transcript (scrollable) …
+Task: add per-file scope enforcement without weakening the workspace jail  · running go test
+Latest: Scope checks are wired before writes; fixing read-only precedence test.
+✓ read internal/tools/workspace.go · 118 lines
+✓ edited internal/tools/scope.go
+✗ ran go test ./internal/tools (exit 1)
+⠋ Cooking…  running go test ./internal/tools · 12s · 14.4k tok · esc to interrupt
+> ▏
+```
+
+- **Task header** — the original request, pinned so long runs never lose the goal,
+  plus the current in-flight activity on the right.
+- **Latest assistant** — the most recent finalized assistant summary line, kept above
+  the input until the run ends.
+- **Activity log** — the last few tool/step outcomes (`✓` done / `→` running / `✗`
+  fail), a compact glance derived from the same signals as the transcript cards. The
+  full transcript still records every card and assistant turn.
+
+The panels appear only during a run and vanish at the stop report, so the idle layout
+is unchanged. They respect `NO_COLOR`/non-TTY degrade and the existing
+mouse/PgUp/PgDn scrollback, and the viewport shrinks to keep the header, input, and
+hint from overlapping even at 80×24.
+
+## 6. Switching model runtime live
+
+- `/model` / `/models` — pick or list models (via the endpoint's `/v1/models`).
+- `/provider <name>` — switch endpoint + key to another provider **within the loaded
+  profile** for the next run.
+- `/profile <path>` — **reload a different `profiles.json`** and re-resolve the model
+  runtime (provider/endpoint/key/model tuning/context/temperature/tool-format) for
+  subsequent runs. It never writes to disk, preserves your launch flags, keeps the
+  current runtime if the file fails to load, and prints a redacted confirmation
+  (never the API key). See **[profiles.md](profiles.md)**.
+
 ## Verifying
 
 - Automated (offline, deterministic): `go test ./...` covers the SSE usage
   parsing and request-body opt-in, the agent estimate fallback, and TUI golden
   frames (`Model.View()` under the ascii profile) plus `teatest` for the
-  `Ctrl-O` expand toggle and `NO_COLOR` degrade.
+  `Ctrl-O` expand toggle and `NO_COLOR` degrade. The active-run layout has golden
+  frames for standard / 80×24 / wide / no-color states (`active-run*.golden`) and a
+  `teatest` scripted run (progress → edit → run_command → report); `/profile` and
+  `/provider` switching are covered by slash-dispatch tests.
 - Live smoke: run `kloo "<small task>"` against a local OpenAI-compatible server
   (e.g. llama.cpp) and watch the header/thinking token count start non-zero and
   increase over the run.

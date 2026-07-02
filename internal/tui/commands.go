@@ -107,6 +107,8 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashMode(arg), nil
 	case "/provider":
 		return m.slashProvider(arg), nil
+	case "/profile":
+		return m.slashProfile(arg), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
@@ -182,6 +184,41 @@ func (m Model) slashProvider(name string) Model {
 	return m.appendItem(infoItem{text: fmt.Sprintf("provider %q not found (available: %s)", name, strings.Join(names, ", "))})
 }
 
+// slashProfile reloads a DIFFERENT profiles.json for subsequent runs (C6). It
+// re-resolves the runtime (provider/endpoint/key/model tuning/context/temperature/
+// tool-format) preserving the launch CLI flags, and — on success — swaps the runtime,
+// profile path, and model/provider status fields. `/provider` remains scoped to the
+// loaded profile (it now lists the NEW profile's providers). A failed load leaves the
+// current runtime fully intact and shows a clear info line. API keys are never printed.
+func (m Model) slashProfile(path string) Model {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return m.appendItem(infoItem{text: "/profile needs a path to a profiles.json"})
+	}
+	if m.reloadProfile == nil {
+		return m.appendItem(infoItem{text: "/profile is not available in this session"})
+	}
+	rc, summary, err := m.reloadProfile(path)
+	if err != nil {
+		// Keep the current runtime/profile intact; surface a clear, secret-free error.
+		return m.appendItem(infoItem{text: "profile: could not load " + path + " — " + oneLineErr(err)})
+	}
+	m.runtime = rc
+	m.profilePath = path
+	if rc.Model != "" {
+		m.modelName = rc.Model
+		m.status.model = rc.Model
+	}
+	m.status.provider = rc.Provider
+	return m.appendItem(infoItem{text: fmt.Sprintf("profile: loaded %s (%s)", path, summary)})
+}
+
+// oneLineErr collapses an error message to a single bounded line for a TUI info
+// line (config errors never contain secrets; this just keeps the line tidy).
+func oneLineErr(err error) string {
+	return oneLine(err.Error())
+}
+
 // submitTask appends the user line and, if a Runner is wired, launches an
 // autonomous run under a cancelable context. Without a Runner (unit tests) it
 // just records the submission.
@@ -206,6 +243,11 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	}
 	task := m.expandPastes(line) // the model receives the full pasted text
 	m.pastes = nil               // consumed by this submission
+	// C8: pin this request as the active task and start a fresh compact activity log
+	// + summary for the run (the full transcript still records everything).
+	m.activeTask = line
+	m.latestSummary = ""
+	m.activityLog = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.running = true
