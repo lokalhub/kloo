@@ -540,16 +540,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					convo = append(convo, msg, promiseToActCorrective(lastActionFailed))
 					continue
 				}
-				// Confirm-finish rail: the model has been EXECUTING real actions this run
-				// but stops with a bare prose turn — no tool call, no finish, and not an
-				// already-green edit (lastVerify.Passed && edited, which would have ended as
-				// success). On a multi-step ops task (a deploy, a migration) this is the
-				// premature `answered` stop seen live: dsv4 registered the version, said
-				// "done", and stopped before upgrading the instance. Nudge ONCE to call
-				// finish (its explicit, verify-gated terminator) or do the next step. The
-				// one-shot flag means a run that genuinely has nothing left still stops
-				// calmly on the very next bare turn — this only ever costs one extra round.
-				if everActed && !confirmFinishNudged && !(lastVerify.Passed && edited) {
+				// Confirm-finish rail: the model has called tools this run but stops with
+				// a bare prose turn — no tool call, no finish, and not an already-green
+				// edit (lastVerify.Passed && edited, which would have ended as success).
+				// Previously gated on everActed (edit/write/run_command only), but a model
+				// that reads task files and then narrates findings without making edits hits
+				// the same premature-stop pattern — seen live with dsv4-flash on coding
+				// tasks (reads 4 files, reports "task 01 is done, task 02 needs work",
+				// stops without calling edit_file). Extend to any tool call (step > 1) so
+				// the one-shot nudge fires whenever the model has seen tool results but
+				// stops in prose. The one-shot flag means a run that genuinely has nothing
+				// left still stops calmly on the very next bare turn.
+				if (everActed || step > 1) && !confirmFinishNudged && !(lastVerify.Passed && edited) {
 					confirmFinishNudged = true
 					recordRail(RailConfirmFinish)
 					convo = append(convo, msg, confirmFinishCorrective())
