@@ -950,11 +950,19 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// a legitimate read-heavy run toward a fix (read many files, THEN edit) is
 		// never cut off. Resets to 0 on any progress, so it fires at a small N far
 		// below the step budget — the two ceilings never overlap.
+		//
+		// Pre-action exploration is NOT a confirming-spin: a model that reads several
+		// files BEFORE making its first edit is doing legitimate work, not stalling.
+		// Only start counting once the model has executed a real action (everActed),
+		// so initial exploration is handled by the explore rail (higher ceiling) rather
+		// than the stall backstop (tighter ceiling designed for post-action spins).
 		editedThisTurn := isEditTool(call.Name) && derr == nil
 		fp := l.treeFingerprint()
 		switch {
 		case !stallSeeded:
 			stallSeeded = true // first turn establishes the baseline; nothing to compare yet
+		case !everActed:
+			stall = 0 // pre-action exploration — let the explore rail govern, not stall
 		case !lastVerify.Passed:
 			stall = 0 // red verify ⇒ churn/budget own this; never stall honest exploration
 		case editedThisTurn || fp != prevFp:
