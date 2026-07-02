@@ -1410,12 +1410,21 @@ var promiseVerbs = []string{
 	"let me start", "let me first", "let me fix", "let me update", "let me create",
 	"let me add", "let me find", "let me open", "let me build", "let me actually",
 	"let me deploy", "let me set", "let me register", "let me login", "let me continue",
+	"let me implement", "let me edit", "let me write", "let me modify", "let me apply",
 	"let's run", "let's check", "let's try", "let's see", "let's start",
+	"let's implement", "let's edit", "let's write", "let's modify",
 	"i'll run", "i'll check", "i'll try", "i'll look", "i'll start", "i'll fix",
 	"i'll build", "i'll deploy", "i'll set", "i'll create", "i'll also", "i'll now",
+	"i'll implement", "i'll edit", "i'll modify", "i'll apply", "i'll code",
 	"i will run", "i will check", "i'm going to", "i am going to",
+	"i will implement", "i will edit", "i will modify", "i will write",
 	"going to run", "going to check", "try running", "now let me", "now i'll",
+	"going to implement", "going to edit", "going to modify",
 	"next, let me", "next i'll", "next, i'll", "start by",
+	"now implement", "now edit", "start implementing", "begin implementing",
+	"need to implement", "proceed to implement", "proceed to edit",
+	"will implement", "to implement the", "to implement task",
+	"implementing the", "implementing task",
 }
 
 // promisesToAct reports whether a no-tool-call reply READS like the model announced a
