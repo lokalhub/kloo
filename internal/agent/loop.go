@@ -213,7 +213,7 @@ const (
 // can step in. Generous so a legitimate read-many-then-edit run is never cut off.
 const (
 	DefaultExploreNudgeRounds = 6
-	DefaultExploreAbortRounds = 10
+	DefaultExploreAbortRounds = 16
 )
 
 // DefaultEditFailLimit bounds the failed-edit rail: after this many CONSECUTIVE
@@ -1365,10 +1365,13 @@ func (l *Loop) repeatCorrective(call tools.Call, n int) llm.Message {
 // a calm answered stop) rather than keep reading.
 func exploreCorrective(n int) llm.Message {
 	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
-		"You have inspected %d files in a row without making any change. You have enough "+
-			"context now — STOP reading and ACT: make the edit the task requires (edit_file/"+
-			"write_file) or run the needed command. If you genuinely need the user to clarify "+
-			"something, reply with ONE short question and NO tool call so they can answer.", n)}
+		"You have inspected %d files without making any change. You now have enough context — "+
+			"STOP reading and take action immediately this turn. Pick ONE of: "+
+			"(a) call edit_file or write_file to implement a required change, "+
+			"(b) call run_command to run a necessary command (e.g. a report/test command), "+
+			"(c) call finish if all tasks are genuinely complete. "+
+			"Do NOT read another file. If you genuinely cannot proceed without clarification, "+
+			"reply with ONE short question and no tool call.", n)}
 }
 
 // promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail.
