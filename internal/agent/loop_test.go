@@ -339,13 +339,16 @@ func TestLoopConfirmFinishNudgeOnActedBareStop(t *testing.T) {
 	}
 }
 
-// TestLoopReadOnlyRunSkipsConfirmFinishNudge: the confirm-finish rail is gated on a REAL
-// action. A run that only READ (read_file) then answers in prose is the legitimate
-// ReasonAnswered case — it must NOT get the extra nudge round, so it stops at step 2.
-func TestLoopReadOnlyRunSkipsConfirmFinishNudge(t *testing.T) {
+// TestLoopReadOnlyRunGetsConfirmFinishNudge: a run that only READ (read_file) then
+// answers in prose now fires the confirm-finish rail once — it returns ReasonAnswered
+// at step 3, not step 2. This catches the pattern where a model reads task files and
+// reports findings without actually making edits (seen with dsv4-flash on coding tasks).
+// The one-shot flag means a genuinely-done answer still stops calmly at step 3.
+func TestLoopReadOnlyRunGetsConfirmFinishNudge(t *testing.T) {
 	srv := llmtest.Sequence(t,
 		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "x"}})},
 		llmtest.Mock{Body: proseResp(t, "Here is the answer to your question.")},
+		llmtest.Mock{Body: proseResp(t, "Task is complete — no more steps needed.")},
 	)
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult()}}, &stubBudget{}, &stubChurn{})
 
@@ -354,10 +357,13 @@ func TestLoopReadOnlyRunSkipsConfirmFinishNudge(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if rep.Reason != ReasonAnswered {
-		t.Fatalf("reason = %q, want answered", rep.Reason)
+		t.Fatalf("reason = %q, want answered (after the one-shot confirm-finish nudge)", rep.Reason)
 	}
-	if rep.Steps != 2 {
-		t.Errorf("steps = %d, want 2 — a read-only run must not trigger the confirm-finish nudge", rep.Steps)
+	if rep.Steps != 3 {
+		t.Errorf("steps = %d, want 3 — the confirm-finish rail now fires on any tool-using run (step > 1)", rep.Steps)
+	}
+	if got := rep.RailFires[string(RailConfirmFinish)]; got != 1 {
+		t.Errorf("RailFires[%q] = %d, want 1", RailConfirmFinish, got)
 	}
 }
 
