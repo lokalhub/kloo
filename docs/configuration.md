@@ -125,6 +125,45 @@ messages on failures. The probe never mutates the user's current workspace.
 | `KLOO_MCP` | Set to `0` / `false` to disable all [MCP servers](mcp.md). `--no-mcp` overrides it; both override the profile. |
 | `XDG_CONFIG_HOME` | If set, the profile file lives at `$XDG_CONFIG_HOME/kloo/profiles.json`. |
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
+| `KLOO_CTX_AUTO` | `1` to **auto-size the context budget** from the model's advertised `/models` `context_length` (minus output headroom) instead of the bundled default — so a large-context model isn't starved on a big task. Opt-in; never shrinks below `--ctx`. See [Reliability tuning](#reliability-tuning). |
+| `KLOO_CTX_AUTO_CAP` | Optional ceiling (tokens) for `KLOO_CTX_AUTO` on memory/cost-limited endpoints. Unset ⇒ the model's full advertised window. |
+| `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
+| `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
+| `KLOO_EDIT_RECOVER` | `1` to replace the bare "no such file" error when `edit_file` targets a **missing** file with a targeted corrective (use `write_file` to create it), so the model recovers in one turn instead of thrashing. |
+
+## Reliability tuning
+
+For **weak-but-capable, large-context models** (mid-tier hosted or big local models) on
+**complex, multi-file tasks**, a few opt-in switches materially raise how reliably the model
+converges to a passing solution. They are independent and composable — turn on what you need:
+
+| Switch | Turn on when… |
+|---|---|
+| `KLOO_CTX_AUTO` (+ `KLOO_CTX_AUTO_CAP`) | the model advertises a much larger window than the default and the task needs the repo + contract + notes + error traces in memory at once. Weak *small*-context models don't benefit. |
+| `KLOO_RECALL_SCALE` | you inject a large reference/cheat-sheet via the [MCP recall hook](memory.md) and the default 4 KB truncates it. |
+| `KLOO_TOOL_REPAIR` | the model emits **XML** tool calls and occasionally drops a closing tag on large writes (symptom: runs die with `failure_code: tool_call_invalid`). |
+| `KLOO_EDIT_RECOVER` | the model reaches for `edit_file` to *create* files and stalls on "no such file". |
+
+**Step budget for complex tasks.** `--max-steps` (env `KLOO_MAX_STEPS`) is the autonomous-step
+ceiling — a **per-run** parameter, editable at launch, no code change. The default is `500`, but
+`--effort fast` seeds it to `50`, which can cut a capable model off *mid-convergence* on a hard
+task (observed: a complex solve converging at ~step 60). For complex multi-file work prefer
+**`--max-steps 100`–`200`** (or `--effort medium`/`heavy`); churn detection still halts genuine
+no-progress loops early, so a generous ceiling costs nothing on easy tasks.
+
+**Unlimited steps (Claude Code / Codex-style).** Set **`--max-steps 0`** to remove the step cap
+entirely — the run is then bounded only by **churn detection** (the primary no-progress stop), the
+**wall-clock** cap (profile `maxWallClockSeconds`, default 1 hr), the **token** budget, and the
+model finishing. This mirrors how Claude Code and the Codex CLI run — there is no step counter,
+the agent goes until it's done or genuinely stuck. Recommended for open-ended real work with a
+**capable, reliable** model. (Each budget ceiling is independent and disabled at `0`.)
+
+> ⚠️ **Cap the steps when experimenting, benchmarking, or driving an unreliable/flaky model.**
+> A weak or inconsistent model can *thrash* — churn-evading micro-changes that never converge — and
+> with `--max-steps 0` it will run all the way to the wall-clock limit (default 1 hr), **burning
+> tokens the whole way**. A finite ceiling (**`--max-steps 100`–`200`**, or lower for cheap probes)
+> bounds the worst-case cost *per attempt* and keeps A/B runs reproducible. Also set a `maxTokens`
+> budget and/or a shorter `maxWallClockSeconds` in the profile as a hard cost stop.
 
 ## Effort tiers
 

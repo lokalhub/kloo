@@ -2,8 +2,19 @@ package edit
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
+
+// repairEnabled reports whether tolerant recovery of malformed model output is on
+// (KLOO_TOOL_REPAIR=1) — the same switch that recovers truncated tool calls. Here
+// it lets a structurally-complete SEARCH/REPLACE block through even when the model
+// dropped the cosmetic closing ``` fence, instead of rejecting the edit and
+// churning to a repetition_halt (observed on weaker models like GLM-4.5-air).
+func repairEnabled() bool {
+	v := os.Getenv("KLOO_TOOL_REPAIR")
+	return v != "" && v != "0"
+}
 
 // Block is one parsed SEARCH/REPLACE edit: the target File, the exact Search
 // text to locate, and the Replace text to substitute. An empty Search marks the
@@ -91,8 +102,12 @@ func Parse(s string) ([]Block, error) {
 			return nil, fmt.Errorf("edit: block without a %q terminator: %w", markerReplace, ErrMalformedBlock)
 		}
 
-		// Closing fence must immediately follow the terminator.
-		if replaceIdx+1 >= len(lines) || !isCloseFence(lines[replaceIdx+1]) {
+		// Closing fence must immediately follow the terminator — unless tolerant
+		// recovery is on: the block is already structurally COMPLETE (SEARCH /
+		// ======= / REPLACE all found), so a missing closing ``` fence is cosmetic.
+		// #F: accept it instead of rejecting the edit and letting the model churn.
+		hasFence := replaceIdx+1 < len(lines) && isCloseFence(lines[replaceIdx+1])
+		if !hasFence && !repairEnabled() {
 			return nil, fmt.Errorf("edit: block fence opened but never closed: %w", ErrMalformedBlock)
 		}
 
@@ -101,7 +116,11 @@ func Parse(s string) ([]Block, error) {
 			Search:  body(lines[searchIdx+1 : dividerIdx]),
 			Replace: body(lines[dividerIdx+1 : replaceIdx]),
 		})
-		i = replaceIdx + 2
+		if hasFence {
+			i = replaceIdx + 2
+		} else {
+			i = replaceIdx + 1
+		}
 	}
 
 	return blocks, nil

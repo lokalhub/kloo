@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,6 +36,15 @@ func memoryRecall(ctx context.Context, cfg config.Config, mgr *mcp.Manager, cwd,
 	limit := mem.MaxRecallBytes
 	if limit <= 0 {
 		limit = 4096
+		// #3 scaled cheat-sheet (opt-in, KLOO_RECALL_SCALE=1): scale the recall
+		// budget with the curator context window (~half the window in bytes ≈12%
+		// of tokens) instead of the fixed 4KB, so a large-context model holds the
+		// whole guide. Off by default → stock behavior; independent on/off switch.
+		if v := os.Getenv("KLOO_RECALL_SCALE"); v != "" && v != "0" {
+			if scaled := cfg.MaxContextTokens / 2; scaled > limit {
+				limit = scaled
+			}
+		}
 	}
 	return boundedString(redactConfiguredSecrets(res.Output, cfg), limit)
 }

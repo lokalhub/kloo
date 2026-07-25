@@ -2,10 +2,22 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
 )
+
+// toolRepairEnabled reports whether tolerant tool-call recovery is on (opt-in,
+// KLOO_TOOL_REPAIR=1). A capable model frequently drops the trailing </arg> or
+// </tool> on a large content/diff block; without recovery kloo re-prompts once
+// and then ABORTS the whole run (failure_code: tool_call_invalid), throwing away
+// a nearly-correct solution. This switch recovers the last unterminated arg/tool
+// instead — a reliability lift for weak-but-capable models. Off ⇒ stock behavior.
+func toolRepairEnabled() bool {
+	v := os.Getenv("KLOO_TOOL_REPAIR")
+	return v != "" && v != "0"
+}
 
 // XMLAdapter is the generic XML-tag fallback for untuned models that can't emit
 // reliable native tool_calls (design doc §2). It parses a single <tool> block
@@ -64,15 +76,29 @@ func (XMLAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 			return nil, fmt.Errorf("xml: <tool> missing name attribute: %w", ErrMalformedToolCall)
 		}
 		relClose := strings.Index(text[openTagEnd:], "</tool>")
+		var inner string
+		lastBlock := false
 		if relClose < 0 {
-			return nil, fmt.Errorf("xml: missing </tool> close tag: %w", ErrMalformedToolCall)
+			// Tolerant recovery (KLOO_TOOL_REPAIR): model dropped the trailing
+			// </tool> (truncated a large block). If no further <tool> opens, treat
+			// the remainder as this block instead of aborting the run.
+			if toolRepairEnabled() && strings.Index(text[openTagEnd:], "<tool") < 0 {
+				inner = text[openTagEnd:]
+				lastBlock = true
+			} else {
+				return nil, fmt.Errorf("xml: missing </tool> close tag: %w", ErrMalformedToolCall)
+			}
+		} else {
+			inner = text[openTagEnd : openTagEnd+relClose]
 		}
-		inner := text[openTagEnd : openTagEnd+relClose]
 		args, err := parseXMLArgs(inner)
 		if err != nil {
 			return nil, err
 		}
 		calls = append(calls, Call{Name: name, Args: sanitizeArgs(args)})
+		if lastBlock {
+			break
+		}
 		i = openTagEnd + relClose + len("</tool>")
 	}
 	return calls, nil
@@ -121,6 +147,14 @@ func parseXMLArgs(inner string) (map[string]any, error) {
 		}
 		relClose := strings.Index(inner[argTagEnd:], "</arg>")
 		if relClose < 0 {
+			// Tolerant recovery (KLOO_TOOL_REPAIR): the model dropped the trailing
+			// </arg> on this arg. If it is the LAST arg (no further <arg> opens),
+			// auto-close it — take the remainder as the value — instead of aborting
+			// the whole run. Conservative: only the trailing arg is recovered.
+			if toolRepairEnabled() && strings.Index(inner[argTagEnd:], "<arg") < 0 {
+				args[name] = strings.TrimSpace(inner[argTagEnd:])
+				return args, nil
+			}
 			return nil, fmt.Errorf("xml: missing </arg> for %q: %w", name, ErrMalformedToolCall)
 		}
 		value := inner[argTagEnd : argTagEnd+relClose]

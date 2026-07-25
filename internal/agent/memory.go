@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
@@ -53,7 +54,17 @@ const summaryPrefix = "Progress so far (compacted):\n"
 // the assembly is byte-for-byte testable and adds no latency.
 type workingMemory struct {
 	stats       MemoryStats
-	compactions int // cumulative across the run (overview §3: the ⟲ counter)
+	compactions int    // cumulative across the run (overview §3: the ⟲ counter)
+	prevVerify  string // #4: normalized previous failing verify, to flag a repeat
+}
+
+// smartVerify reports whether the verify same-failure marker is on
+// (KLOO_SMART_VERIFY=1): when a failing verify is IDENTICAL to the previous turn's,
+// prepend a note telling the model its last change had no effect and to try a
+// DIFFERENT fix — breaking the "repeat the same non-working edit" verify-churn.
+func smartVerify() bool {
+	v := os.Getenv("KLOO_SMART_VERIFY")
+	return v != "" && v != "0"
 }
 
 // NewWorkingMemory builds the deterministic in-process working memory. It takes
@@ -85,7 +96,18 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 
 	hotBudget := hotBudgetTokens(window)
 	task := llm.Message{Role: llm.RoleUser, Content: in.Task}
-	vp, hasVerify := verifyPin(in.LastVerify)
+	// #4: flag a verify failure identical to the previous turn's (opt-in).
+	repeatedVerify := false
+	if !in.LastVerify.Passed {
+		cur := normalizeChurn(strings.TrimSpace(in.LastVerify.Stdout + "\n" + in.LastVerify.Stderr))
+		if cur != "" && cur == w.prevVerify && smartVerify() {
+			repeatedVerify = true
+		}
+		w.prevVerify = cur
+	} else {
+		w.prevVerify = ""
+	}
+	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify)
 	fp, hasFile := filePin(in.EditPath, in.FreshFile)
 
 	// Recent tail: prior-session turns (oldest) followed by this run's transcript
@@ -255,13 +277,18 @@ func tokensOf(msgs []llm.Message) int {
 // pass/fail + exit code, and (on failure) the failing output verbatim — the one
 // signal the loop trusts, kept whole so the model sees exactly what failed.
 // Returns false when there is no verify signal yet.
-func verifyPin(v VerifyResult) (llm.Message, bool) {
+func verifyPin(v VerifyResult, repeated bool) (llm.Message, bool) {
 	if v.Command == "" {
 		return llm.Message{}, false
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Last verify: %s\npassed=%t exit=%d", v.Command, v.Passed, v.ExitCode)
 	if !v.Passed {
+		if repeated {
+			// #4: the failure is IDENTICAL to last turn — the model's change had no
+			// effect. Steer it off the repeat loop toward a different diagnosis.
+			b.WriteString("\n⚠️ This is the SAME verify failure as your previous attempt — your last change did NOT fix it. Do not repeat the same edit; read the exact error below, inspect the relevant file/schema, and try a DIFFERENT fix.")
+		}
 		if out := strings.TrimSpace(v.Stdout + "\n" + v.Stderr); out != "" {
 			b.WriteString("\n")
 			b.WriteString(out)
