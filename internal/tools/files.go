@@ -1,12 +1,23 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/lokalhub/kloo/internal/edit"
 )
+
+// editRecoverEnabled reports whether edit-on-missing-file recovery is on (opt-in,
+// KLOO_EDIT_RECOVER=1). A weak model frequently reaches for edit_file to CREATE a
+// new file, which fails with a bare "no such file" OS error and sends the model
+// thrashing. When on, that error is replaced with a targeted corrective pointing
+// at write_file — a one-turn recovery. Off ⇒ stock behavior.
+func editRecoverEnabled() bool {
+	v := os.Getenv("KLOO_EDIT_RECOVER")
+	return v != "" && v != "0"
+}
 
 // Tool name constants — the exact snake_case strings from naming.md that Phase
 // 02's registry surfaces to the model.
@@ -137,6 +148,13 @@ func EditFile(ws Workspace, relPath, blockText string) error {
 		blocks[i].File = abs
 	}
 	if _, err := edit.Apply(blocks); err != nil {
+		// #E edit-on-missing-file recovery (KLOO_EDIT_RECOVER): edit_file only
+		// modifies EXISTING files; a model that used it to CREATE a file gets a bare
+		// "no such file" error and thrashes. Replace it with a targeted corrective
+		// so the model switches to write_file in one turn.
+		if editRecoverEnabled() && errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("tools: edit_file %s: file does not exist yet — edit_file only modifies EXISTING files. Use write_file to CREATE a new file with its full content: %w", relPath, err)
+		}
 		return fmt.Errorf("tools: edit_file %s: %w", relPath, err)
 	}
 	return nil

@@ -314,6 +314,17 @@ func isRepairableEditFailure(err error) bool {
 	return errors.Is(err, edit.ErrSearchNotFound) || errors.Is(err, edit.ErrAmbiguousMatch)
 }
 
+// smartChurn reports whether malformation-aware churn is on (KLOO_SMART_CHURN=1).
+// A repeated CORRECTABLE edit failure (malformed block, unmatched SEARCH,
+// edit-on-missing) is the model trying to fix its FORMAT/tool-use, not repeating a
+// wrong APPROACH — so it should be bounded by the per-target repair budget
+// (repairLimit) via a corrective, NOT counted toward the no-progress churn rail
+// that halts at N. Off ⇒ stock behavior (correctable failures still churn at N).
+func smartChurn() bool {
+	v := os.Getenv("KLOO_SMART_CHURN")
+	return v != "" && v != "0"
+}
+
 // maxConv returns the effective per-request transcript bound.
 func (l *Loop) maxConv() int {
 	if l.MaxConversation > 0 {
@@ -749,6 +760,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// below (which still sees editSignature+verifyOut) and never affecting `edited`
 		// (still set only on derr == nil), so no new false-churn/false-success source.
 		obs := observation(call, result, derr)
+		correctableEdit := false // #2: this turn's edit failed a CORRECTABLE way (got a corrective within the repair budget)
 		if call.Name == tools.NameEditFile {
 			path := str(call.Args["path"])
 			switch {
@@ -760,11 +772,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// apologizing and stopping (the gpt-oss failure mode).
 				obs = buildMalformedCorrection(l.Root, path)
 				repairAttempts[path]++
+				correctableEdit = true
+			case errors.Is(derr, os.ErrNotExist) && repairAttempts[path] < l.repairLimit():
+				// edit_file on a file that doesn't exist yet: a correctable tool-use slip
+				// — bound it by the repair budget (repairLimit), not the churn rail.
+				repairAttempts[path]++
+				correctableEdit = true
 			case isRepairableEditFailure(derr) && repairAttempts[path] < l.repairLimit():
 				if rep, okRep := buildRepairObservation(l.Root, path, str(call.Args["diff"])); okRep {
 					obs = rep
 					repairAttempts[path]++
 				}
+				correctableEdit = true
 			}
 		}
 		if call.Name == tools.NameWriteFile && errors.Is(derr, errWriteClobber) {
@@ -847,9 +866,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if l.Verifier != nil {
 			verifyOut = failingOutput(lastVerify)
 		}
+		// #2 malformation-aware churn: a CORRECTABLE edit failure (got a corrective
+		// within the repair budget) is not "repeating a wrong approach" — don't feed
+		// its signature to the churn rail, so repairLimit governs it instead of the
+		// rail halting at N before the corrective takes. Off ⇒ stock (still churns).
+		editSig := editSignature(call)
+		if smartChurn() && correctableEdit {
+			editSig = ""
+		}
 		l.Churn.Observe(Turn{
 			VerifyOutput: verifyOut,
-			Edit:         editSignature(call),
+			Edit:         editSig,
 			Acted:        call.Name == tools.NameRunCommand && derr == nil,
 		})
 

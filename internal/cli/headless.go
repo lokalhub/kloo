@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,54 @@ const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
 // plain lines, and the terminal report is printed at the end. No Bubble Tea / TTY
 // is involved, so it works under nohup, CI, or a captured pipe (the Phase-06
 // acceptance benchmark, task 03).
+// autoSizeContext returns a curator context budget derived from the model's
+// advertised context window (endpoint /models). Returns 0 (keep existing) on any
+// failure or if the model is not found. Reserves output headroom so generation +
+// tool results + verify traces still fit. Opt-in via KLOO_CTX_AUTO; an explicit
+// override cap can be set with KLOO_CTX_AUTO_CAP (0/unset = model max).
+func autoSizeContext(ctx context.Context, cfg config.Config, logf func(string, ...any)) int {
+	cli := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout))
+	models, err := cli.Models(ctx)
+	if err != nil {
+		if logf != nil {
+			logf("kloo: ctx-auto · model catalog fetch failed (%v) — keeping %d", err, cfg.MaxContextTokens)
+		}
+		return 0
+	}
+	adv := 0
+	for _, m := range models {
+		if m.ID == cfg.Model {
+			adv = m.ContextLength
+			break
+		}
+	}
+	if adv <= 0 {
+		if logf != nil {
+			logf("kloo: ctx-auto · %s has no advertised context_length — keeping %d", cfg.Model, cfg.MaxContextTokens)
+		}
+		return 0
+	}
+	// Reserve output headroom: max(20% of window, 8192).
+	reserve := adv / 5
+	if reserve < 8192 {
+		reserve = 8192
+	}
+	sized := adv - reserve
+	// Optional safety cap (e.g. Vulkan-limited local servers): KLOO_CTX_AUTO_CAP.
+	if capStr := os.Getenv("KLOO_CTX_AUTO_CAP"); capStr != "" {
+		if capN, perr := strconv.Atoi(capStr); perr == nil && capN > 0 && sized > capN {
+			sized = capN
+		}
+	}
+	if sized <= cfg.MaxContextTokens {
+		return 0
+	}
+	if logf != nil {
+		logf("kloo: ctx-auto · %s advertises %d ctx → curator budget %d (reserved %d for output)", cfg.Model, adv, sized, reserve)
+	}
+	return sized
+}
+
 func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -63,6 +112,15 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	// MCP: connect configured servers (non-fatal) + register their tools alongside
 	// the builtins; the startup/trust lines go to out. Closed on return.
 	ctx := context.Background()
+	// Dynamic context sizing (opt-in, KLOO_CTX_AUTO=1): size the curator budget
+	// from the model's REAL advertised window (endpoint /models context_length)
+	// instead of the bundled low default, so large-context models aren't starved
+	// on big tasks. Never shrinks; reserves output headroom; falls back silently.
+	if v := os.Getenv("KLOO_CTX_AUTO"); v != "" && v != "0" {
+		if sized := autoSizeContext(ctx, cfg, writerLogf(out)); sized > cfg.MaxContextTokens {
+			cfg.MaxContextTokens = sized
+		}
+	}
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
 	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
