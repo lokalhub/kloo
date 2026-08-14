@@ -126,7 +126,8 @@ different profile with `/profile <path>`.
 |---|---|
 | `kloo` | Launch the interactive TUI session (autonomous loop under the UI). |
 | `kloo doctor [--json]` | Print the resolved, redacted config without starting a model, MCP, TUI, task loop, or verify command. |
-| `kloo probe [--json]` | Run cheap tool-call, temp edit, and JSON-only capability checks in a temporary workspace. |
+| `kloo probe [--json]` | Run cheap tool-call, temp edit, and JSON-only capability checks in a temporary workspace, and report the context window the endpoint advertises against the one kloo will use. |
+| `kloo tokens [--json] "<task>"` | Estimate whether a task prompt fits the resolved context window. Reads the task from the argument or `--file`; starts nothing. |
 | `kloo "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout. |
 | `kloo --benchmark "<task>"` | Automation preset: task loop + JSON summary + stable exit codes. |
 

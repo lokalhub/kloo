@@ -28,14 +28,33 @@ type probeChecks struct {
 	JSONOnly probeCheck `json:"json_only"`
 }
 
+// probeContext reports the per-step window kloo will actually use against what
+// the endpoint advertises for this model. `advertised` is 0 whenever the
+// listing does not carry a context length — the case where kloo silently keeps
+// its own `--ctx` and over-compacts on a much larger server. Reporting it is the
+// whole point: the mismatch is otherwise invisible until a run behaves oddly.
+type probeContext struct {
+	Configured int    `json:"configured"`
+	Advertised int    `json:"advertised"`
+	Source     string `json:"source"`
+	Message    string `json:"message,omitempty"`
+}
+
+// modelLister is the /v1/models seam, kept narrow so the check is unit-testable
+// without an endpoint (mirrors the TUI's ModelLister).
+type modelLister interface {
+	Models(ctx context.Context) ([]llm.ModelInfo, error)
+}
+
 type probeResult struct {
-	Model              string      `json:"model"`
-	Endpoint           string      `json:"endpoint"`
-	ToolFormat         string      `json:"tool_format"`
-	OK                 bool        `json:"ok"`
-	Checks             probeChecks `json:"checks"`
-	TempWorkspace      string      `json:"temp_workspace,omitempty"`
-	TempWorkspaceClean bool        `json:"temp_workspace_removed"`
+	Model              string       `json:"model"`
+	Endpoint           string       `json:"endpoint"`
+	ToolFormat         string       `json:"tool_format"`
+	Context            probeContext `json:"context"`
+	OK                 bool         `json:"ok"`
+	Checks             probeChecks  `json:"checks"`
+	TempWorkspace      string       `json:"temp_workspace,omitempty"`
+	TempWorkspaceClean bool         `json:"temp_workspace_removed"`
 }
 
 func newProbeCmd(deps *Deps) *cobra.Command {
@@ -113,7 +132,43 @@ func runProbe(ctx context.Context, cfg config.Config) probeResult {
 	res.Checks.ToolCall = probeToolCall(ctx, cfg, client, adapter, reg)
 	res.Checks.FileEdit = probeFileEdit(ctx, cfg, client, adapter, reg, ws)
 	res.Checks.JSONOnly = probeJSONOnly(ctx, cfg, client)
+	// Last on purpose: the capability checks are what probe is for, and an
+	// informational listing call must not delay or disturb them.
+	res.Context = probeContextWindow(ctx, cfg, client)
 	return finishProbeResult(res)
+}
+
+// probeContextWindow compares the configured per-step window against the one the
+// endpoint advertises for this model. It never fails the probe: an endpoint that
+// does not serve /v1/models is common (and fine), so this is reported, not gated.
+func probeContextWindow(ctx context.Context, cfg config.Config, lister modelLister) probeContext {
+	out := probeContext{Configured: cfg.MaxContextTokens, Source: "unavailable"}
+	models, err := lister.Models(ctx)
+	if err != nil {
+		out.Message = boundedString(err.Error(), 240)
+		return out
+	}
+	for _, model := range models {
+		if model.ID != cfg.Model {
+			continue
+		}
+		if model.ContextLength <= 0 {
+			out.Source = "not-advertised"
+			out.Message = "endpoint lists this model but reports no context length; kloo keeps --ctx"
+			return out
+		}
+		out.Advertised = model.ContextLength
+		out.Source = "endpoint"
+		if model.ContextLength > cfg.MaxContextTokens {
+			out.Message = fmt.Sprintf(
+				"endpoint advertises %d tokens; kloo is using %d — raise --ctx to use the full window",
+				model.ContextLength, cfg.MaxContextTokens)
+		}
+		return out
+	}
+	out.Source = "not-listed"
+	out.Message = "endpoint does not list this model id"
+	return out
 }
 
 func finishProbeResult(res probeResult) probeResult {
@@ -250,6 +305,7 @@ func writeProbeHuman(out io.Writer, res probeResult) {
 	fmt.Fprintf(out, "model: %s\n", res.Model)
 	fmt.Fprintf(out, "endpoint: %s\n", res.Endpoint)
 	fmt.Fprintf(out, "tool_format: %s\n", res.ToolFormat)
+	writeProbeContext(out, res.Context)
 	writeProbeCheck(out, "tool_call", res.Checks.ToolCall)
 	writeProbeCheck(out, "file_edit", res.Checks.FileEdit)
 	writeProbeCheck(out, "json_only", res.Checks.JSONOnly)
@@ -260,6 +316,17 @@ func writeProbeHuman(out io.Writer, res probeResult) {
 		fmt.Fprintln(out, "overall: PASS")
 	} else {
 		fmt.Fprintln(out, "overall: FAIL")
+	}
+}
+
+func writeProbeContext(out io.Writer, c probeContext) {
+	if c.Advertised > 0 {
+		fmt.Fprintf(out, "context: using %d, endpoint advertises %d\n", c.Configured, c.Advertised)
+	} else {
+		fmt.Fprintf(out, "context: using %d, endpoint advertises none (%s)\n", c.Configured, c.Source)
+	}
+	if c.Message != "" {
+		fmt.Fprintf(out, "  %s\n", c.Message)
 	}
 }
 
