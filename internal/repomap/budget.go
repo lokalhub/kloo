@@ -3,18 +3,28 @@ package repomap
 import (
 	"fmt"
 	"strings"
+
+	"github.com/lokalhub/kloo/internal/tokens"
 )
 
 // TokenCounter estimates the token count of a string. It is pluggable so the
 // approximation can be tightened later without touching the curator.
 type TokenCounter func(string) int
 
-// ApproxTokens is the default v1 token estimate: ~4 characters per token
-// (a documented heuristic, conventions/budget). It deliberately over- rather
-// than under-counts on average so the "stays under budget" contract holds with
-// margin.
+// ApproxTokens is the default token estimate — now entropy-aware (internal/tokens)
+// rather than a flat chars/4.
+//
+// The old flat heuristic was documented as over-counting on average. Measured
+// against a real tokenizer it does the opposite: −6% on Go source, −10% on prose,
+// and −55% on a go.sum, because BPE cannot merge random strings and charges a
+// hash roughly one token per two characters. A budget built on that overflows the
+// server's real window.
+//
+// Callers with a live run should prefer the calibrated estimate (the Loop's
+// tokens.Calibrator), which corrects this against reported usage. This stays the
+// cold-start default for callers with no ground truth yet.
 func ApproxTokens(s string) int {
-	return (len(s) + 3) / 4
+	return tokens.Estimate(s)
 }
 
 // Stat reports how the assembled context relates to the budget (observable, so

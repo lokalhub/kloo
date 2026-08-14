@@ -473,6 +473,49 @@ Auto-sizing never shrinks a window and never overrides one you set deliberately
 via `--ctx`, `KLOO_CONTEXT_TOKENS`, or a per-model profile entry. Cap it with
 `KLOO_CTX_AUTO_CAP` when the server's real limit is below what the catalog claims.
 
+### Token estimation
+
+kloo has to size a prompt *before* sending it, and it does not ship a tokenizer —
+the models it targets (Qwen, DeepSeek, Llama, whatever the local server has
+loaded) do not share one, so bundling any single tokenizer would be confidently
+wrong for most of them.
+
+Instead the estimate is a heuristic corrected against ground truth. Measured
+against a real tokenizer, the old flat chars/4 was off by:
+
+| Content | Real chars/token | chars/4 error |
+|---|---|---|
+| Go source | 3.75 | -6% |
+| Prose / markdown | 3.62 | -10% |
+| `go.sum` (hashes) | 1.78 | **-55%** |
+
+The -55% is the dangerous one: BPE cannot merge random strings, so hashes,
+base64, UUIDs and lockfiles cost roughly a token per two characters. A budget
+built on chars/4 overflows the server's real window.
+
+Two corrections:
+
+- **Entropy-aware base estimate.** Words that look like hashes — long, with dense
+  character-class transitions or a high digit ratio — are charged at ~1.8
+  chars/token. Ordinary identifiers and import paths are deliberately left alone;
+  over-charging those would shrink the usable prompt on every turn.
+- **Self-calibration.** Every response reports `prompt_tokens` for a prompt whose
+  size kloo already knows, so the real chars-per-token ratio is measured rather
+  than assumed. It is persisted per model in
+  `{workspace}/.kloo/token-calibration.json`, so later runs — and `kloo tokens`,
+  which never touches the network — start from a measurement.
+
+`kloo tokens` says which it used:
+
+```
+approx_tokens: 10 (calibrated - 3.59 chars/token, measured on a previous run)
+approx_tokens:  9 (estimated - uncalibrated, assuming 4.00 chars/token)
+```
+
+A run's `--json` reports `token_ratio` (what was measured) and
+`token_estimate_error` (how wrong flat chars/4 would have been), omitted when the
+endpoint reports no usage.
+
 ### Prompt caching and map placement
 
 Hosted providers bill a re-sent prompt **prefix** at a large discount when it is

@@ -66,6 +66,10 @@ Most are pinned by tests. Breaking one should fail the build, not a review.
 - **The prompt is ordered by volatility, ascending.** Stable content first, the
   re-curated repo map last. Providers cache a byte-identical prompt *prefix*, so
   anything volatile placed early invalidates everything after it.
+- **Token counts are estimated, then corrected.** `internal/tokens` is
+  entropy-aware (hashes cost ~2x what prose does) and calibrates against reported
+  `prompt_tokens`. Never reintroduce a flat chars/N: it undercounts a lockfile by
+  half, and the budget built on it overflows the real window.
 - **Every workspace file read is size-capped.** `read_file` at 5 MiB, the repomap
   walk at 1 MiB. An uncapped read once OOM-killed kloo at 44 GB next to a models
   directory. Any new read path gets a cap.

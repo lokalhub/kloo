@@ -1,0 +1,161 @@
+package agent
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/lokalhub/kloo/internal/llm"
+	"github.com/lokalhub/kloo/internal/repomap"
+	"github.com/lokalhub/kloo/internal/tools"
+)
+
+// Working-memory budget fractions and caps. They are named consts (greppable)
+// so P01's contextProfile can later scale them per model; for P00 they are
+// fixed. The 70% compaction trigger is taken verbatim from overview §3, and the
+// component caps (map + hot) sum to it deliberately, leaving headroom between the
+// trigger and the hard ceiling (1.0 × window) for the running-summary slot.
+const (
+	compactTriggerFrac = 0.70 // projected prompt > this × window ⇒ start a compaction
+	mapBudgetFrac      = 0.35 // repo-map section cap (was 100% — the "map eats the window" bug)
+	hotBudgetFrac      = 0.35 // pin-hot set + recent tail cap
+	maxKeepItemTokens  = 256  // per-item verbatim cap; a larger kept item is truncated-with-marker
+	ceilSlack          = 4    // tokens reserved when truncating, to absorb ApproxTokens rounding so the hard ceiling holds strictly
+	// usableWindowFrac budgets the PROMPT to a fraction of the model's context
+	// window (maxContextTokens), reserving the rest for: the COMPLETION (n_ctx holds
+	// prompt + output), the tool/function schemas added to each request (not counted
+	// in the message budget), and ApproxTokens slack (chars/4 undercounts dense
+	// code/markup). Without it, a prompt budgeted to the full window overflowed
+	// n_ctx — a real 33570-token prompt on a 32768 server returned a 400.
+	usableWindowFrac = 0.80
+)
+
+// usableWindow is the prompt-token budget for a model whose context window is
+// `window` (maxContextTokens): a fraction of it, leaving headroom for the output,
+// the request's tool schemas, and estimation slack so the real request stays under
+// the server's n_ctx.
+func usableWindow(window int) int { return int(float64(window) * usableWindowFrac) }
+
+// UsableWindow is the prompt-token budget for a context window of `window`
+// tokens — the same budget the loop assembles against. Exported so `kloo tokens`
+// can answer "does this task fit" by the rule the loop actually applies, rather
+// than keeping a second copy that drifts.
+func UsableWindow(window int) int { return usableWindow(window) }
+
+// CompactTriggerTokens is the projected prompt size at which the loop begins a
+// compaction. A task already above it compacts on step one.
+func CompactTriggerTokens(window int) int { return triggerTokens(window) }
+
+// mapBudgetTokens is the repo-map token budget when working memory is engaged: a
+// fraction of the CURATOR budget — how much context kloo chooses to assemble —
+// NOT of the model's context window, which is how much the model can hold.
+//
+// Those are different decisions, and tying them together was a real bug: a model
+// advertising a 900k window made this authorise a 252k-token repo map on EVERY
+// turn. Capacity is discovered from the endpoint; appetite is chosen by us.
+func mapBudgetTokens(curator int) int { return int(float64(curator) * mapBudgetFrac) }
+
+// EffectiveCuratorBudget resolves the per-step context-assembly budget from the
+// model's window and the configured curator cap, clamped so the curator can never
+// promise more than the prompt budget can hold.
+//
+// A configured cap of 0 (or one above the usable window) means "no separate cap"
+// and falls back to the usable window — which is the pre-split behaviour, so a
+// small-window model resolves byte-identically to before.
+func EffectiveCuratorBudget(window, configured int) int {
+	usable := usableWindow(window)
+	if configured <= 0 || configured > usable {
+		return usable
+	}
+	return configured
+}
+
+// hotBudgetTokens caps the pin-hot set + recent tail (verbatim hot state). This
+// one scales with the WINDOW, not the curator budget: hot state is conversation
+// you already have, so a bigger window should keep more of it. Only the repo map
+// (which kloo re-assembles and re-pays for each turn) is appetite.
+func hotBudgetTokens(window int) int { return int(float64(window) * hotBudgetFrac) }
+
+// summaryPrefix labels the running-summary slot inserted right after the task.
+const summaryPrefix = "Progress so far (compacted):\n"
+
+// workingMemory is the deterministic in-process WorkingMemory. It assembles the
+// pin-hot set (task, last verify, current file, recent tail) under the budget
+// split and folds the cold middle into a running summary when the projected
+// prompt crosses the 70% trigger. No LLM call: every decision is structural, so
+// the assembly is byte-for-byte testable and adds no latency.
+type workingMemory struct {
+	stats       MemoryStats
+	compactions int    // cumulative across the run (overview §3: the ⟲ counter)
+	prevVerify  string // #4: normalized previous failing verify, to flag a repeat
+}
+
+// smartVerify reports whether the verify same-failure marker is on
+// (KLOO_SMART_VERIFY=1): when a failing verify is IDENTICAL to the previous turn's,
+// prepend a note telling the model its last change had no effect and to try a
+// DIFFERENT fix — breaking the "repeat the same non-working edit" verify-churn.
+func smartVerify() bool {
+	v := os.Getenv("KLOO_SMART_VERIFY")
+	return v != "" && v != "0"
+}
+
+// NewWorkingMemory builds the deterministic in-process working memory. It takes
+// no config in P00 (the fractions are fixed consts); P01's contextProfile will
+// add per-model scaling here.
+func NewWorkingMemory() *workingMemory { return &workingMemory{} }
+
+// Stats returns the last assembly's accounting.
+func (w *workingMemory) Stats() MemoryStats { return w.stats }
+
+// Assemble builds the per-request history under the window budget: the pin-hot
+// set + recent tail verbatim, with the cold middle folded into a running summary
+// once the projected prompt crosses the 70% soft trigger, then shed in a fixed
+// order to honor the hard ceiling (1.0 × window). convo[0] (the task) is never
+// dropped; if the window cannot even hold system+task, it returns
+// ErrWindowTooSmall (§2.4).
+func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
+	window := in.WindowTokens
+
+	// Irreducible floor: the already-built system prompt (base + repo map) plus
+	// the task message, which is never dropped. If the window cannot hold even
+	// that, there is no honest way to honor the hard ceiling — surface a config
+	// error rather than emit an over-ceiling prompt or drop the goal (§2.4).
+	floor := in.SystemTokens + repomap.ApproxTokens(in.Task)
+	if window > 0 && floor > window {
+		w.stats = MemoryStats{WindowTokens: window, Compactions: w.compactions, MapBudget: in.MapBudget, HotBudget: hotBudgetTokens(window)}
+		return nil, ErrWindowTooSmall
+	}
+
+	hotBudget := hotBudgetTokens(window)
+	task := llm.Message{Role: llm.RoleUser, Content: in.Task}
+	// #4: flag a verify failure identical to the previous turn's (opt-in).
+	repeatedVerify := false
+	if !in.LastVerify.Passed {
+		cur := normalizeChurn(strings.TrimSpace(in.LastVerify.Stdout + "\n" + in.LastVerify.Stderr))
+		if cur != "" && cur == w.prevVerify && smartVerify() {
+			repeatedVerify = true
+		}
+		w.prevVerify = cur
+	} else {
+		w.prevVerify = ""
+	}
+	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify)
+	fp, hasFile := filePin(in.EditPath, in.FreshFile)
+
+	// Recent tail: prior-session turns (oldest) followed by this run's transcript
+	// after the task, minus any stale read-dump of the file currently under edit
+	// (it is re-read fresh into the file pin). Seeding History as the oldest tail
+	// means a follow-up has the prior run's context, and it's the first thing the
+	// compactor folds into the summary under window pressure — while the current
+	// task (in.Task) stays pinned regardless.
+	allTail := append(append([]llm.Message{}, in.History...), recentTail(in.Convo, in.EditPath)...)
+
+	// Pin tokens (everything pinned besides the task) — they share the hot budget
+	// with the tail.
+	pinMsgs := []llm.Message{}
+	if hasVerify {
+		pinMsgs = append(pinMsgs, vp)
+	}
+	if hasFile {
+		pinMsgs = append(pinMsgs, fp

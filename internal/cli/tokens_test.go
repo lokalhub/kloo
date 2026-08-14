@@ -12,7 +12,7 @@ import (
 
 // A task well under the window fits and does not trip the compaction trigger.
 func TestMeasureTokensFitsWithHeadroom(t *testing.T) {
-	res := measureTokens(strings.Repeat("a", 4000), "arg", 32768)
+	res := measureTokens(strings.Repeat("a", 4000), "arg", 32768, 0)
 
 	if res.ApproxTokens != 1000 {
 		t.Fatalf("approx tokens = %d, want 1000 (4 chars/token)", res.ApproxTokens)
@@ -35,7 +35,7 @@ func TestMeasureTokensFitsWithHeadroom(t *testing.T) {
 // The point of the command: a task larger than the usable window is reported as
 // not fitting, rather than discovered after the run over-compacts.
 func TestMeasureTokensDoesNotFit(t *testing.T) {
-	res := measureTokens(strings.Repeat("a", 40000), "arg", 8000)
+	res := measureTokens(strings.Repeat("a", 40000), "arg", 8000, 0)
 
 	if res.Fits {
 		t.Fatal("a 10k-token task must not fit an 8k window")
@@ -56,7 +56,7 @@ func TestMeasureTokensFitsButCompactsAtStart(t *testing.T) {
 	usable := agent.UsableWindow(window)
 	chars := (trigger + (usable-trigger)/2) * 4
 
-	res := measureTokens(strings.Repeat("a", chars), "arg", window)
+	res := measureTokens(strings.Repeat("a", chars), "arg", window, 0)
 
 	if !res.Fits {
 		t.Fatalf("approx %d should fit usable window %d", res.ApproxTokens, usable)
