@@ -261,6 +261,12 @@ Human output includes `tool_call`, `file_edit`, and `json_only` PASS/FAIL lines.
 JSON output includes the same checks as booleans with `failure_code` and bounded
 messages on failures. The probe never mutates the user's current workspace.
 
+The `file_edit` check tolerates up to two **read-only** calls (`read_file`,
+`list_dir`) before the edit: reading a file before changing it is correct
+behaviour, and demanding a one-shot edit reported capable models as unfit. The
+reads are dispatched and fed back as observations. Patience is bounded — a model
+that only ever reads still fails with `tool_call_invalid`.
+
 ### Context window report
 
 Probe also reports the per-step window it will use against the one the endpoint
