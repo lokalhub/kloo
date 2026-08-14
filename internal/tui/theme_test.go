@@ -81,6 +81,9 @@ func TestPaletteColourCodes(t *testing.T) {
 		{"danger", danger, dangerColor, "1"},
 		{"warning", warning, warningColor, "3"},
 		{"muted", muted, mutedColor, "244"},
+		// brand is kloo's own identity (splash + `k>` prompt), pinned separately
+		// from accent so a UI retune can never silently recolour the logo.
+		{"brand", brand, brandColor, "215"},
 	}
 	for _, tc := range cases {
 		if got := tc.style.GetForeground(); got != tc.color {
