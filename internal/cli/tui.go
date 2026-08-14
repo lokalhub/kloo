@@ -68,6 +68,14 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	}
 	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
 
+	// Validate the model against the endpoint catalog and size the window from its
+	// advertised context_length. Same call as the headless path — the check used to
+	// exist only there and behind an env var, which is why an unrecognised id could
+	// run interactively at the 8000-token default without a word.
+	if err := applyModelInfo(ctx, &cfg, client, cfg.StrictModel, writerLogf(os.Stderr)); err != nil {
+		return err
+	}
+
 	// /profile <path> (C6): re-resolve the runtime from a different profiles.json for
 	// subsequent runs, preserving the launch CLI flags (flags > env > profile).
 	reloadProfile := buildReloadProfile(baseFlags, getenv, clientFactory)
@@ -83,6 +91,8 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		Checkpoint:    agent.NewGitCheckpointer(cwd),
 		Root:          ws.Root(),
 		ContextTokens: cfg.MaxContextTokens,
+		CuratorTokens: cfg.CuratorBudgetTokens,
+		MapPosition:   cfg.MapPosition,
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:        defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run

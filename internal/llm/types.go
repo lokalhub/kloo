@@ -150,8 +150,40 @@ type Delta struct {
 }
 
 // Usage is the token accounting block.
+//
+// The cache fields matter for hosted providers, which bill a re-sent prompt
+// PREFIX at a steep discount when it is byte-identical to a previous request.
+// kloo used to drop them on the floor, so it could not tell whether its prompt
+// layout was cache-friendly or was paying full price every turn. Providers do
+// not agree on a shape, so both known ones are decoded and normalised by
+// CachedPromptTokens.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// DeepSeek-style: an explicit hit/miss split of the prompt.
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	// OpenAI-style: a nested details block. Pointer so an absent block stays
+	// distinguishable from a reported zero.
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails is the OpenAI-style nested prompt breakdown.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// CachedPromptTokens is how many prompt tokens the provider served from its
+// cache this request, normalised across the shapes above. 0 when the provider
+// reports nothing — which is indistinguishable from a genuine miss, so callers
+// should treat it as "no discount observed" rather than proof of a miss.
+func (u Usage) CachedPromptTokens() int {
+	if u.PromptCacheHitTokens > 0 {
+		return u.PromptCacheHitTokens
+	}
+	if u.PromptTokensDetails != nil {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return 0
 }

@@ -47,11 +47,34 @@ func UsableWindow(window int) int { return usableWindow(window) }
 // compaction. A task already above it compacts on step one.
 func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 
-// mapBudgetTokens is the repo-map token budget when working memory is engaged —
-// a fraction of the window, so the map can no longer consume the whole context.
-func mapBudgetTokens(window int) int { return int(float64(window) * mapBudgetFrac) }
+// mapBudgetTokens is the repo-map token budget when working memory is engaged: a
+// fraction of the CURATOR budget — how much context kloo chooses to assemble —
+// NOT of the model's context window, which is how much the model can hold.
+//
+// Those are different decisions, and tying them together was a real bug: a model
+// advertising a 900k window made this authorise a 252k-token repo map on EVERY
+// turn. Capacity is discovered from the endpoint; appetite is chosen by us.
+func mapBudgetTokens(curator int) int { return int(float64(curator) * mapBudgetFrac) }
 
-// hotBudgetTokens caps the pin-hot set + recent tail (verbatim hot state).
+// EffectiveCuratorBudget resolves the per-step context-assembly budget from the
+// model's window and the configured curator cap, clamped so the curator can never
+// promise more than the prompt budget can hold.
+//
+// A configured cap of 0 (or one above the usable window) means "no separate cap"
+// and falls back to the usable window — which is the pre-split behaviour, so a
+// small-window model resolves byte-identically to before.
+func EffectiveCuratorBudget(window, configured int) int {
+	usable := usableWindow(window)
+	if configured <= 0 || configured > usable {
+		return usable
+	}
+	return configured
+}
+
+// hotBudgetTokens caps the pin-hot set + recent tail (verbatim hot state). This
+// one scales with the WINDOW, not the curator budget: hot state is conversation
+// you already have, so a bigger window should keep more of it. Only the repo map
+// (which kloo re-assembles and re-pays for each turn) is appetite.
 func hotBudgetTokens(window int) int { return int(float64(window) * hotBudgetFrac) }
 
 // summaryPrefix labels the running-summary slot inserted right after the task.

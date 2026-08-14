@@ -133,6 +133,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagLint        string
 		flagNoLint      bool
 		flagCtx         int
+		flagCurator     int
+		flagMapPosition string
+		flagStrictModel bool
 		flagAllowedDirs []string
 		flagAllowEnv    []string
 		flagJSON        bool
@@ -193,6 +196,15 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("ctx") {
 				flags.MaxContextTokens = &flagCtx
+			}
+			if fs.Changed("curator-budget") {
+				flags.CuratorBudgetTokens = &flagCurator
+			}
+			if fs.Changed("map-position") {
+				flags.MapPosition = &flagMapPosition
+			}
+			if fs.Changed("strict-model") {
+				flags.StrictModel = &flagStrictModel
 			}
 			if fs.Changed("temperature") {
 				flags.Temperature = &flagTemp
@@ -296,6 +308,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagProfile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
+	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
+	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
+	f.BoolVar(&flagStrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "", "override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
 	f.BoolVar(&flagBenchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
@@ -357,6 +372,15 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("ctx") {
 		flags.MaxContextTokens = &values.Ctx
+	}
+	if fs.Changed("curator-budget") {
+		flags.CuratorBudgetTokens = &values.CuratorBudget
+	}
+	if fs.Changed("map-position") {
+		flags.MapPosition = &values.MapPosition
+	}
+	if fs.Changed("strict-model") {
+		flags.StrictModel = &values.StrictModel
 	}
 	if fs.Changed("temperature") {
 		flags.Temperature = &values.Temperature
@@ -438,6 +462,9 @@ type configFlagValues struct {
 	Effort               string
 	NoMCP                bool
 	Ctx                  int
+	CuratorBudget        int
+	MapPosition          string
+	StrictModel          bool
 	AllowedDirs          []string
 	AllowEnv             []string
 	JSON                 bool
@@ -469,6 +496,9 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.Profile, "profile", "", "path to profiles.json (default ~/.config/kloo/profiles.json)")
 	f.IntVar(&v.MaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.IntVar(&v.Ctx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
+	f.IntVar(&v.CuratorBudget, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
+	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
+	f.BoolVar(&v.StrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
 	f.Float64Var(&v.Temperature, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.BoolVar(&v.NoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
 	f.StringSliceVar(&v.AllowedDirs, "allowed-dirs", nil, "dirs OUTSIDE the workspace that AGENTS.md @import may read from (repeatable/comma-separated; read-only, load-time only)")

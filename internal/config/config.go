@@ -38,6 +38,18 @@ const (
 	// DefaultMaxContextTokens bounds the per-step repo-map/context window the
 	// curator assembles (Phase 03). A conservative default for small local models.
 	DefaultMaxContextTokens = 8000
+
+	// DefaultCuratorBudgetTokens caps the per-step context kloo ASSEMBLES (the
+	// repo map), independent of the model's window. 32K is generous for a repo
+	// map and bounded enough that a million-token window doesn't turn every turn
+	// into a quarter-million-token request. It is clamped to the usable window,
+	// so a small-window model resolves exactly as it did before the split.
+	DefaultCuratorBudgetTokens = 32768
+	// DefaultMapPosition puts the re-curated repo map AFTER the conversation.
+	// Providers cache a re-sent prompt prefix and bill it at a discount; the map
+	// changes almost every turn, so keeping it in front made that cut land above
+	// the history and re-charged for a conversation that never changed.
+	DefaultMapPosition = "tail"
 	// Autonomous-loop safety budgets (Phase 04). CHURN is the primary "stop when
 	// stuck" guard; these are loose backstops (see internal/config/effort.go).
 	// MaxTokens 0 ⇒ UNBOUNDED — cost is the endpoint/service's domain, and the
@@ -87,7 +99,9 @@ const (
 	// EnvContextTokens sets the per-step context window (same as --ctx). Useful for a
 	// llama-swap/Ollama ALIAS the bundled defaults can't match by id (e.g. "snappy"),
 	// so the window matches the server's real -c without editing a profile.
-	EnvContextTokens        = "KLOO_CONTEXT_TOKENS"
+	EnvContextTokens = "KLOO_CONTEXT_TOKENS"
+	// EnvCuratorBudget caps the per-step ASSEMBLED context (same as --curator-budget).
+	EnvCuratorBudget        = "KLOO_CURATOR_BUDGET"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
 	EnvLLMRetryCodes        = "KLOO_LLM_RETRY_CODES"
 	EnvLLMRetryBaseDelay    = "KLOO_LLM_RETRY_BASE_DELAY"
@@ -119,9 +133,31 @@ type Config struct {
 	// FewShotPath is an optional per-model few-shot prompt file (from the
 	// profile); empty when none is configured.
 	FewShotPath string
-	// MaxContextTokens is the per-step context-window token budget the Phase-03
-	// repo-map curator must stay under.
+	// MaxContextTokens is the MODEL'S context window — what the endpoint can
+	// accept. It drives the compaction trigger and the prompt budget.
 	MaxContextTokens int
+	// CuratorBudgetTokens caps what kloo ASSEMBLES per step (the repo map),
+	// independent of what the model can hold. The two were one field, which meant
+	// sizing the window correctly for a 900k model also authorised a 252k-token
+	// repo map every turn. Capacity is discovered from the endpoint; appetite is
+	// chosen here. 0 ⇒ no separate cap (falls back to the usable window).
+	CuratorBudgetTokens int
+	// MaxContextTokensExplicit records that the window was set DELIBERATELY (flag,
+	// env, or a per-model profile entry) rather than inherited from the bundled
+	// table or the built-in default. Endpoint auto-sizing honours it: a user who
+	// capped the window for a reason (a Vulkan-limited local server) must not have
+	// it silently raised from the model catalog.
+	MaxContextTokensExplicit bool
+	// StrictModel turns "model not in the endpoint's catalog" from a warning into
+	// a startup error. Off by default because a single-model llama.cpp server
+	// ignores the model field and may advertise an unrelated id; worth turning on
+	// for unattended hosted runs, where a silent fallback costs real money.
+	StrictModel bool
+	// MapPosition places the curated repo map in the prompt: "tail" (default —
+	// after the conversation, so the stable prefix above it can be served from a
+	// provider's prompt cache) or "system" (the legacy in-system-prompt layout,
+	// for an endpoint that rejects a non-leading system message).
+	MapPosition string
 	// Phase-04 autonomous-loop safety budgets.
 	MaxTokens           int // cumulative tokens ceiling per run (0 ⇒ unbounded)
 	MaxWallClockSeconds int // wall-clock ceiling per run in seconds (0 ⇒ unbounded)
@@ -235,6 +271,13 @@ type Flags struct {
 	// MaxContextTokens (--ctx) overrides the per-step context window above the
 	// profile/bundled/built-in defaults. nil ⇒ not set on the CLI.
 	MaxContextTokens *int
+	// CuratorBudgetTokens (--curator-budget) caps the per-step assembled repo map,
+	// independent of the model window. nil ⇒ not set on the CLI.
+	CuratorBudgetTokens *int
+	// MapPosition (--map-position) is "tail" or "system". nil ⇒ not set on the CLI.
+	MapPosition *string
+	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
+	StrictModel *bool
 	// NoMCP, when non-nil, forces MCP on/off above env+profile (true ⇒ disabled).
 	// The cobra --no-mcp flag is wired in Phase 03; this field is the resolve seam.
 	NoMCP *bool
@@ -282,6 +325,8 @@ type profileEntry struct {
 	Temperature          *float64 `json:"temperature,omitempty"`
 	FewShotPath          *string  `json:"fewShotPath,omitempty"`
 	MaxContextTokens     *int     `json:"maxContextTokens,omitempty"`
+	CuratorBudgetTokens  *int     `json:"curatorBudgetTokens,omitempty"`
+	MapPosition          *string  `json:"mapPosition,omitempty"`
 	MaxTokens            *int     `json:"maxTokens,omitempty"`
 	MaxWallClockSeconds  *int     `json:"maxWallClockSeconds,omitempty"`
 	ChurnRounds          *int     `json:"churnRounds,omitempty"`
@@ -304,6 +349,12 @@ type profileEntry struct {
 type providerEntry struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	APIKey   string `json:"apiKey,omitempty"`
+	// Models maps a short local alias to the provider's REAL model id, e.g.
+	// {"dsv4": "deepseek/deepseek-v4-flash"}. Hosted ids are long and easy to
+	// mistype, and a typo used to resolve to nothing and silently fall through to
+	// the 8000-token built-in window. The alias is expanded BEFORE the per-model
+	// profile lookup and the bundled-defaults table, so both see the real id.
+	Models map[string]string `json:"models,omitempty"`
 }
 
 // loadProviders reads the reserved "providers" block from the profile file. Like
@@ -380,6 +431,13 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.MaxContextTokens != nil {
 		cfg.MaxContextTokens = *e.MaxContextTokens
+		cfg.MaxContextTokensExplicit = true
+	}
+	if e.CuratorBudgetTokens != nil {
+		cfg.CuratorBudgetTokens = *e.CuratorBudgetTokens
+	}
+	if e.MapPosition != nil {
+		cfg.MapPosition = *e.MapPosition
 	}
 	if e.MaxTokens != nil {
 		cfg.MaxTokens = *e.MaxTokens
@@ -445,6 +503,8 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		Mode:                    DefaultMode,
 		ToolFormat:              DefaultToolFormat,
 		MaxContextTokens:        DefaultMaxContextTokens,
+		CuratorBudgetTokens:     DefaultCuratorBudgetTokens,
+		MapPosition:             DefaultMapPosition,
 		MaxTokens:               DefaultMaxTokens,
 		MaxWallClockSeconds:     DefaultMaxWallClockSeconds,
 		ChurnRounds:             DefaultChurnRounds,
@@ -493,6 +553,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	cfg.Provider = provider
 
+	var providerModels map[string]string
 	if provider != "" {
 		providers, err := loadProviders(profilePath)
 		if err != nil {
@@ -508,6 +569,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		if p.APIKey != "" {
 			cfg.APIKey = expandValue(p.APIKey)
 		}
+		providerModels = p.Models
 	}
 
 	// Resolve the model selector (flag > env > default). The model id is used
@@ -519,6 +581,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.Model != nil {
 		modelSel = *flags.Model
+	}
+	// Expand a provider model alias to the real id BEFORE anything keys off the
+	// model: the per-model profile entry and the bundled-defaults table both match
+	// on the id, so an unexpanded alias silently misses both layers.
+	if real, ok := providerModels[modelSel]; ok && real != "" {
+		modelSel = real
 	}
 	cfg.Model = modelSel
 
@@ -566,6 +634,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if v := getenv(EnvMCP); v == "0" || strings.EqualFold(v, "false") {
 		cfg.MCPDisabled = true
+	}
+	if v := getenv(EnvCuratorBudget); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CuratorBudgetTokens = n
+		}
 	}
 	if v := getenv(EnvContextTokens); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
@@ -623,8 +696,18 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if flags.MaxSteps != nil {
 		cfg.MaxSteps = *flags.MaxSteps
 	}
+	if flags.CuratorBudgetTokens != nil {
+		cfg.CuratorBudgetTokens = *flags.CuratorBudgetTokens
+	}
+	if flags.MapPosition != nil {
+		cfg.MapPosition = *flags.MapPosition
+	}
+	if flags.StrictModel != nil {
+		cfg.StrictModel = *flags.StrictModel
+	}
 	if flags.MaxContextTokens != nil {
 		cfg.MaxContextTokens = *flags.MaxContextTokens
+		cfg.MaxContextTokensExplicit = true
 	}
 	if flags.Mode != nil {
 		cfg.Mode = *flags.Mode

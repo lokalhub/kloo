@@ -59,6 +59,13 @@ Most are pinned by tests. Breaking one should fail the build, not a review.
   review. The codes themselves *are* pinned (`TestPaletteColourCodes`), which makes
   a retune deliberate. `brandColor` (kloo's identity — the splash and the `k>`
   prompt) stays distinct from `accentColor` (tool cards).
+- **Capacity and appetite are separate numbers.** `MaxContextTokens` is what the
+  model can hold; `CuratorBudgetTokens` is what kloo chooses to assemble. Never
+  budget the repo map from the window — that is how a 900k-window model came to
+  authorise a 252k-token map on every turn.
+- **The prompt is ordered by volatility, ascending.** Stable content first, the
+  re-curated repo map last. Providers cache a byte-identical prompt *prefix*, so
+  anything volatile placed early invalidates everything after it.
 - **Every workspace file read is size-capped.** `read_file` at 5 MiB, the repomap
   walk at 1 MiB. An uncapped read once OOM-killed kloo at 44 GB next to a models
   directory. Any new read path gets a cap.
