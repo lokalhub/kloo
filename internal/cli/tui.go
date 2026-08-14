@@ -93,6 +93,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		ContextTokens: cfg.MaxContextTokens,
 		CuratorTokens: cfg.CuratorBudgetTokens,
 		MapPosition:   cfg.MapPosition,
+		Tokens:        tokenCalibrator(cwd, cfg.Model),
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:        defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
@@ -118,6 +119,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		func(ctx context.Context, task string, runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) {
 			runCfg := tuiRuntimeConfig(cfg, runtime)
 			summary := buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil)
+			saveTokenCalibration(cwd, runCfg.Model, rep)
 			memoryStore(ctx, runCfg, mcpMgr, cwd, task, summary, rep, writerLogf(os.Stderr))
 		},
 	)

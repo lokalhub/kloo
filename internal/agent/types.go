@@ -332,6 +332,12 @@ type MemoryInput struct {
 	WindowTokens int           // = cfg.MaxContextTokens (the hard ceiling)
 	SystemTokens int           // ApproxTokens(system prompt incl. repo map) already spent
 	MapBudget    int           // the repo-map token budget the loop used this turn (for Stats/observability)
+	// Estimate sizes a string in tokens. The loop passes its calibrated estimator
+	// (learned from reported usage) so the assembler and the loop agree on the
+	// scale — mixing a calibrated system-prompt count with an uncalibrated history
+	// count would make the ceiling arithmetic quietly wrong. nil ⇒ the package
+	// default (repomap.ApproxTokens).
+	Estimate func(string) int
 }
 
 // MemoryStats is the last assembly's accounting (for the report / UI / DoD).
@@ -403,7 +409,11 @@ type Report struct {
 	// 0 when the provider reports no cache accounting (most local servers).
 	PromptTokens       int
 	CachedPromptTokens int
-	Elapsed            time.Duration
+	// TokenRatio is the chars-per-token ratio MEASURED for this run from reported
+	// usage (0 when nothing was measured). Surfaced so the estimator's accuracy is
+	// an observable number rather than an assumed property.
+	TokenRatio float64
+	Elapsed    time.Duration
 	// Compactions is how many times working memory folded cold turns into the
 	// running summary this run (0 when memory is off or never triggered). The
 	// report/UI print it only when > 0, so the no-compaction output is unchanged.

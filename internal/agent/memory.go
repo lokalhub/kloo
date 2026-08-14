@@ -121,7 +121,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// the task message, which is never dropped. If the window cannot hold even
 	// that, there is no honest way to honor the hard ceiling — surface a config
 	// error rather than emit an over-ceiling prompt or drop the goal (§2.4).
-	floor := in.SystemTokens + repomap.ApproxTokens(in.Task)
+	floor := in.SystemTokens + in.estimate(in.Task)
 	if window > 0 && floor > window {
 		w.stats = MemoryStats{WindowTokens: window, Compactions: w.compactions, MapBudget: in.MapBudget, HotBudget: hotBudgetTokens(window)}
 		return nil, ErrWindowTooSmall
@@ -160,16 +160,16 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	if hasFile {
 		pinMsgs = append(pinMsgs, fp)
 	}
-	pinTokens := tokensOf(pinMsgs)
+	pinTokens := tokensOfWith(pinMsgs, in.estimate)
 
 	// No-compaction fast path: if the whole transcript projects under the soft
 	// trigger (or the window is unbounded), keep everything verbatim — the
 	// manager steps aside (overview §1: don't get in the way when there's room).
-	projectedFull := in.SystemTokens + repomap.ApproxTokens(in.Task) + pinTokens + tokensOf(allTail)
+	projectedFull := in.SystemTokens + in.estimate(in.Task) + pinTokens + tokensOfWith(allTail, in.estimate)
 	if window <= 0 || projectedFull <= triggerTokens(window) {
 		out := assemble(task, nil, pinMsgs, allTail)
 		w.stats = MemoryStats{
-			PromptTokens: in.SystemTokens + tokensOf(out),
+			PromptTokens: in.SystemTokens + tokensOfWith(out, in.estimate),
 			WindowTokens: window,
 			Compactions:  w.compactions,
 			MapBudget:    in.MapBudget,
@@ -202,20 +202,20 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 		return p
 	}
 	projected := func() int {
-		return in.SystemTokens + tokensOf(assemble(task, entries, rebuildPins(), tail))
+		return in.SystemTokens + tokensOfWith(assemble(task, entries, rebuildPins(), tail), in.estimate)
 	}
 	// fixedTokens is everything that is NOT the named component, so a component's
 	// available budget is window − everything-else.
 	fixedExcept := func(skipSummary, skipFile, skipVerify bool) int {
-		t := in.SystemTokens + repomap.ApproxTokens(in.Task) + tokensOf(tail)
+		t := in.SystemTokens + in.estimate(in.Task) + tokensOfWith(tail, in.estimate)
 		if !skipSummary {
-			t += summaryTokens(entries)
+			t += summaryTokens(entries, in.estimate)
 		}
 		if hasFile && !skipFile {
-			t += repomap.ApproxTokens(fp.Content)
+			t += in.estimate(fp.Content)
 		}
 		if hasVerify && !skipVerify {
-			t += repomap.ApproxTokens(vp.Content)
+			t += in.estimate(vp.Content)
 		}
 		return t
 	}
@@ -227,7 +227,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// (2b) one entry still too big ⇒ truncate it head/tail-with-marker so the
 	// summary fits (resolves B6: a single oversized item is never dropped whole).
 	if projected() > window && len(entries) == 1 {
-		avail := window - fixedExcept(true, false, false) - repomap.ApproxTokens(summaryPrefix) - ceilSlack
+		avail := window - fixedExcept(true, false, false) - in.estimate(summaryPrefix) - ceilSlack
 		if t, _ := truncateToTokens(entries[0], avail); t != "" {
 			entries[0] = t
 		} else {
@@ -260,10 +260,10 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 
 	out := assemble(task, entries, rebuildPins(), tail)
 	w.stats = MemoryStats{
-		PromptTokens:  in.SystemTokens + tokensOf(out),
+		PromptTokens:  in.SystemTokens + tokensOfWith(out, in.estimate),
 		WindowTokens:  window,
 		Compactions:   w.compactions,
-		SummaryTokens: summaryTokens(entries),
+		SummaryTokens: summaryTokens(entries, in.estimate),
 		DroppedTurns:  len(cold),
 		TrimmedTail:   tailTrimmed,
 		MapBudget:     in.MapBudget,
@@ -290,20 +290,33 @@ func triggerTokens(window int) int { return int(compactTriggerFrac * float64(win
 
 // summaryTokens is the token cost of the summary slot for the given entries
 // (0 when there are none).
-func summaryTokens(entries []string) int {
+func summaryTokens(entries []string, est func(string) int) int {
 	if len(entries) == 0 {
 		return 0
 	}
-	return repomap.ApproxTokens(summaryPrefix + strings.Join(entries, "\n"))
+	return est(summaryPrefix + strings.Join(entries, "\n"))
 }
 
-// tokensOf sums the approximate token count over the messages' content.
-func tokensOf(msgs []llm.Message) int {
+// estimate sizes a string with the caller's estimator, falling back to the
+// package default when none was supplied.
+func (in MemoryInput) estimate(s string) int {
+	if in.Estimate != nil {
+		return in.Estimate(s)
+	}
+	return repomap.ApproxTokens(s)
+}
+
+// tokensOfWith sizes a message slice with the given estimator.
+func tokensOfWith(msgs []llm.Message, est func(string) int) int {
 	n := 0
 	for _, m := range msgs {
-		n += repomap.ApproxTokens(m.Content)
+		n += est(m.Content)
 	}
 	return n
+}
+
+func tokensOf(msgs []llm.Message) int {
+	return tokensOfWith(msgs, repomap.ApproxTokens)
 }
 
 // verifyPin synthesizes the pinned last-verify message: the verify command, the

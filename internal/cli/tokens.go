@@ -9,6 +9,7 @@ import (
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/config"
 	"github.com/lokalhub/kloo/internal/repomap"
+	"github.com/lokalhub/kloo/internal/tokens"
 	"github.com/spf13/cobra"
 )
 
@@ -55,7 +56,13 @@ func newTokensCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res := measureTokens(text, source, cfg.MaxContextTokens)
+			// Seed from whatever this model measured on a previous run in this
+			// workspace; 0 when there is none (cold start).
+			ratio := 0.0
+			if cwd, cerr := os.Getwd(); cerr == nil {
+				ratio = tokens.NewStore(cwd).Ratio(cfg.Model)
+			}
+			res := measureTokens(text, source, cfg.MaxContextTokens, ratio)
 			if values.JSON {
 				return writeTokensJSON(deps.Out, res)
 			}
@@ -88,13 +95,22 @@ func readTokensInput(args []string, file string) (string, string, error) {
 	}
 }
 
-func measureTokens(text, source string, ctxTokens int) tokensResult {
+// measureTokens sizes a task against the configured window. ratio is the
+// chars-per-token measured for this model in an earlier run (0 ⇒ none, use the
+// default). Persisting it is what lets this command — which never touches the
+// network — report a measured number instead of a guess.
+func measureTokens(text, source string, ctxTokens int, ratio float64) tokensResult {
+	estimate := "estimated · uncalibrated, assuming 4.00 chars/token"
 	approx := repomap.ApproxTokens(text)
+	if ratio > 0 {
+		approx = tokens.EstimateAt(text, ratio)
+		estimate = fmt.Sprintf("calibrated · %.2f chars/token, measured on a previous run", ratio)
+	}
 	usable := agent.UsableWindow(ctxTokens)
 	trigger := agent.CompactTriggerTokens(ctxTokens)
 	return tokensResult{
 		Source:          source,
-		Chars:           len(text),
+		Chars:           tokens.CountChars(text),
 		ApproxTokens:    approx,
 		Ctx:             ctxTokens,
 		UsableWindow:    usable,
@@ -102,7 +118,7 @@ func measureTokens(text, source string, ctxTokens int) tokensResult {
 		Headroom:        usable - approx,
 		Fits:            approx <= usable,
 		CompactsAtStart: approx > trigger,
-		Estimate:        "approx-4-chars-per-token",
+		Estimate:        estimate,
 	}
 }
 

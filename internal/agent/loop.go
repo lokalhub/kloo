@@ -15,6 +15,7 @@ import (
 	"github.com/lokalhub/kloo/internal/edit"
 	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/repomap"
+	"github.com/lokalhub/kloo/internal/tokens"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -160,6 +161,11 @@ type Loop struct {
 	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
 	RetryableStatusCodes []int
 
+	// Tokens is the calibrating token estimator. It learns the model's real
+	// chars-per-token ratio from reported usage, so budgeting stops relying on a
+	// fixed guess. nil ⇒ the package default estimate (still entropy-aware).
+	Tokens *tokens.Calibrator
+
 	// MapPosition controls where the curated repo map is placed in the prompt:
 	// MapPositionTail (default, cache-friendly) or MapPositionSystem (legacy).
 	MapPosition string
@@ -168,6 +174,15 @@ type Loop struct {
 	// reuses one Loop across submissions). Unexported: the Report is the contract.
 	promptTokens       int
 	cachedPromptTokens int
+	// lastPromptChars is the character count of the request act() just built,
+	// paired with the prompt_tokens the provider reports back to calibrate the
+	// estimator. Consumed (and cleared) by observeUsage, so a turn whose chars we
+	// did not measure — the chat gate builds its own messages — teaches nothing
+	// rather than teaching a zero.
+	lastPromptChars int
+	// toolCharsCache memoises the marshalled size of the tool schemas, which do
+	// not change within a run.
+	toolCharsCache int
 }
 
 func (l *Loop) onState(s State) {
@@ -382,7 +397,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// and churn streak (which made a second "hello" churn at step 1).
 	l.Budget.Reset()
 	l.Churn.Reset()
-	l.promptTokens, l.cachedPromptTokens = 0, 0
+	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
+	l.toolCharsCache = 0
 
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
@@ -486,6 +502,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			TokensUsed:         st.Tokens,
 			PromptTokens:       l.promptTokens,
 			CachedPromptTokens: l.cachedPromptTokens,
+			TokenRatio:         l.tokenRatio(),
 			Elapsed:            st.Elapsed,
 			Compactions:        compactions,
 			Ignored:            ignoredAll,
@@ -1080,9 +1097,9 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	sys := llm.Message{Role: llm.RoleSystem, Content: sysContent}
 	// The memory assembler budgets against everything that is NOT history, so the
 	// map counts wherever it sits — placement must not change the token math.
-	nonHistoryTokens := repomap.ApproxTokens(sysContent)
+	nonHistoryTokens := l.estimate(sysContent)
 	for _, m := range tailMsgs {
-		nonHistoryTokens += repomap.ApproxTokens(m.Content)
+		nonHistoryTokens += l.estimate(m.Content)
 	}
 
 	// History: working memory when set (pin-hot + summary + compaction under the
@@ -1099,6 +1116,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			WindowTokens: win,
 			SystemTokens: nonHistoryTokens,
 			MapBudget:    mapBudget,
+			Estimate:     l.estimate,
 		})
 		if merr != nil {
 			// ErrWindowTooSmall ⇒ a config error surfaced as a ReasonError stop.
@@ -1118,6 +1136,11 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		Messages:    msgs,
 		Temperature: l.Temperature,
 	}, l.Registry))
+	// Measure what we actually SEND: messages PLUS the tool schemas, which the
+	// provider also counts in prompt_tokens. Counting message text alone made the
+	// measured ratio collapse to the clamp floor on short conversations, where the
+	// schemas dominate the prompt.
+	l.lastPromptChars = messageChars(msgs) + l.toolSchemaChars(req.Tools)
 
 	resp, err := l.complete(ctx, req)
 	if err != nil {
@@ -1276,7 +1299,7 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 	if budget <= 0 {
 		budget = 2000
 	}
-	ctxStr, _ := repomap.Assemble(ranked, budget, repomap.ApproxTokens)
+	ctxStr, _ := repomap.Assemble(ranked, budget, l.estimate)
 	return ctxStr
 }
 
@@ -1840,6 +1863,16 @@ func runawayThinkingError(msg llm.Message) error {
 // count is normalised through CachedPromptTokens before summing, so a run that
 // mixes provider shapes still totals correctly; it is carried in the DeepSeek-style
 // hit field because the run total is a sum, not any one provider's response.
+// estimate sizes a string in tokens using the run's calibrated estimator when
+// there is one. Every budgeting path goes through here so the loop and the
+// memory assembler never mix a calibrated count with an uncalibrated one.
+func (l *Loop) estimate(s string) int {
+	if l.Tokens != nil {
+		return l.Tokens.Estimate(s)
+	}
+	return repomap.ApproxTokens(s)
+}
+
 // observeUsage records a turn's token usage: the cumulative budget counter plus
 // the run's prompt-cache accounting, so the report can state what fraction of the
 // re-sent prompt the provider served from cache. A provider that reports nothing
@@ -1849,6 +1882,50 @@ func (l *Loop) observeUsage(u llm.Usage) {
 	l.Budget.AddTokens(u.TotalTokens)
 	l.promptTokens += u.PromptTokens
 	l.cachedPromptTokens += u.CachedPromptTokens()
+	// Ground truth for the estimator: this many characters cost exactly this many
+	// tokens. Cleared either way, so one turn's chars can never be credited twice.
+	if l.Tokens != nil {
+		l.Tokens.Observe(l.lastPromptChars, u.PromptTokens)
+	}
+	l.lastPromptChars = 0
+}
+
+// tokenRatio is the run's measured chars-per-token, or 0 when nothing was
+// measured (no calibrator, or an endpoint that reports no usage).
+func (l *Loop) tokenRatio() float64 {
+	if l.Tokens == nil || !l.Tokens.Calibrated() {
+		return 0
+	}
+	return l.Tokens.Ratio()
+}
+
+// toolSchemaChars is the character cost of the tool definitions attached to a
+// request. They are constant for a run, so the marshalled size is computed once.
+func (l *Loop) toolSchemaChars(tls []llm.Tool) int {
+	if len(tls) == 0 {
+		return 0
+	}
+	if l.toolCharsCache > 0 {
+		return l.toolCharsCache
+	}
+	b, err := json.Marshal(tls)
+	if err != nil {
+		return 0
+	}
+	l.toolCharsCache = len([]rune(string(b)))
+	return l.toolCharsCache
+}
+
+// messageChars counts the characters kloo actually sent as the prompt.
+func messageChars(msgs []llm.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += tokens.CountChars(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += tokens.CountChars(tc.Function.Name, tc.Function.Arguments)
+		}
+	}
+	return n
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {

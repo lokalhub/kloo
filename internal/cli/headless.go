@@ -91,6 +91,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ContextTokens:        cfg.MaxContextTokens,
 		CuratorTokens:        cfg.CuratorBudgetTokens,
 		MapPosition:          cfg.MapPosition,
+		Tokens:               tokenCalibrator(cwd, cfg.Model),
 		Memory:               agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:               systemPrompt,
 		StopOn:               agentStopPolicy(cfg.StopOn),
@@ -139,6 +140,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	start := time.Now()
 	rep, runErr := loop.Run(ctx, task)
 	elapsed := time.Since(start)
+	saveTokenCalibration(cwd, cfg.Model, rep)
 	if cfg.JSONOnly {
 		applyJSONOnlyValidation(rep)
 	}
@@ -306,9 +308,14 @@ type runSummary struct {
 	Compactions    int     `json:"compactions"`
 	// Prompt-cache accounting. Omitted entirely when the provider reports none
 	// (most local servers), so a local run's JSON is byte-identical to before.
-	PromptTokens       int            `json:"prompt_tokens,omitempty"`
-	CachedPromptTokens int            `json:"cached_prompt_tokens,omitempty"`
-	CacheHitRate       float64        `json:"cache_hit_rate,omitempty"`
+	PromptTokens       int     `json:"prompt_tokens,omitempty"`
+	CachedPromptTokens int     `json:"cached_prompt_tokens,omitempty"`
+	CacheHitRate       float64 `json:"cache_hit_rate,omitempty"`
+	// TokenRatio is the chars-per-token ratio MEASURED this run, and
+	// TokenEstimateError the old flat chars/4 heuristic's signed relative error
+	// against it. Omitted when the endpoint reported no usage to measure against.
+	TokenRatio         float64        `json:"token_ratio,omitempty"`
+	TokenEstimateError float64        `json:"token_estimate_error,omitempty"`
 	Verify             *verifySummary `json:"verify,omitempty"`
 	Error              string         `json:"error,omitempty"`
 	FailureCode        string         `json:"failure_code,omitempty"`
@@ -354,6 +361,12 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		s.Steps = rep.Steps
 		s.Tokens = rep.TokensUsed
 		s.Compactions = rep.Compactions
+		if rep.TokenRatio > 0 {
+			s.TokenRatio = round2(rep.TokenRatio)
+			// What a flat chars/4 would have implied, against what was really
+			// charged: the number that says whether the estimate can be trusted.
+			s.TokenEstimateError = round2(4.0/rep.TokenRatio - 1)
+		}
 		if rep.CachedPromptTokens > 0 {
 			s.PromptTokens = rep.PromptTokens
 			s.CachedPromptTokens = rep.CachedPromptTokens
