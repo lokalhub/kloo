@@ -233,3 +233,56 @@ func TestAutoSizedWindowReserve(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownModelSuggestsAnAlias: when a provider is selected, the error must
+// name the remedy, not just the problem. A short name that resolves to nothing is
+// almost always a missing alias, and the fix is one line of profile — printing it
+// is the difference between an error you can act on and one you have to research.
+func TestUnknownModelSuggestsAnAlias(t *testing.T) {
+	cfg := config.Config{
+		Model:            "dsv4",
+		Provider:         "openrouter",
+		APIKey:           "sk-test",
+		MaxContextTokens: 8000,
+	}
+	err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, false, nil)
+	if err == nil {
+		t.Fatal("an unknown id on an authenticated endpoint should fail")
+	}
+	for _, want := range []string{
+		`"models"`,                   // names the mechanism
+		`"openrouter"`,               // scoped to the selected provider
+		`"dsv4"`,                     // the name they typed
+		"deepseek/deepseek-v4-flash", // what to point it at
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %s:\n%v", want, err)
+		}
+	}
+}
+
+// TestNoAliasHintWithoutProvider: aliases are provider-scoped, so with no
+// --provider there is nowhere to put one and the hint would be misleading.
+func TestNoAliasHintWithoutProvider(t *testing.T) {
+	cfg := config.Config{Model: "dsv4", APIKey: "sk-test", MaxContextTokens: 8000}
+	err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, false, nil)
+	if err == nil {
+		t.Fatal("expected the unknown-model failure")
+	}
+	if strings.Contains(err.Error(), `"models"`) {
+		t.Errorf("no provider selected — the alias hint has nowhere to go:\n%v", err)
+	}
+}
+
+// TestNoAliasHintWithoutSuggestions: with no near match there is no sensible
+// target, and an alias pointing nowhere is worse than no advice.
+func TestNoAliasHintWithoutSuggestions(t *testing.T) {
+	cfg := config.Config{Model: "zzzzz", Provider: "openrouter", APIKey: "sk-test", MaxContextTokens: 8000}
+	err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, false, nil)
+	if err == nil {
+		t.Fatal("expected the unknown-model failure")
+	}
+	if strings.Contains(err.Error(), `"models"`) {
+		t.Errorf("no suggestion to alias to — the hint should be suppressed:\n%v", err)
+	}
+}
