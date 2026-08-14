@@ -162,6 +162,7 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 		if len(info.Suggestions) > 0 {
 			msg += fmt.Sprintf(" — did you mean %s?", strings.Join(info.Suggestions, ", "))
 		}
+		msg += aliasHint(cfg, info)
 		if strict || modelIDMatters(cfg, info) {
 			return errors.New(msg)
 		}
@@ -184,6 +185,27 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 	}
 	cfg.MaxContextTokens = sized
 	return nil
+}
+
+// aliasHint suggests the profile edit that turns a short name the user clearly
+// MEANT as an alias into a working one.
+//
+// This is the gap that made the original report hard to see: a provider with no
+// "models" block has no alias to expand, so a short id falls through as a literal
+// model name, and the error only said the id was unknown — never that a mechanism
+// for short names exists, or where to configure it. The remedy is one line of
+// profile, so the error may as well print it.
+//
+// Aliases are provider-scoped, so this stays silent when no provider is selected,
+// and it needs a suggestion to name a target worth aliasing to.
+func aliasHint(cfg *config.Config, info modelInfo) string {
+	if cfg.Provider == "" || len(info.Suggestions) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\n\nIf %q was meant as a short name, alias it in your profile (point it at whichever of the above you want):\n"+
+			"  \"providers\": { %q: { \"models\": { %q: %q } } }",
+		cfg.Model, cfg.Provider, cfg.Model, info.Suggestions[0])
 }
 
 // modelIDMatters reports whether a wrong id will actually break the run, so an

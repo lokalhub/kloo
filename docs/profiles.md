@@ -44,9 +44,21 @@ the tuning above applies.
 Aliases are scoped to their provider: the same short name can mean different ids
 under different providers, and with no `--provider` selected no alias applies.
 
-kloo also validates the resolved id against the endpoint's `/models` catalog at
-startup and suggests near matches when it doesn't exist — so a missing alias is a
-warning naming the id you wanted, not a silent 8000-token run.
+kloo validates the resolved id against the endpoint's `/models` catalog at
+startup. A short name with no alias behind it is not silently tolerated — it fails
+immediately, names the near matches, and prints the profile line that fixes it:
+
+```
+model "dsv4" is not in the endpoint's catalog — did you mean
+deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash, ...?
+
+If "dsv4" was meant as a short name, alias it in your profile (point it at
+whichever of the above you want):
+  "providers": { "openrouter": { "models": { "dsv4": "deepseek/deepseek-v4-pro" } } }
+```
+
+The hint only appears when a `--provider` is selected (aliases are provider-scoped)
+and when there is a near match worth pointing at.
 
 ## Precedence
 

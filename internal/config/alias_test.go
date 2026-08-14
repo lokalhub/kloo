@@ -95,3 +95,67 @@ func TestAliasIsProviderScoped(t *testing.T) {
 		t.Errorf("with no --provider the alias must not apply, got %q", cfg.Model)
 	}
 }
+
+// TestProviderWithoutModelsBlockLeavesTheIDLiteral is the regression guard for
+// the gap that shipped: every earlier test wrote a profile that HAD a models
+// block, so none of them covered the real-world shape — a provider with just an
+// endpoint and a key. There the short name is not an alias at all; it falls
+// through as a literal model id and the endpoint rejects it.
+//
+// This pins the behaviour so the failure is a documented outcome rather than a
+// surprise, and so the CLI-layer error that explains the remedy has something to
+// fire on.
+func TestProviderWithoutModelsBlockLeavesTheIDLiteral(t *testing.T) {
+	profile := writeProfile(t, `{
+	  "providers": {
+	    "openrouter": {
+	      "endpoint": "https://openrouter.ai/api/v1",
+	      "apiKey": "${OPENROUTER_API_KEY}"
+	    }
+	  },
+	  "deepseek/deepseek-v4-flash": {"maxContextTokens": 900000}
+	}`)
+	provider, model := "openrouter", "dsv4"
+	cfg, err := Resolve(Flags{Provider: &provider, Model: &model}, noEnv, profile)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Model != "dsv4" {
+		t.Errorf("model = %q, want the literal %q — there is no alias to expand", cfg.Model, "dsv4")
+	}
+	// And the consequence: the per-model entry keyed by the REAL id is never
+	// reached, so the window falls back to the conservative built-in default.
+	if cfg.MaxContextTokens != DefaultMaxContextTokens {
+		t.Errorf("window = %d, want the %d fallback (the 900000 entry is unreachable)",
+			cfg.MaxContextTokens, DefaultMaxContextTokens)
+	}
+}
+
+// TestProviderModelsBlockMissingTheAlias: a models block that simply lacks THIS
+// key behaves the same way as no block at all.
+func TestProviderModelsBlockMissingTheAlias(t *testing.T) {
+	profile := writeProfile(t, `{
+	  "providers": {"openrouter": {"models": {"dsv32": "deepseek/deepseek-v3.2"}}}
+	}`)
+	provider, model := "openrouter", "dsv4"
+	cfg, err := Resolve(Flags{Provider: &provider, Model: &model}, noEnv, profile)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Model != "dsv4" {
+		t.Errorf("model = %q, want the literal %q", cfg.Model, "dsv4")
+	}
+}
+
+// TestEmptyAliasTargetIsIgnored: a blank mapping must not blank the model id.
+func TestEmptyAliasTargetIsIgnored(t *testing.T) {
+	profile := writeProfile(t, `{"providers": {"openrouter": {"models": {"dsv4": ""}}}}`)
+	provider, model := "openrouter", "dsv4"
+	cfg, err := Resolve(Flags{Provider: &provider, Model: &model}, noEnv, profile)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Model != "dsv4" {
+		t.Errorf("model = %q, want the id left intact", cfg.Model)
+	}
+}
