@@ -40,9 +40,23 @@ type Server struct {
 	*httptest.Server
 	mu       sync.Mutex
 	requests [][]byte
+	served   int // scripted turns consumed (GET catalog probes do not count)
 }
 
 // Requests returns a copy of the captured request bodies, in arrival order.
+// ModelCalls returns only the recorded requests that carry a body — the actual
+// model calls, excluding the bodyless /models catalog probe. Use it when asserting
+// how many times the model was invoked (retries, loop steps).
+func (s *Server) ModelCalls() [][]byte {
+	var out [][]byte
+	for _, r := range s.Requests() {
+		if len(r) > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func (s *Server) Requests() [][]byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,7 +119,13 @@ func Sequence(tb testing.TB, mocks ...Mock) *Server {
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		s.mu.Lock()
-		idx := len(s.requests)
+		// A GET is the /models catalog kloo fetches at startup; it is RECORDED (some
+		// tests assert it happened) but must not CONSUME a scripted turn, or every
+		// later response shifts by one and the scripted conversation falls apart.
+		idx := s.served
+		if r.Method != http.MethodGet {
+			s.served++
+		}
 		s.requests = append(s.requests, body)
 		s.mu.Unlock()
 

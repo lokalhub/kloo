@@ -48,7 +48,13 @@ type Loop struct {
 
 	// Context assembly.
 	Root          string // workspace root for the repo map (empty ⇒ skip map)
-	ContextTokens int    // per-step repo-map token budget
+	ContextTokens int    // the MODEL'S context window — what it can hold
+	// CuratorTokens caps what kloo chooses to ASSEMBLE per step (the repo map),
+	// as opposed to ContextTokens, which is what the model can hold. Keeping them
+	// separate is the point: a 900k-window model should stop compacting, but must
+	// not thereby authorise a 252k-token repo map on every turn. 0 ⇒ fall back to
+	// the usable window (the pre-split behaviour).
+	CuratorTokens int
 	System        string // system prompt
 	// ChatSystem, when non-empty, enables the conversational gate: ONE no-tools
 	// model call before the agent loop that classifies the user's message as an
@@ -153,6 +159,15 @@ type Loop struct {
 	RetryMaxDelay time.Duration
 	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
 	RetryableStatusCodes []int
+
+	// MapPosition controls where the curated repo map is placed in the prompt:
+	// MapPositionTail (default, cache-friendly) or MapPositionSystem (legacy).
+	MapPosition string
+
+	// Per-run prompt-cache accounting, reset at the top of every Run (the TUI
+	// reuses one Loop across submissions). Unexported: the Report is the contract.
+	promptTokens       int
+	cachedPromptTokens int
 }
 
 func (l *Loop) onState(s State) {
@@ -367,6 +382,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// and churn streak (which made a second "hello" churn at step 1).
 	l.Budget.Reset()
 	l.Churn.Reset()
+	l.promptTokens, l.cachedPromptTokens = 0, 0
 
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
@@ -461,18 +477,20 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			compactions = l.Memory.Stats().Compactions
 		}
 		rep := &Report{
-			Reason:       reason,
-			Steps:        step,
-			FinalVerify:  lastVerify,
-			Budget:       be,
-			Churn:        ce,
-			Err:          runErr,
-			TokensUsed:   st.Tokens,
-			Elapsed:      st.Elapsed,
-			Compactions:  compactions,
-			Ignored:      ignoredAll,
-			Transcript:   append([]llm.Message(nil), convo...), // this run's task + steps, for the session
-			ToolCounters: counters,
+			Reason:             reason,
+			Steps:              step,
+			FinalVerify:        lastVerify,
+			Budget:             be,
+			Churn:              ce,
+			Err:                runErr,
+			TokensUsed:         st.Tokens,
+			PromptTokens:       l.promptTokens,
+			CachedPromptTokens: l.cachedPromptTokens,
+			Elapsed:            st.Elapsed,
+			Compactions:        compactions,
+			Ignored:            ignoredAll,
+			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
+			ToolCounters:       counters,
 		}
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
@@ -497,7 +515,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// loop rather than block real work on a classifier hiccup.
 	if l.ChatSystem != "" && ctx.Err() == nil {
 		reply, conversational, usage, gateErr := l.chatGate(ctx, task)
-		l.Budget.AddTokens(usage.TotalTokens)
+		l.observeUsage(usage)
 		if gateErr != nil {
 			return finish(ReasonError, gateErr, nil, nil)
 		}
@@ -536,7 +554,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				return finish(ReasonInterrupted, nil, nil, nil)
 			}
 			if errors.Is(err, ErrNoToolCall) {
-				l.Budget.AddTokens(usage.TotalTokens)
+				l.observeUsage(usage)
 				// Promised-but-didn't-act rail: the model narrated a NEXT action ("let me
 				// run X", "I'll check Y") but emitted no tool call, so nothing ran — the
 				// pattern behind a run that keeps stopping as `answered` mid-task. Rather
@@ -577,7 +595,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 			return finish(ReasonError, err, nil, nil)
 		}
-		l.Budget.AddTokens(usage.TotalTokens)
+		l.observeUsage(usage)
 		convo = append(convo, msg)
 		for _, ig := range ignored {
 			ignoredAll = append(ignoredAll, ig.Name)
@@ -1042,9 +1060,30 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	mapBudget := l.ContextTokens
 	if l.Memory != nil {
 		win = usableWindow(l.ContextTokens)
-		mapBudget = mapBudgetTokens(win)
+		// The map is budgeted from the CURATOR cap, not the window: capacity and
+		// appetite are separate decisions. With no cap configured this resolves to
+		// the usable window, i.e. exactly the pre-split arithmetic.
+		mapBudget = mapBudgetTokens(EffectiveCuratorBudget(l.ContextTokens, l.CuratorTokens))
 	}
-	sys := llm.Message{Role: llm.RoleSystem, Content: l.systemWithContext(task, mapBudget)}
+	// Curate the map once, then place it: appended to the system prompt (legacy)
+	// or emitted as a trailing message (default) so the prefix above it can cache.
+	mapSection := repoMapSection(l.assembleContext(task, mapBudget))
+	sysContent := l.System
+	var tailMsgs []llm.Message
+	if mapSection != "" {
+		if l.mapAtTail() {
+			tailMsgs = []llm.Message{{Role: llm.RoleSystem, Content: mapSection}}
+		} else {
+			sysContent = l.System + "\n\n" + mapSection
+		}
+	}
+	sys := llm.Message{Role: llm.RoleSystem, Content: sysContent}
+	// The memory assembler budgets against everything that is NOT history, so the
+	// map counts wherever it sits — placement must not change the token math.
+	nonHistoryTokens := repomap.ApproxTokens(sysContent)
+	for _, m := range tailMsgs {
+		nonHistoryTokens += repomap.ApproxTokens(m.Content)
+	}
 
 	// History: working memory when set (pin-hot + summary + compaction under the
 	// window), else the legacy bounded transcript (reused, not forked).
@@ -1058,7 +1097,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			EditPath:     curEditPath,
 			FreshFile:    l.reread(curEditPath),
 			WindowTokens: win,
-			SystemTokens: repomap.ApproxTokens(sys.Content),
+			SystemTokens: nonHistoryTokens,
 			MapBudget:    mapBudget,
 		})
 		if merr != nil {
@@ -1071,6 +1110,9 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	}
 
 	msgs := append([]llm.Message{sys}, hist...)
+	// Appended AFTER history, never spliced into it: a tool result must stay
+	// adjacent to the assistant message that requested it.
+	msgs = append(msgs, tailMsgs...)
 	req := l.withThinkingControl(l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,
 		Messages:    msgs,
@@ -1146,17 +1188,39 @@ func estimateUsage(u llm.Usage, msgs []llm.Message, msg llm.Message) llm.Usage {
 	return u
 }
 
-// systemWithContext builds the per-step system prompt with a freshly curated
-// repo map (so context is re-curated each turn, not accumulated unbounded).
-// mapBudget is the repo-map token budget for this turn (the full window on the
-// legacy path; mapBudgetTokens(window) when working memory is engaged).
-func (l *Loop) systemWithContext(task string, mapBudget int) string {
-	ctxStr := l.assembleContext(task, mapBudget)
-	if ctxStr == "" {
-		return l.System
+// repoMapHeader labels the curated repo-map section, wherever it is placed.
+const repoMapHeader = "Repository map (most relevant first):\n"
+
+// repoMapSection renders the curated map as a standalone prompt section, or ""
+// when there is no map for this turn.
+func repoMapSection(mapText string) string {
+	if mapText == "" {
+		return ""
 	}
-	return l.System + "\n\nRepository map (most relevant first):\n" + ctxStr
+	return repoMapHeader + mapText
 }
+
+// MapPositionTail places the freshly curated repo map in a trailing message,
+// AFTER the conversation; MapPositionSystem appends it to the system prompt (the
+// original layout).
+//
+// Tail is the default because providers cache a re-sent prompt PREFIX and bill
+// the cached part at a steep discount. The map is re-curated every turn — kloo
+// edits files, so it changes constantly — and cache invalidation is a clean cut
+// from the first differing token. With the map at the FRONT, that cut lands
+// above the conversation and every turn re-pays for history that never changed.
+// Moving the volatile section below the append-only history makes the whole
+// conversation a stable, cacheable prefix.
+//
+// Set MapPositionSystem if an endpoint rejects a non-leading system message.
+const (
+	MapPositionTail   = "tail"
+	MapPositionSystem = "system"
+)
+
+// mapAtTail reports whether the curated map goes in a trailing message. Unset ⇒
+// tail (the cache-friendly default).
+func (l *Loop) mapAtTail() bool { return l.MapPosition != MapPositionSystem }
 
 // repoMapFileCap mirrors repomap.maxMappedFileBytes (walk.go:34): a defensive
 // upper bound on the size of a file whose content we read into memory for the
@@ -1772,11 +1836,28 @@ func runawayThinkingError(msg llm.Message) error {
 	return nil
 }
 
+// addUsage accumulates a turn's usage into the run total. The cached-prompt
+// count is normalised through CachedPromptTokens before summing, so a run that
+// mixes provider shapes still totals correctly; it is carried in the DeepSeek-style
+// hit field because the run total is a sum, not any one provider's response.
+// observeUsage records a turn's token usage: the cumulative budget counter plus
+// the run's prompt-cache accounting, so the report can state what fraction of the
+// re-sent prompt the provider served from cache. A provider that reports nothing
+// leaves cachedPromptTokens at 0, which reads as "no discount observed" rather
+// than as a proven miss.
+func (l *Loop) observeUsage(u llm.Usage) {
+	l.Budget.AddTokens(u.TotalTokens)
+	l.promptTokens += u.PromptTokens
+	l.cachedPromptTokens += u.CachedPromptTokens()
+}
+
 func addUsage(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		PromptTokens:     a.PromptTokens + b.PromptTokens,
-		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
-		TotalTokens:      a.TotalTokens + b.TotalTokens,
+		PromptTokens:          a.PromptTokens + b.PromptTokens,
+		CompletionTokens:      a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:           a.TotalTokens + b.TotalTokens,
+		PromptCacheHitTokens:  a.CachedPromptTokens() + b.CachedPromptTokens(),
+		PromptCacheMissTokens: a.PromptCacheMissTokens + b.PromptCacheMissTokens,
 	}
 }
 

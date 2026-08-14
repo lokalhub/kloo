@@ -396,7 +396,14 @@ type Report struct {
 	Err             error
 	RolledBack      bool
 	TokensUsed      int
-	Elapsed         time.Duration
+	// PromptTokens is the run's cumulative prompt (input) tokens, and
+	// CachedPromptTokens how many of those the provider served from its prefix
+	// cache. Hosted providers bill a cache hit at a steep discount, so the ratio
+	// is the readout for whether kloo's prompt layout is cache-friendly. Both are
+	// 0 when the provider reports no cache accounting (most local servers).
+	PromptTokens       int
+	CachedPromptTokens int
+	Elapsed            time.Duration
 	// Compactions is how many times working memory folded cold turns into the
 	// running summary this run (0 when memory is off or never triggered). The
 	// report/UI print it only when > 0, so the no-compaction output is unchanged.

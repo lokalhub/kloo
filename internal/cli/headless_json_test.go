@@ -237,8 +237,10 @@ func TestHeadlessLLMMaxRetriesZeroDisablesRetry(t *testing.T) {
 	if err == nil {
 		t.Fatal("retryable 503 should fail when retry count is explicitly zero")
 	}
-	if n := len(srv.Requests()); n != 1 {
-		t.Fatalf("requests = %d, want 1 with retry disabled\n%s", n, out.String())
+	// ModelCalls, not Requests: the startup /models catalog probe is also recorded,
+	// and this test is about how many times the MODEL was called.
+	if n := len(srv.ModelCalls()); n != 1 {
+		t.Fatalf("model calls = %d, want 1 with retry disabled\n%s", n, out.String())
 	}
 	if strings.Contains(out.String(), "retrying") {
 		t.Fatalf("output shows retry even though LLMMaxRetries is zero:\n%s", out.String())

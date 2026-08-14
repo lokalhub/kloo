@@ -246,6 +246,34 @@ func genRepo(t *testing.T, nFiles, nFuncs int) string {
 }
 
 // sentSystem parses the system message content from the first captured request.
+// sentMapText returns the curated repo-map body from the first captured request,
+// found wherever the map was placed (trailing message by default, or appended to
+// the system prompt under MapPositionSystem). Placement is a caching concern; the
+// budget tests care only about the map's CONTENT.
+func sentMapText(t *testing.T, srv *llmtest.Server) string {
+	t.Helper()
+	reqs := srv.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("no request captured")
+	}
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(reqs[0], &body); err != nil {
+		t.Fatalf("request not JSON: %v", err)
+	}
+	for _, m := range body.Messages {
+		if i := strings.Index(m.Content, repoMapHeader); i >= 0 {
+			return m.Content[i+len(repoMapHeader):]
+		}
+	}
+	t.Fatal("no repo map section in the request")
+	return ""
+}
+
 func sentSystem(t *testing.T, srv *llmtest.Server) string {
 	t.Helper()
 	reqs := srv.Requests()
@@ -297,8 +325,8 @@ func TestMemoryA5LegacyPathByteIdentical(t *testing.T) {
 	// Guard: the full-window map and the shrunk map MUST differ, else the test
 	// could not distinguish the legacy (full) budget from the memory (shrunk) one.
 	probe := &Loop{Root: root, System: "you are kloo"}
-	full := probe.systemWithContext(task, ctxTokens)
-	shrunk := probe.systemWithContext(task, mapBudgetTokens(ctxTokens))
+	full := probe.assembleContext(task, ctxTokens)
+	shrunk := probe.assembleContext(task, mapBudgetTokens(ctxTokens))
 	if full == shrunk {
 		t.Fatalf("repo map too small to exercise the budget split (full==shrunk); raise nFiles/nFuncs")
 	}
@@ -311,8 +339,8 @@ func TestMemoryA5LegacyPathByteIdentical(t *testing.T) {
 	}
 	// The legacy path must build the system prompt with the FULL window budget,
 	// byte-identical to pre-P00 (the Lead-1 fix: do not shrink the map when off).
-	if got := sentSystem(t, srv); got != full {
-		t.Errorf("legacy system prompt is not the full-budget map (map silently shrank)\n got len=%d\nwant len=%d", len(got), len(full))
+	if got := sentMapText(t, srv); got != full {
+		t.Errorf("legacy path is not the full-budget map (map silently shrank)\n got len=%d\nwant len=%d", len(got), len(full))
 	}
 }
 
@@ -328,8 +356,8 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 	// of the USABLE window, not the raw ctxTokens.
 	win := usableWindow(ctxTokens)
 	probe := &Loop{Root: root, System: "you are kloo"}
-	full := probe.systemWithContext(task, ctxTokens)
-	shrunk := probe.systemWithContext(task, mapBudgetTokens(win))
+	full := probe.assembleContext(task, ctxTokens)
+	shrunk := probe.assembleContext(task, mapBudgetTokens(win))
 	if full == shrunk {
 		t.Fatalf("repo map too small to exercise the budget split; raise nFiles/nFuncs")
 	}
@@ -343,8 +371,8 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 	}
 	// The repo-map curator at the act() call site got mapBudgetTokens(window),
 	// NOT the full window (guards the "map eats the whole window" bug directly).
-	if got := sentSystem(t, srv); got != shrunk {
-		t.Errorf("memory-path system prompt did not use mapBudgetTokens(window)")
+	if got := sentMapText(t, srv); got != shrunk {
+		t.Errorf("memory path did not curate the map at mapBudgetTokens(window)")
 	}
 	st := wm.Stats()
 	if st.MapBudget != mapBudgetTokens(win) {

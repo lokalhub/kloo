@@ -42,7 +42,10 @@ churn detection as the primary guard).
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL. Set directly, or via `--provider` (a provider's `endpoint` wins over this default but loses to an explicit `--endpoint`/`KLOO_ENDPOINT`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps. Also seeded by `--effort` (fast 50 · medium 500 · heavy 1000); an explicit `--max-steps` overrides the tier. |
-| `--ctx` | `8000` | Per-step context window (`maxContextTokens`). Set it to match your server's `-c`/`num_ctx`. **Needed for a llama-swap/Ollama alias** (`snappy`, `smart`) — the bundled per-model defaults key on real model ids, so an alias falls to the conservative 8000 and kloo over-compacts on a larger server. Overrides profile/bundled/built-in. |
+| `--ctx` | `8000` | The model's context window (`maxContextTokens`). Usually unnecessary now — kloo sizes it from the endpoint catalog — but setting it explicitly pins the value and disables auto-sizing. Match your server's `-c`/`num_ctx` for a local server that serves no catalog. |
+| `--curator-budget` | `32768` | Cap on the repo map kloo assembles per step, separate from `--ctx`. |
+| `--map-position` | `tail` | `tail` keeps the prompt prefix cacheable; `system` restores the legacy in-system-prompt layout. |
+| `--strict-model` | off | Fail at startup when the endpoint doesn't list `--model`, instead of warning. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
 | `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. Requires a task argument. |
@@ -334,7 +337,8 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_MCP` | Set to `0` / `false` to disable all [MCP servers](mcp.md). `--no-mcp` overrides it; both override the profile. |
 | `XDG_CONFIG_HOME` | If set, the profile file lives at `$XDG_CONFIG_HOME/kloo/profiles.json`. |
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
-| `KLOO_CTX_AUTO` | `1` to **auto-size the context budget** from the model's advertised `/models` `context_length` (minus output headroom) instead of the bundled default — so a large-context model isn't starved on a big task. Opt-in; never shrinks below `--ctx`. See [Reliability tuning](#reliability-tuning). |
+| `KLOO_CURATOR_BUDGET` | Cap on the per-step assembled repo map (same as `--curator-budget`). |
+| `KLOO_CTX_AUTO_CAP` | Ceiling on automatic window sizing, for a server whose real limit is below what its catalog advertises. |
 | `KLOO_CTX_AUTO_CAP` | Optional ceiling (tokens) for `KLOO_CTX_AUTO` on memory/cost-limited endpoints. Unset ⇒ the model's full advertised window. |
 | `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
 | `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
@@ -402,7 +406,9 @@ profile if you want a hard kloo-side cost cap.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `maxContextTokens` | `8000` | Per-step context **window** (the hard ceiling for the whole assembled prompt). Also the working-memory compaction trigger — see below. Conservative for small local models. |
+| `maxContextTokens` | `8000` | The **model's context window** — what the endpoint can accept. Drives the prompt budget and the compaction trigger. Auto-sized from the endpoint catalog when you don't set it (see below). |
+| `curatorBudgetTokens` | `32768` | Cap on what kloo **assembles** per step (the repo map), clamped to the usable window. Separate from the window on purpose — see below. |
+| `mapPosition` | `tail` | Where the curated repo map goes in the prompt: `tail` (after the conversation, keeping the prefix cacheable) or `system` (legacy). |
 | `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
 | `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
@@ -432,6 +438,64 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 
 A task-loop run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
+
+### Window vs curator budget
+
+`maxContextTokens` is **capacity** — what the model can hold.
+`curatorBudgetTokens` is **appetite** — what kloo chooses to build each turn.
+
+They used to be one field, which meant sizing the window correctly for a
+large-context model also authorised an enormous repo map:
+
+```
+maxContextTokens 900000  →  usable 720000  →  repo map cap 252000 tokens, every turn
+```
+
+Now the map is budgeted from `curatorBudgetTokens` (clamped to the usable window),
+so a big window raises the compaction trigger without raising per-turn cost. Below
+the cap the arithmetic is unchanged, so small local models see no difference.
+
+Rule of thumb: raise `maxContextTokens` to match your model; leave
+`curatorBudgetTokens` alone unless the repo map is visibly too thin or too costly.
+
+### Automatic window sizing
+
+kloo fetches the endpoint's `/models` catalog once at startup and uses it to:
+
+- **validate the model id** — an id the endpoint doesn't list warns (with
+  suggestions) instead of silently falling back to the 8000-token default. Pass
+  `--strict-model` to make it a hard error, which is what you want for unattended
+  hosted runs. A local server that serves no catalog is unaffected.
+- **size the window** from the advertised `context_length`, minus output headroom
+  (20%, floored at 8192).
+
+Auto-sizing never shrinks a window and never overrides one you set deliberately
+via `--ctx`, `KLOO_CONTEXT_TOKENS`, or a per-model profile entry. Cap it with
+`KLOO_CTX_AUTO_CAP` when the server's real limit is below what the catalog claims.
+
+### Prompt caching and map placement
+
+Hosted providers bill a re-sent prompt **prefix** at a large discount when it is
+byte-identical to a previous request, and cache invalidation is a clean cut from
+the first differing token.
+
+The repo map is re-curated every turn (kloo edits files, so it changes constantly).
+With the map inside the system prompt — the front of the request — that cut landed
+above the conversation, so every turn re-paid for history that never changed.
+`mapPosition: tail` puts the volatile map **after** the append-only history, making
+the conversation a stable, cacheable prefix.
+
+Set `mapPosition: system` to restore the old layout if an endpoint rejects a
+non-leading system message.
+
+When a provider reports cache accounting, `--json` includes it:
+
+```json
+{ "prompt_tokens": 48210, "cached_prompt_tokens": 41984, "cache_hit_rate": 0.87 }
+```
+
+The fields are omitted entirely when the provider reports nothing, which is the
+normal case for a local server.
 
 ## Choosing and changing models
 

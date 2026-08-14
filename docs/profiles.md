@@ -18,6 +18,36 @@ Two independent axes:
 > loads the profile. kloo never prints keys in the TUI, logs, `doctor`, or the
 > `KLOO_RESULT_JSON` summary.
 
+## Provider model aliases
+
+Hosted model ids are long and easy to mistype, and a typo used to resolve to
+nothing — no profile entry, no bundled row — and fall through to the 8000-token
+built-in window without a word. Give a provider short names for the ids you use:
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "endpoint": "https://openrouter.ai/api/v1",
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "models": { "dsv4": "deepseek/deepseek-v4-flash" }
+    }
+  },
+  "deepseek/deepseek-v4-flash": { "maxContextTokens": 900000 }
+}
+```
+
+`--model dsv4` now expands to `deepseek/deepseek-v4-flash` **before** the per-model
+profile lookup and the bundled defaults table, so both layers see the real id and
+the tuning above applies.
+
+Aliases are scoped to their provider: the same short name can mean different ids
+under different providers, and with no `--provider` selected no alias applies.
+
+kloo also validates the resolved id against the endpoint's `/models` catalog at
+startup and suggests near matches when it doesn't exist — so a missing alias is a
+warning naming the id you wanted, not a silent 8000-token run.
+
 ## Precedence
 
 ```
