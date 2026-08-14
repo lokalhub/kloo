@@ -197,8 +197,8 @@ func probeToolCall(ctx context.Context, cfg config.Config, client llm.LLMClient,
 }
 
 func probeFileEdit(ctx context.Context, cfg config.Config, client llm.LLMClient, adapter tools.ToolAdapter, reg *tools.Registry, ws tools.Workspace) probeCheck {
-	prompt := "Call edit_file exactly once for probe.txt. Replace the exact line \"before\" with \"after\" using a SEARCH/REPLACE block. Do not answer in prose."
-	call, err := probeOneToolCall(ctx, cfg, client, adapter, reg, prompt)
+	prompt := "Edit probe.txt so the exact line \"before\" reads \"after\", using edit_file with a SEARCH/REPLACE block. You may read the file first. Do not answer in prose."
+	call, err := probeEditCall(ctx, cfg, client, adapter, reg, prompt)
 	if err != nil {
 		return probeFail(classifyProbeError(err), err)
 	}
@@ -251,6 +251,56 @@ func probeOneToolCall(ctx context.Context, cfg config.Config, client llm.LLMClie
 		return tools.Call{}, err
 	}
 	return adapter.Parse(probeAssistantMessage(resp))
+}
+
+// probeMaxReadsBeforeEdit bounds how many read-only calls the edit check will
+// tolerate before the edit itself. Reading a file before changing it is correct
+// behaviour — insisting on a one-shot edit made probe report capable models as
+// unfit — but a model that only ever reads must still fail the check.
+const probeMaxReadsBeforeEdit = 2
+
+// probeEditCall drives the edit check to the first non-read tool call: read_file
+// and list_dir are dispatched and fed back as observations (the same plain-user
+// form the loop uses, so it works in every tool dialect), anything else is
+// returned for the caller to judge. Running out of patience returns the last
+// read, which the caller then reports as the wrong tool.
+func probeEditCall(ctx context.Context, cfg config.Config, client llm.LLMClient, adapter tools.ToolAdapter, reg *tools.Registry, prompt string) (tools.Call, error) {
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "You are kloo's capability probe. Make exactly one tool call per turn."},
+		{Role: llm.RoleUser, Content: prompt},
+	}
+	for reads := 0; ; reads++ {
+		req := adapter.BuildRequest(llm.ChatRequest{
+			Model:       cfg.Model,
+			Temperature: cfg.Temperature,
+			Messages:    msgs,
+		}, reg)
+		resp, err := client.Complete(ctx, req)
+		if err != nil {
+			return tools.Call{}, err
+		}
+		assistant := probeAssistantMessage(resp)
+		call, err := adapter.Parse(assistant)
+		if err != nil {
+			return tools.Call{}, err
+		}
+		if !isProbeReadOnlyTool(call.Name) || reads >= probeMaxReadsBeforeEdit {
+			return call, nil
+		}
+		res, derr := reg.Dispatch(ctx, call)
+		msgs = append(msgs, assistant, probeObservation(call, res, derr))
+	}
+}
+
+func isProbeReadOnlyTool(name string) bool {
+	return name == tools.NameReadFile || name == tools.NameListDir
+}
+
+func probeObservation(call tools.Call, res tools.Result, err error) llm.Message {
+	if err != nil {
+		return llm.Message{Role: llm.RoleUser, Content: "tool " + call.Name + " error: " + err.Error()}
+	}
+	return llm.Message{Role: llm.RoleUser, Content: "tool " + call.Name + " result:\n" + res.Output}
 }
 
 func probeAssistantMessage(resp llm.ChatResponse) llm.Message {

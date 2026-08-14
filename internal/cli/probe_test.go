@@ -239,3 +239,62 @@ func TestProbeContextSilentWhenConfiguredMatchesAdvertised(t *testing.T) {
 		t.Fatalf("no advice expected when the window matches, got %q", got.Message)
 	}
 }
+
+// The regression this fixes: a capable model that reads the file before editing
+// it was reported unfit. The read is dispatched, fed back, and the edit that
+// follows passes.
+func TestProbeFileEditToleratesReadBeforeEdit(t *testing.T) {
+	diff := "<<<<<<< SEARCH\nbefore\n=======\nafter\n>>>>>>> REPLACE\n"
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: probeToolResp(t, "list_dir", map[string]any{"path": "."})},
+		llmtest.Mock{Body: probeToolResp(t, "read_file", map[string]any{"path": "probe.txt"})},
+		llmtest.Mock{Body: probeToolResp(t, "edit_file", map[string]any{"path": "probe.txt", "diff": diff})},
+		llmtest.Mock{Body: probeTextResp(t, `{"ok":true}`)},
+	)
+	res := runProbe(t.Context(), config.Config{
+		Endpoint:   srv.URL + "/v1",
+		Model:      "probe-model",
+		ToolFormat: config.DefaultToolFormat,
+	})
+	if !res.Checks.FileEdit.OK {
+		t.Fatalf("read-then-edit must pass, got %+v", res.Checks.FileEdit)
+	}
+}
+
+// Patience is bounded: a model that only ever reads still fails, and is reported
+// as the wrong tool rather than looping forever.
+func TestProbeFileEditFailsWhenModelOnlyReads(t *testing.T) {
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: probeToolResp(t, "read_file", map[string]any{"path": "probe.txt"})},
+	)
+	res := runProbe(t.Context(), config.Config{
+		Endpoint:   srv.URL + "/v1",
+		Model:      "probe-model",
+		ToolFormat: config.DefaultToolFormat,
+	})
+	if res.Checks.FileEdit.OK {
+		t.Fatal("a model that never edits must fail the file_edit check")
+	}
+	if res.Checks.FileEdit.FailureCode != "tool_call_invalid" {
+		t.Fatalf("failure code = %q, want tool_call_invalid", res.Checks.FileEdit.FailureCode)
+	}
+	// 1 tool_call check + (1 + probeMaxReadsBeforeEdit) edit attempts + 1 json_only
+	// + 1 models listing.
+	if n := len(srv.Requests()); n != 3+probeMaxReadsBeforeEdit+1 {
+		t.Fatalf("requests = %d, want %d — the read loop must be bounded",
+			n, 3+probeMaxReadsBeforeEdit+1)
+	}
+}
+
+func TestIsProbeReadOnlyTool(t *testing.T) {
+	for _, name := range []string{"read_file", "list_dir"} {
+		if !isProbeReadOnlyTool(name) {
+			t.Fatalf("%s should be tolerated before the edit", name)
+		}
+	}
+	for _, name := range []string{"edit_file", "write_file", "run_command"} {
+		if isProbeReadOnlyTool(name) {
+			t.Fatalf("%s must not be treated as a read", name)
+		}
+	}
+}
