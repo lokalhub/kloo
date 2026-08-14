@@ -261,6 +261,53 @@ Human output includes `tool_call`, `file_edit`, and `json_only` PASS/FAIL lines.
 JSON output includes the same checks as booleans with `failure_code` and bounded
 messages on failures. The probe never mutates the user's current workspace.
 
+### Context window report
+
+Probe also reports the per-step window it will use against the one the endpoint
+advertises for the model, under `context`:
+
+```json
+"context": { "configured": 8000, "advertised": 32768, "source": "endpoint",
+             "message": "endpoint advertises 32768 tokens; kloo is using 8000 — raise --ctx to use the full window" }
+```
+
+`source` is one of:
+
+| Source | Meaning |
+|---|---|
+| `endpoint` | the listing carries a context length for this model (`advertised` is set) |
+| `not-advertised` | the model is listed but reports no context length — kloo keeps `--ctx`, which is the silent over-compaction case |
+| `not-listed` | the endpoint does not list this model id |
+| `unavailable` | `/v1/models` could not be read; `message` carries the cause |
+
+The report never fails the probe — an endpoint without `/v1/models` is common and
+fine. It runs after the capability checks so an informational listing call cannot
+delay or disturb them.
+
+## Task size check
+
+`kloo tokens` answers whether a task prompt fits the resolved window, without
+starting a model, MCP, TUI, task loop or verify command:
+
+```sh
+kloo tokens "add a destination select to the queue page"
+kloo tokens --json --ctx 32768 --file prompt.md
+```
+
+```json
+{ "source": "prompt.md", "chars": 14530, "approx_tokens": 3633, "ctx": 8000,
+  "usable_window": 6400, "compact_trigger": 5600, "headroom": 2767,
+  "fits": true, "compacts_at_start": false, "estimate": "approx-4-chars-per-token" }
+```
+
+`usable_window` and `compact_trigger` come from the loop's own budget helpers, so
+`fits` means "fits by the rule the loop applies" rather than a second estimate
+that can disagree with it. `compacts_at_start` is true when the prompt already
+exceeds the compaction trigger — it still fits, but the loop compacts on step one.
+The count is kloo's own ~4-chars-per-token approximation, named in `estimate` so
+it is never mistaken for a real tokenizer count. Pass the task as an argument or
+via `--file`, not both. The command always exits 0; scripts read `fits`.
+
 ## Environment variables
 
 | Var | Effect |

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -64,8 +66,19 @@ func TestProbePassesAndCleansTempWorkspace(t *testing.T) {
 	if !res.TempWorkspaceClean {
 		t.Fatalf("temp workspace should be removed: %+v", res)
 	}
-	if n := len(srv.Requests()); n != 3 {
-		t.Fatalf("requests = %d, want 3", n)
+	// Three chat completions (one per check) plus the /v1/models listing the
+	// context report reads — the listing is last and carries no body.
+	reqs := srv.Requests()
+	if n := len(reqs); n != 4 {
+		t.Fatalf("requests = %d, want 4 (3 checks + models listing)", n)
+	}
+	for i, body := range reqs[:3] {
+		if len(body) == 0 {
+			t.Fatalf("check request %d had an empty body", i)
+		}
+	}
+	if len(reqs[3]) != 0 {
+		t.Fatalf("last request should be the GET models listing, got body %q", reqs[3])
 	}
 	var out bytes.Buffer
 	writeProbeHuman(&out, res)
@@ -131,4 +144,98 @@ func TestProbeClassifiesFailures(t *testing.T) {
 			t.Fatalf("model failure not classified: %+v", res)
 		}
 	})
+}
+
+// fakeModelLister stands in for GET /v1/models so the context report is testable
+// without an endpoint.
+type fakeModelLister struct {
+	models []llm.ModelInfo
+	err    error
+}
+
+func (f fakeModelLister) Models(context.Context) ([]llm.ModelInfo, error) {
+	return f.models, f.err
+}
+
+// The case the report exists for: the endpoint serves a much larger window than
+// kloo is configured to use, which is otherwise invisible until a run
+// over-compacts.
+func TestProbeContextReportsEndpointWindowLargerThanConfigured(t *testing.T) {
+	cfg := config.Config{Model: "dsv4", MaxContextTokens: 8000}
+	lister := fakeModelLister{models: []llm.ModelInfo{
+		{ID: "other", ContextLength: 4096},
+		{ID: "dsv4", ContextLength: 32768},
+	}}
+
+	got := probeContextWindow(context.Background(), cfg, lister)
+
+	if got.Source != "endpoint" {
+		t.Fatalf("source = %q, want endpoint", got.Source)
+	}
+	if got.Advertised != 32768 || got.Configured != 8000 {
+		t.Fatalf("advertised/configured = %d/%d, want 32768/8000", got.Advertised, got.Configured)
+	}
+	if !strings.Contains(got.Message, "raise --ctx") {
+		t.Fatalf("message should tell the user what to do, got %q", got.Message)
+	}
+}
+
+// A listing that carries no context length is the silent-8k-fallback case.
+func TestProbeContextReportsMissingContextLength(t *testing.T) {
+	cfg := config.Config{Model: "local", MaxContextTokens: 8000}
+	lister := fakeModelLister{models: []llm.ModelInfo{{ID: "local"}}}
+
+	got := probeContextWindow(context.Background(), cfg, lister)
+
+	if got.Source != "not-advertised" {
+		t.Fatalf("source = %q, want not-advertised", got.Source)
+	}
+	if got.Advertised != 0 {
+		t.Fatalf("advertised = %d, want 0", got.Advertised)
+	}
+	if got.Message == "" {
+		t.Fatal("a silent fallback needs an explicit message")
+	}
+}
+
+func TestProbeContextReportsModelNotListed(t *testing.T) {
+	cfg := config.Config{Model: "dsv4", MaxContextTokens: 8000}
+	lister := fakeModelLister{models: []llm.ModelInfo{{ID: "something-else", ContextLength: 4096}}}
+
+	got := probeContextWindow(context.Background(), cfg, lister)
+
+	if got.Source != "not-listed" {
+		t.Fatalf("source = %q, want not-listed", got.Source)
+	}
+}
+
+// An endpoint without /v1/models is common and fine — the check reports, never
+// gates.
+func TestProbeContextTolerantWhenListingUnavailable(t *testing.T) {
+	cfg := config.Config{Model: "local", MaxContextTokens: 8000}
+	lister := fakeModelLister{err: errors.New("connection refused")}
+
+	got := probeContextWindow(context.Background(), cfg, lister)
+
+	if got.Source != "unavailable" {
+		t.Fatalf("source = %q, want unavailable", got.Source)
+	}
+	if got.Configured != 8000 {
+		t.Fatalf("configured = %d, want 8000 even when the listing fails", got.Configured)
+	}
+	if !strings.Contains(got.Message, "connection refused") {
+		t.Fatalf("message should carry the cause, got %q", got.Message)
+	}
+}
+
+// Matching the advertised window exactly must not produce a "raise --ctx" nudge.
+func TestProbeContextSilentWhenConfiguredMatchesAdvertised(t *testing.T) {
+	cfg := config.Config{Model: "dsv4", MaxContextTokens: 32768}
+	lister := fakeModelLister{models: []llm.ModelInfo{{ID: "dsv4", ContextLength: 32768}}}
+
+	got := probeContextWindow(context.Background(), cfg, lister)
+
+	if got.Message != "" {
+		t.Fatalf("no advice expected when the window matches, got %q", got.Message)
+	}
 }

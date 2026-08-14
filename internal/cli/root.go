@@ -326,6 +326,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 
 	cmd.AddCommand(newDoctorCmd(&deps))
 	cmd.AddCommand(newProbeCmd(&deps))
+	cmd.AddCommand(newTokensCmd(&deps))
 	cmd.SetVersionTemplate("kloo {{.Version}}\n")
 	return cmd
 }
