@@ -16,11 +16,16 @@ import "github.com/charmbracelet/lipgloss"
 // (package-private) so border tints can pull the same colour as the matching
 // text style (e.g. a danger border and danger text share dangerColor).
 var (
-	accentColor  = lipgloss.Color("212") // pink/magenta brand accent
+	accentColor  = lipgloss.Color("212") // pink/magenta UI accent
 	successColor = lipgloss.Color("2")   // green
 	dangerColor  = lipgloss.Color("1")   // red
 	warningColor = lipgloss.Color("3")   // yellow/amber
 	mutedColor   = lipgloss.Color("244") // dim grey
+	// brandColor is the logo amber (#F2A03D ≈ 256-colour 215). It marks kloo's
+	// own identity — the splash wordmark and the `k>` prompt — and nothing else,
+	// so it stays legible as "this is kloo" rather than becoming a second accent.
+	// Deliberately distinct from accentColor, which the UI uses for tool cards.
+	brandColor = lipgloss.Color("215")
 )
 
 // Semantic styles — the named roles callers reference instead of raw colours.
@@ -32,6 +37,7 @@ var (
 	danger  = lipgloss.NewStyle().Foreground(dangerColor)
 	warning = lipgloss.NewStyle().Foreground(warningColor)
 	muted   = lipgloss.NewStyle().Foreground(mutedColor)
+	brand   = lipgloss.NewStyle().Foreground(brandColor)
 )
 
 // toolAccent maps a tool name to its card accent + glyph (Phase 02 consumes

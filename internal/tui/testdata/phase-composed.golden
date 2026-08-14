@@ -18,7 +18,7 @@
 
 
 
-
+k> kloo — autonomous coding for small local models
 
 ▸ you: rename the three tabs
 
@@ -55,6 +55,6 @@
 
 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│> type a task…                                                                          │
+│k> type a task…                                                                         │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

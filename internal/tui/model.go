@@ -159,7 +159,9 @@ type Config struct {
 func New(cfg Config) Model {
 	in := textinput.New()
 	in.Placeholder = "type a task…"
-	in.Prompt = "> "
+	// The composer prompt IS the logo (brand.go): you type at the mark.
+	in.Prompt = composerPrompt
+	in.PromptStyle = brand
 	in.Focus()
 
 	modelName := cfg.Model
@@ -221,6 +223,13 @@ func New(cfg Config) Model {
 		m.getenv = func(string) string { return "" }
 	}
 	m.reloadProfile = cfg.ReloadProfile
+	// Splash on a FRESH session only: on a resume the replayed conversation is the
+	// more useful thing to open with, and a masthead above it just pushes it away.
+	if len(cfg.History) == 0 {
+		m = m.appendItem(infoItem{
+			text: renderBrandBanner(cfg.Version, localeSupportsUTF8(m.getenv)),
+		})
+	}
 	// Replay the prior conversation (resume), then the banner as the boundary line
 	// between "earlier" and the live prompt.
 	for _, d := range cfg.History {
