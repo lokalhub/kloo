@@ -72,7 +72,17 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	// advertised context_length. Same call as the headless path — the check used to
 	// exist only there and behind an env var, which is why an unrecognised id could
 	// run interactively at the 8000-token default without a word.
-	if err := applyModelInfo(ctx, &cfg, client, cfg.StrictModel, writerLogf(os.Stderr)); err != nil {
+	// Validate the model against the endpoint catalog and size the window from its
+	// advertised context_length. Same call as the headless path.
+	//
+	// The notice goes into the TUI BANNER, not stderr: Bubble Tea takes the screen
+	// immediately after this and anything written to stderr is wiped before anyone
+	// reads it. A warning nobody can see is the silent failure this check exists to
+	// prevent, so it has to land in the transcript.
+	var modelNotices []string
+	if err := applyModelInfo(ctx, &cfg, client, cfg.StrictModel, func(format string, args ...any) {
+		modelNotices = append(modelNotices, strings.TrimSpace(fmt.Sprintf(format, args...)))
+	}); err != nil {
 		return err
 	}
 
@@ -139,7 +149,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		MaxSteps:      cfg.MaxSteps,
 		MaxTokens:     cfg.MaxTokens,
 		Runner:        runner,
-		Banner:        banner,
+		Banner:        joinNotices(banner, modelNotices),
 		ModelList:     client,
 		Provider:      cfg.Provider,
 		Endpoint:      cfg.Endpoint,

@@ -35,6 +35,11 @@ type modelInfo struct {
 	Window int
 	// Suggestions are catalog ids that look like what the user meant.
 	Suggestions []string
+	// CatalogSize is how many models the endpoint listed. A server listing exactly
+	// one is the single-model llama.cpp case, which ignores the model field
+	// entirely; more than one means the id is a real selector and a wrong one is a
+	// genuine error.
+	CatalogSize int
 }
 
 // autoSizeMinReserve is the floor on output headroom held back from an advertised
@@ -49,7 +54,7 @@ func lookupModelInfo(ctx context.Context, cfg config.Config, lister modelLister)
 	if err != nil || len(models) == 0 {
 		return modelInfo{}
 	}
-	info := modelInfo{CatalogOK: true}
+	info := modelInfo{CatalogOK: true, CatalogSize: len(models)}
 	for _, m := range models {
 		if m.ID == cfg.Model {
 			info.Known, info.Window = true, m.ContextLength
@@ -136,11 +141,16 @@ func commonPrefixLen(a, b string) int {
 // when the window was not set deliberately, sizes it from the model's advertised
 // context_length.
 //
-// An unknown model WARNS rather than fails: kloo's default target is a local
-// single-model llama.cpp server, which ignores the model field entirely and may
-// advertise an unrelated id — hard-failing there would break the out-of-the-box
-// path. Pass strict to turn the warning into an error, which is the right setting
-// for an unattended hosted run where a silent fallback costs real money.
+// An unknown model FAILS THE RUN whenever the id demonstrably matters. Warning
+// and continuing was worse than useless: the request went out anyway and came
+// back a 400 seconds later, with a provider error instead of kloo's suggestions.
+//
+// The id matters when the endpoint authenticates (every hosted provider rejects
+// an unknown id) or when it lists more than one model (a real selector — a typo
+// against llama-swap picks nothing). It does NOT matter for a single-model
+// llama.cpp server, which serves one entry and ignores the model field; that is
+// kloo's out-of-the-box path and must keep working, so it warns instead. Pass
+// strict to fail there too.
 func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister, strict bool, logf func(string, ...any)) error {
 	info := lookupModelInfo(ctx, *cfg, lister)
 	if !info.CatalogOK {
@@ -152,11 +162,11 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 		if len(info.Suggestions) > 0 {
 			msg += fmt.Sprintf(" — did you mean %s?", strings.Join(info.Suggestions, ", "))
 		}
-		if strict {
+		if strict || modelIDMatters(cfg, info) {
 			return errors.New(msg)
 		}
 		if logf != nil {
-			logf("kloo: %s (continuing; the window falls back to %d)", msg, cfg.MaxContextTokens)
+			logf("kloo: %s (continuing; this endpoint appears to ignore the model id)", msg)
 		}
 		return nil
 	}
@@ -174,6 +184,12 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 	}
 	cfg.MaxContextTokens = sized
 	return nil
+}
+
+// modelIDMatters reports whether a wrong id will actually break the run, so an
+// unknown one can fail immediately instead of after a round trip.
+func modelIDMatters(cfg *config.Config, info modelInfo) bool {
+	return cfg.APIKey != "" || info.CatalogSize > 1
 }
 
 // autoSizedWindow reserves output headroom from an advertised window and applies
