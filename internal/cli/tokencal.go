@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/tokens"
 )
@@ -21,4 +23,20 @@ func saveTokenCalibration(workspace, model string, rep *agent.Report) {
 		return
 	}
 	_ = tokens.NewStore(workspace).Save(model, rep.TokenRatio)
+}
+
+// joinNotices merges startup notices into the TUI's opening banner, so a warning
+// raised before Bubble Tea starts is still visible once it does. Empty parts are
+// dropped, so a clean launch renders exactly as before.
+func joinNotices(banner string, notices []string) string {
+	parts := make([]string, 0, len(notices)+1)
+	if strings.TrimSpace(banner) != "" {
+		parts = append(parts, banner)
+	}
+	for _, n := range notices {
+		if strings.TrimSpace(n) != "" {
+			parts = append(parts, n)
+		}
+	}
+	return strings.Join(parts, "\n")
 }

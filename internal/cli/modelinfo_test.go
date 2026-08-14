@@ -80,31 +80,59 @@ func TestAutoSizeNeverShrinks(t *testing.T) {
 	}
 }
 
-// TestUnknownModelWarnsWithSuggestions: the dsv4 case. It must be loud, name the
-// near match, and — by default — not stop the run.
-func TestUnknownModelWarnsWithSuggestions(t *testing.T) {
-	cfg := config.Config{Model: "dsv4", MaxContextTokens: 8000}
+// TestUnknownModelFailsFastWhenTheIDMatters is the dsv4 case. Warning and
+// continuing was worse than useless: the request went out anyway and came back a
+// 400 seconds later, with the provider's error instead of kloo's suggestions.
+func TestUnknownModelFailsFastWhenTheIDMatters(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.Config
+	}{
+		{"authenticated endpoint", config.Config{Model: "dsv4", APIKey: "sk-test", MaxContextTokens: 8000}},
+		{"multi-model catalog", config.Config{Model: "dsv4", MaxContextTokens: 8000}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, false, nil)
+			if err == nil {
+				t.Fatal("an unknown id should fail immediately, not after a round trip")
+			}
+			if !strings.Contains(err.Error(), "dsv4") {
+				t.Errorf("error should name the model: %v", err)
+			}
+			if !strings.Contains(err.Error(), "deepseek/deepseek-v4-flash") {
+				t.Errorf("error should suggest the near match: %v", err)
+			}
+		})
+	}
+}
+
+// TestUnknownModelWarnsOnSingleModelEndpoint: a single-model llama.cpp server
+// serves one catalog entry and ignores the model field, so kloo's out-of-the-box
+// `--model local` must keep working.
+func TestUnknownModelWarnsOnSingleModelEndpoint(t *testing.T) {
+	single := []llm.ModelInfo{{ID: "qwen3-coder", ContextLength: 32768}}
+	cfg := config.Config{Model: "local", MaxContextTokens: 8000}
 	logf, lines := collectLog()
-	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, false, logf); err != nil {
-		t.Fatalf("non-strict mode must not fail the run: %v", err)
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: single}, false, logf); err != nil {
+		t.Fatalf("a single-model endpoint must not fail the run: %v", err)
 	}
 	if len(*lines) == 0 {
-		t.Fatal("an unknown model must warn — silence is the original bug")
+		t.Fatal("it should still warn — silence is the original bug")
 	}
 	if !strings.Contains((*lines)[0], "not in the endpoint's catalog") {
 		t.Errorf("warning does not name the problem: %q", (*lines)[0])
 	}
 }
 
-// TestUnknownModelStrictFails: unattended hosted runs can opt into hard failure.
-func TestUnknownModelStrictFails(t *testing.T) {
-	cfg := config.Config{Model: "dsv4", MaxContextTokens: 8000}
-	err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalog()}, true, nil)
-	if err == nil {
-		t.Fatal("strict mode should fail on an unknown model")
-	}
-	if !strings.Contains(err.Error(), "dsv4") {
-		t.Errorf("error should name the model: %v", err)
+// TestStrictFailsEvenOnSingleModelEndpoint: strict is the override for the one
+// case the default spares.
+func TestStrictFailsEvenOnSingleModelEndpoint(t *testing.T) {
+	single := []llm.ModelInfo{{ID: "qwen3-coder", ContextLength: 32768}}
+	cfg := config.Config{Model: "local", MaxContextTokens: 8000}
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: single}, true, nil); err == nil {
+		t.Fatal("strict should fail even where the default warns")
 	}
 }
 

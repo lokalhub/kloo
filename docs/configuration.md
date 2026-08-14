@@ -45,7 +45,7 @@ churn detection as the primary guard).
 | `--ctx` | `8000` | The model's context window (`maxContextTokens`). Usually unnecessary now — kloo sizes it from the endpoint catalog — but setting it explicitly pins the value and disables auto-sizing. Match your server's `-c`/`num_ctx` for a local server that serves no catalog. |
 | `--curator-budget` | `32768` | Cap on the repo map kloo assembles per step, separate from `--ctx`. |
 | `--map-position` | `tail` | `tail` keeps the prompt prefix cacheable; `system` restores the legacy in-system-prompt layout. |
-| `--strict-model` | off | Fail at startup when the endpoint doesn't list `--model`, instead of warning. |
+| `--strict-model` | off | Also fail on a single-model endpoint, the one case the default only warns about. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
 | `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. Requires a task argument. |
@@ -462,10 +462,15 @@ Rule of thumb: raise `maxContextTokens` to match your model; leave
 
 kloo fetches the endpoint's `/models` catalog once at startup and uses it to:
 
-- **validate the model id** — an id the endpoint doesn't list warns (with
-  suggestions) instead of silently falling back to the 8000-token default. Pass
-  `--strict-model` to make it a hard error, which is what you want for unattended
-  hosted runs. A local server that serves no catalog is unaffected.
+- **validate the model id** — an id the endpoint doesn't list **fails the run
+  immediately**, with near-match suggestions, whenever the id demonstrably
+  matters: the endpoint authenticates (every hosted provider rejects an unknown
+  id) or lists more than one model (a real selector). Warning and continuing was
+  worse than useless — the request went out anyway and came back a 400 seconds
+  later, with the provider's error instead of kloo's suggestions.
+  A single-model llama.cpp server serves one entry and ignores the model field, so
+  there it warns and continues; `--strict-model` fails there too. An endpoint
+  serving no catalog is unaffected.
 - **size the window** from the advertised `context_length`, minus output headroom
   (20%, floored at 8192).
 
