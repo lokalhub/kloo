@@ -37,8 +37,6 @@ const (
 // the server's n_ctx.
 func usableWindow(window int) int { return int(float64(window) * usableWindowFrac) }
 
-// mapBudgetTokens is the repo-map token budget when working memory is engaged —
-// a fraction of the window, so the map can no longer consume the whole context.
 // UsableWindow is the prompt-token budget for a context window of `window`
 // tokens — the same budget the loop assembles against. Exported so `kloo tokens`
 // can answer "does this task fit" by the rule the loop actually applies, rather
@@ -49,6 +47,8 @@ func UsableWindow(window int) int { return usableWindow(window) }
 // compaction. A task already above it compacts on step one.
 func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 
+// mapBudgetTokens is the repo-map token budget when working memory is engaged —
+// a fraction of the window, so the map can no longer consume the whole context.
 func mapBudgetTokens(window int) int { return int(float64(window) * mapBudgetFrac) }
 
 // hotBudgetTokens caps the pin-hot set + recent tail (verbatim hot state).
