@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="kloo">
+  <!-- Fixed-colour mark on an ink tile. Use this anywhere the background is out of
+       our control (browser tabs, OS docks, GitHub avatars) — currentColor can't be
+       relied on there, and a transparent mark disappears against dark chrome. -->
+  <rect width="64" height="64" rx="14" fill="#14151A"/>
+  <g transform="translate(5,3.2) scale(0.9)">
+    <rect x="13" y="8" width="8" height="48" rx="4" fill="#FAF9F7"/>
+    <path d="M29 20 L43 32 L29 44" fill="none" stroke="#F2A03D" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

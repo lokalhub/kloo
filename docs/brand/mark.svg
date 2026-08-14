@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" role="img" aria-label="kloo">
+  <!-- kloo mark — a stem and a caret: the letter k and the shell prompt, one glyph.
+       The stem uses currentColor so the mark inherits its surroundings; the caret is
+       always brand amber. For a fixed-colour version (favicons, foreign chrome) use
+       favicon.svg. -->
+  <rect x="13" y="8" width="8" height="48" rx="4" fill="currentColor"/>
+  <path d="M29 20 L43 32 L29 44" stroke="#F2A03D" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

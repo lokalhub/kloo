@@ -4,7 +4,7 @@
 
 
 
-
+k> kloo — autonomous coding for small local models
 
 ▸ you: add per-file scope enforcement without weakening the workspace jail
 
@@ -31,6 +31,6 @@ Latest: Scope checks are wired before writes; fixing read-only precedence test.
 ⠋ Cooking…  running go test ./internal/tools · 12s · 14.4k tok · esc to interrupt
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│> type a task…                                                                                                        │
+│k> type a task…                                                                                                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

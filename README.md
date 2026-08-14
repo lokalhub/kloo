@@ -1,4 +1,7 @@
-# kloo
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/wordmark-on-dark.png">
+  <img src="docs/brand/wordmark-on-light.png" alt="kloo" width="196">
+</picture>
 
 Autonomous coding CLI for small **local** LLMs. kloo drives any OpenAI-compatible
 endpoint (llama.cpp, Ollama, vLLM, OpenAI, OpenRouter…) to edit and verify code on

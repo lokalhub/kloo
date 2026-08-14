@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 157 64" width="157" height="64" fill="none" role="img" aria-label="kloo">
+  <!-- kloo wordmark — geometric letterforms drawn as outlines (no <text>, no font
+       dependency). The k's arm carries the brand amber, tying the word back to the mark.
+
+       Optical note: here the arm JOINS the stem and sits on the x-height, so the word
+       reads as "kloo". In the standalone mark it is detached and centred, so the glyph
+       reads as both a k and a shell prompt. That difference is deliberate — a wordmark
+       has to spell, a mark has to signify. -->
+
+  <!-- k -->
+  <rect x="13" y="8" width="8" height="48" rx="4" fill="currentColor"/>
+  <path d="M36 29 L22 41 L36 53" stroke="#F2A03D" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- l -->
+  <rect x="52" y="8" width="8" height="48" rx="4" fill="currentColor"/>
+  <!-- o o -->
+  <circle cx="87" cy="41" r="11" stroke="currentColor" stroke-width="8"/>
+  <circle cx="129" cy="41" r="11" stroke="currentColor" stroke-width="8"/>
+</svg>

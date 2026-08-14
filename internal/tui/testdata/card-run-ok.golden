@@ -11,7 +11,7 @@
 
 
 
-
+k> kloo — autonomous coding for small local models
 
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │ ⌘ run_command  npm run build    exit 0 ✓                                             │
@@ -19,6 +19,6 @@
 
 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│> type a task…                                                                          │
+│k> type a task…                                                                         │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each
