@@ -7,7 +7,7 @@ the traversal output is the first thing it compacts away.**
 
 This is a deterministic, in-process layer (`internal/agent/memory.go`) — no extra
 LLM call, so it's byte-for-byte testable and adds no latency. It's on by default;
-`maxContextTokens` (default **8000**) is the hard ceiling it packs under.
+`maxContextTokens` (auto-sized from the endpoint catalog; **8000** when nothing reports one) is the hard ceiling it packs under.
 
 ## Each turn, the prompt is re-assembled — not accumulated
 
@@ -75,24 +75,41 @@ flowchart TD
 
 ## The window budget (8k example)
 
+Two numbers govern this, and they are deliberately separate: **`maxContextTokens`
+is what the model can hold**, and **`curatorBudgetTokens` is what kloo chooses to
+assemble** (the repo map). Tying the map to the window meant a large-context model
+authorised an enormous map on every turn — see
+[configuration.md](configuration.md) → *Window vs curator budget*.
+
 ```
-┌─ maxContextTokens = 8000 ───────────────────────────────────────────────┐
+┌─ maxContextTokens = 8000  (what the model can hold) ─────────────────────┐
 │                                                                          │
-│  system base + repo map        ≤ 35%  (~2.8k)  ← map capped so it can't  │
-│                                                  "eat the window"        │
-│  task (the goal)               pinned · never dropped                    │
-│  verify result + current file  pinned · file re-read fresh each turn  ┐  │
-│  recent tail (newest turns)    verbatim                               ┘  │
-│      └─ pins + tail together   ≤ 35%  (~2.8k)                            │
-│  running summary (cold middle) fills the remaining slack                 │
+│  usable prompt budget          6400   ← 80%; the rest is reserved for    │
+│                                         output + tool schemas + slack    │
+│  ┌───────────────────────────────────────────────────────────────────┐   │
+│  │ system base + repo map      ≤ 2240  ← 35% of the CURATOR budget,  │   │
+│  │                                       not of the window            │   │
+│  │ task (the goal)             pinned · never dropped                 │   │
+│  │ verify result + current file pinned · file re-read fresh each turn ┐│   │
+│  │ recent tail (newest turns)  verbatim                              ┘│   │
+│  │     └─ pins + tail together ≤ 2240  ← 35% of the prompt budget     │   │
+│  │ running summary (cold middle) fills the remaining slack            │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
-│  compaction triggers at 70% projected (~5.6k) ─────────────────────────  │
+│  compaction triggers at 4480  (70% of the prompt budget) ──────────────  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Fractions (fixed in `internal/agent/memory.go`): repo map `0.35`, pins+tail
-`0.35`, compaction trigger `0.70`. The running summary takes the slack up to the
-`1.0 ×` hard ceiling.
+Fractions (fixed in `internal/agent/memory.go`): usable window `0.80`, repo map
+`0.35`, pins+tail `0.35`, compaction trigger `0.70`. The running summary takes the
+slack up to the hard ceiling.
+
+Note that every fraction applies to the **usable** budget (6400 here), not the raw
+window — so on an 8k model the map cap is 2240, not 2800. On a large-context model
+the map cap stops tracking the window entirely: it is 35% of the curator budget
+(default 32768, clamped to the usable window), while pins+tail keep scaling with
+the window, because conversation you already have is cheap to keep and a re-built
+map is not.
 
 **What the repo map walks** (`internal/repomap/walk.go`): your source — never the
 noise. It hard-skips dependency trees and build/cache output by name
