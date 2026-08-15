@@ -144,7 +144,10 @@ different profile with `/profile <path>`.
 | `--endpoint` | `http://127.0.0.1:8080/v1` | OpenAI-compatible base URL (or supplied by `--provider`). |
 | `--mode` | `auto` | Run mode (`auto`\|`manual`). |
 | `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
-| `--ctx` | `8000` | Per-step context window. The TUI reads it from `/v1/models` when the endpoint reports a context length; set this to override, or for endpoints that don't report one (e.g. match your llama.cpp `-c`) — otherwise kloo over-compacts to 8k on a larger server. |
+| `--ctx` | _(auto)_ | The model's context window. kloo sizes it from the endpoint's `/v1/models` catalog at startup (both TUI and headless); set this to pin a value and disable auto-sizing, or for a server that reports no context length (e.g. match your llama.cpp `-c`). |
+| `--curator-budget` | `32768` | Cap on the repo map kloo **assembles** per step — separate from `--ctx`, which is what the model can **hold**. |
+| `--map-position` | `tail` | Where the repo map sits in the prompt: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
+| `--strict-model` | `false` | Fail at startup when the endpoint doesn't list `--model`. By default an unknown id fails anyway when the id demonstrably matters (hosted/multi-model endpoints) and only warns on a single-model server. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
 | `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. |

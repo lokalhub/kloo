@@ -44,7 +44,7 @@ churn detection as the primary guard).
 | `--max-steps` | `500` | Max autonomous steps. Also seeded by `--effort` (fast 50 · medium 500 · heavy 1000); an explicit `--max-steps` overrides the tier. |
 | `--ctx` | `8000` | The model's context window (`maxContextTokens`). Usually unnecessary now — kloo sizes it from the endpoint catalog — but setting it explicitly pins the value and disables auto-sizing. Match your server's `-c`/`num_ctx` for a local server that serves no catalog. |
 | `--curator-budget` | `32768` | Cap on the repo map kloo assembles per step, separate from `--ctx`. |
-| `--map-position` | `tail` | `tail` keeps the prompt prefix cacheable; `system` restores the legacy in-system-prompt layout. |
+| `--map-position` | `tail` | Where the repo map sits: `tail` (after the conversation) or `system` (legacy, inside the system prompt). Affects prompt-cache reuse in proportion to map size — see below. |
 | `--strict-model` | off | Also fail on a single-model endpoint, the one case the default only warns about. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
@@ -339,7 +339,6 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
 | `KLOO_CURATOR_BUDGET` | Cap on the per-step assembled repo map (same as `--curator-budget`). |
 | `KLOO_CTX_AUTO_CAP` | Ceiling on automatic window sizing, for a server whose real limit is below what its catalog advertises. |
-| `KLOO_CTX_AUTO_CAP` | Optional ceiling (tokens) for `KLOO_CTX_AUTO` on memory/cost-limited endpoints. Unset ⇒ the model's full advertised window. |
 | `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
 | `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
 | `KLOO_EDIT_RECOVER` | `1` to replace the bare "no such file" error when `edit_file` targets a **missing** file with a targeted corrective (use `write_file` to create it), so the model recovers in one turn instead of thrashing. |
@@ -352,7 +351,7 @@ converges to a passing solution. They are independent and composable — turn on
 
 | Switch | Turn on when… |
 |---|---|
-| `KLOO_CTX_AUTO` (+ `KLOO_CTX_AUTO_CAP`) | the model advertises a much larger window than the default and the task needs the repo + contract + notes + error traces in memory at once. Weak *small*-context models don't benefit. |
+| `KLOO_CTX_AUTO_CAP` | automatic window sizing is on by default (there is no longer a `KLOO_CTX_AUTO` switch to enable); set this only to CAP it, when the server's real limit is below what its catalog advertises. |
 | `KLOO_RECALL_SCALE` | you inject a large reference/cheat-sheet via the [MCP recall hook](memory.md) and the default 4 KB truncates it. |
 | `KLOO_TOOL_REPAIR` | the model emits **XML** tool calls and occasionally drops a closing tag on large writes (symptom: runs die with `failure_code: tool_call_invalid`). |
 | `KLOO_EDIT_RECOVER` | the model reaches for `edit_file` to *create* files and stalls on "no such file". |
@@ -408,7 +407,7 @@ profile if you want a hard kloo-side cost cap.
 |---|---|---|
 | `maxContextTokens` | `8000` | The **model's context window** — what the endpoint can accept. Drives the prompt budget and the compaction trigger. Auto-sized from the endpoint catalog when you don't set it (see below). |
 | `curatorBudgetTokens` | `32768` | Cap on what kloo **assembles** per step (the repo map), clamped to the usable window. Separate from the window on purpose — see below. |
-| `mapPosition` | `tail` | Where the curated repo map goes in the prompt: `tail` (after the conversation, keeping the prefix cacheable) or `system` (legacy). |
+| `mapPosition` | `tail` | Where the curated repo map goes: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
 | `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
 | `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
@@ -527,19 +526,35 @@ Hosted providers bill a re-sent prompt **prefix** at a large discount when it is
 byte-identical to a previous request, and cache invalidation is a clean cut from
 the first differing token.
 
-The repo map is re-curated every turn (kloo edits files, so it changes constantly).
-With the map inside the system prompt — the front of the request — that cut landed
-above the conversation, so every turn re-paid for history that never changed.
-`mapPosition: tail` puts the volatile map **after** the append-only history, making
-the conversation a stable, cacheable prefix.
+The repo map is re-curated every turn, so it is the volatile part of the prompt.
+`mapPosition: tail` puts it **after** the append-only conversation rather than in
+the system prompt, so that a change to the map cuts only the map instead of
+cutting above the whole history.
+
+**How much this is worth depends on how large the map is relative to the prompt,
+and it has not been measured on a large repo.** A four-file project produces a
+~322-character map — about 0.2% of a 40k-token prompt — and a measured A/B on one
+showed no difference between the two layouts:
+
+```
+  9 steps -> 0.34   (tail)      matched pair:
+ 11 steps -> 0.41   (system)      16 steps tail   = 0.76
+ 16 steps -> 0.76   (tail)        17 steps system = 0.74
+ 17 steps -> 0.74   (system)
+```
+
+Hit rate tracked **conversation length**, not placement. On a large codebase the
+map runs to thousands of tokens and the argument should carry more weight, but
+treat that as untested rather than established.
 
 Set `mapPosition: system` to restore the old layout if an endpoint rejects a
 non-leading system message.
 
-When a provider reports cache accounting, `--json` includes it:
+When a provider reports cache accounting, `--json` includes it (figures below are
+from a real 16-step run against `deepseek/deepseek-v4-flash`):
 
 ```json
-{ "prompt_tokens": 48210, "cached_prompt_tokens": 41984, "cache_hit_rate": 0.87 }
+{ "prompt_tokens": 59665, "cached_prompt_tokens": 45312, "cache_hit_rate": 0.76 }
 ```
 
 The fields are omitted entirely when the provider reports nothing, which is the
