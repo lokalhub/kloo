@@ -63,6 +63,18 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		if len(calls) == 0 {
 			calls = append(calls, extractInvokeToolCalls(msg.Content)...)
 		}
+		// And the <invoke_name>/<parameters> dialect (deepseek-v4-flash via
+		// OpenRouter), which the three above all miss.
+		if len(calls) == 0 {
+			calls = append(calls, extractInvokeNameToolCalls(msg.Content)...)
+		}
+		// Nothing parsed, but the reply is clearly ATTEMPTING a call: fail loudly
+		// so the loop's corrective re-prompt fires. Falling through here returned
+		// zero calls, which the loop reads as "the model answered" — a run that
+		// stops at step one reporting success having done nothing.
+		if len(calls) == 0 && looksLikeToolCall(msg.Content) {
+			return nil, fmt.Errorf("native: reply contains an unparseable tool call: %w", ErrMalformedToolCall)
+		}
 	}
 	// Strip any leaked tool-call markup from string args. The <function=…> dialect
 	// frequently batches calls or forgets to close a <parameter=…>, so the server's
