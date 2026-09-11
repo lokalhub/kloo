@@ -911,11 +911,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if smartChurn() && correctableEdit {
 			editSig = ""
 		}
+		// A run_command that only INSPECTS (go test, git diff, ls) is exploration,
+		// not action: re-running the suite after an edit is the most natural move an
+		// agent makes, and counting it as a no-progress round killed real runs. The
+		// classifier is conservative — anything unrecognised stays acting.
+		readOnlyTurn := isReadOnlyTool(call.Name) ||
+			(call.Name == tools.NameRunCommand && tools.IsReadOnlyCommand(str(call.Args["command"])))
 		l.Churn.Observe(Turn{
 			VerifyOutput: verifyOut,
 			Edit:         editSig,
-			Acted:        call.Name == tools.NameRunCommand && derr == nil,
-			ReadOnly:     isReadOnlyTool(call.Name),
+			Acted:        call.Name == tools.NameRunCommand && derr == nil && !readOnlyTurn,
+			ReadOnly:     readOnlyTurn,
 		})
 
 		// ── DECIDE ──────────────────────────────────────────────────────────
@@ -993,7 +999,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// spins to the step ceiling. Count consecutive READ-ONLY turns (any edit / write
 		// / run_command resets it): nudge once to act-or-ask, then stop the run
 		// (ReasonAnswered) so the human can step in.
-		if isReadOnlyTool(call.Name) {
+		if readOnlyTurn {
 			exploreStreak++
 		} else {
 			exploreStreak, exploreNudged = 0, false
