@@ -1098,7 +1098,23 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	var tailMsgs []llm.Message
 	if mapSection != "" {
 		if l.mapAtTail() {
-			tailMsgs = []llm.Message{{Role: llm.RoleSystem, Content: mapSection}}
+			// USER, not system. Several open-weight chat templates hard-raise on a
+			// system message that is not the leading one, and the tail map is
+			// exactly that — a trailing system message:
+			//
+			//	[system, user]        -> 200 OK
+			//	[user, system, user]  -> 500 Jinja: "System message must be at the
+			//	                         beginning."
+			//
+			// Qwen3.8-Flash scored 0/22 on a 220-case benchmark for this reason, at a
+			// 10s median: no case ever reached the model. grok scored 22/22 on the
+			// identical seat. Anthropic rejects the same shape.
+			//
+			// The map is reference material, so the user role carries it correctly,
+			// and keeping it at the TAIL preserves the stable cacheable prefix that
+			// motivated the placement in the first place. Folding it back into the
+			// lead system prompt would fix the ordering and lose the caching.
+			tailMsgs = []llm.Message{{Role: llm.RoleUser, Content: mapSection}}
 		} else {
 			sysContent = l.System + "\n\n" + mapSection
 		}
