@@ -473,6 +473,22 @@ kloo fetches the endpoint's `/models` catalog once at startup and uses it to:
 - **size the window** from the advertised `context_length`, minus output headroom
   (20%, floored at 8192).
 
+Not every endpoint reports `context_length` — self-hosted gateways often return
+only `{id, object, created, owned_by}`. There is then nothing to auto-size from,
+so the window falls back to the 8000-token built-in default and kloo **says so**:
+
+```
+kloo: glm-5.3-flash — this endpoint does not report context lengths for any model,
+so the window fell back to the 8000-token default. If the model's real window is
+larger, set --ctx (or maxContextTokens in your profile); otherwise kloo will
+over-compact and lose context it did not need to.
+```
+
+That silence used to be expensive and invisible: on one measured run the same
+task against the same model took **9 compactions** at the 8000 default and **0**
+once the window was set by hand. The warning is suppressed when you set the
+window yourself, or when it already resolved above the default.
+
 Auto-sizing never shrinks a window and never overrides one you set deliberately
 via `--ctx`, `KLOO_CONTEXT_TOKENS`, or a per-model profile entry. Cap it with
 `KLOO_CTX_AUTO_CAP` when the server's real limit is below what the catalog claims.

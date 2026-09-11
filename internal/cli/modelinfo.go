@@ -35,6 +35,12 @@ type modelInfo struct {
 	Window int
 	// Suggestions are catalog ids that look like what the user meant.
 	Suggestions []string
+	// CatalogAdvertisesWindows is true when at least one model in the catalog
+	// reports a context_length. It separates "this endpoint never reports
+	// windows" (nothing to auto-size from, anywhere) from "this one model is
+	// missing it" (a gap in an otherwise complete catalog) — different causes,
+	// different fixes, so the warning says which.
+	CatalogAdvertisesWindows bool
 	// CatalogSize is how many models the endpoint listed. A server listing exactly
 	// one is the single-model llama.cpp case, which ignores the model field
 	// entirely; more than one means the id is a real selector and a wrong one is a
@@ -55,6 +61,11 @@ func lookupModelInfo(ctx context.Context, cfg config.Config, lister modelLister)
 		return modelInfo{}
 	}
 	info := modelInfo{CatalogOK: true, CatalogSize: len(models)}
+	for _, m := range models {
+		if m.ContextLength > 0 {
+			info.CatalogAdvertisesWindows = true
+		}
+	}
 	for _, m := range models {
 		if m.ID == cfg.Model {
 			info.Known, info.Window = true, m.ContextLength
@@ -172,7 +183,11 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 		return nil
 	}
 
-	if info.Window <= 0 || cfg.MaxContextTokensExplicit {
+	if info.Window <= 0 {
+		warnNoAdvertisedWindow(cfg, info, logf)
+		return nil
+	}
+	if cfg.MaxContextTokensExplicit {
 		return nil
 	}
 	sized := autoSizedWindow(info.Window)
@@ -185,6 +200,34 @@ func applyModelInfo(ctx context.Context, cfg *config.Config, lister modelLister,
 	}
 	cfg.MaxContextTokens = sized
 	return nil
+}
+
+// warnNoAdvertisedWindow speaks up when the model is in the catalog but reports
+// no context_length, so auto-sizing cannot help and kloo is left on its
+// conservative built-in default.
+//
+// Silence here is expensive and invisible. Measured on glm-5.3-flash behind an
+// endpoint that advertises no windows: the same task on the same model ran with
+// NINE compactions at the 8000-token default and ZERO once the window was set by
+// hand. Nothing in the output said the window had been guessed.
+//
+// Stays quiet when the window was set deliberately (nothing to warn about) or
+// when it is already comfortably above the default (someone has handled it).
+func warnNoAdvertisedWindow(cfg *config.Config, info modelInfo, logf func(string, ...any)) {
+	if logf == nil || cfg.MaxContextTokensExplicit {
+		return
+	}
+	if cfg.MaxContextTokens > config.DefaultMaxContextTokens {
+		return
+	}
+	cause := "this endpoint does not report context lengths for any model"
+	if info.CatalogAdvertisesWindows {
+		cause = "this model reports no context_length (others on this endpoint do)"
+	}
+	logf("kloo: %s — %s, so the window fell back to the %d-token default. "+
+		"If the model's real window is larger, set --ctx (or maxContextTokens in your profile); "+
+		"otherwise kloo will over-compact and lose context it did not need to.",
+		cfg.Model, cause, cfg.MaxContextTokens)
 }
 
 // aliasHint suggests the profile edit that turns a short name the user clearly
