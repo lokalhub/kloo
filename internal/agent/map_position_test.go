@@ -57,8 +57,13 @@ func TestMapPositionTailKeepsSystemStable(t *testing.T) {
 	if !strings.Contains(last.Content, repoMapHeader) {
 		t.Errorf("last message is not the repo map: %q", truncate(last.Content))
 	}
-	if last.Role != llm.RoleSystem {
-		t.Errorf("trailing map role = %q, want system", last.Role)
+	// USER, not system: a trailing SYSTEM message is rejected outright by chat
+	// templates that require system-first (Qwen3.8-Flash scored 0/22 on it), and
+	// the map is reference material that the user role carries correctly. The
+	// point of tail placement is the stable cacheable prefix, which the role does
+	// not affect. See TestNoSystemMessageAfterTheFirst.
+	if last.Role != llm.RoleUser {
+		t.Errorf("trailing map role = %q, want user", last.Role)
 	}
 }
 
