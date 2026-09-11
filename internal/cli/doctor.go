@@ -72,6 +72,7 @@ type resolvedConfigDiagnostic struct {
 	Temperature            float64           `json:"temperature"`
 	NoThink                bool              `json:"no_think"`
 	ToolFormat             string            `json:"tool_format"`
+	PromptCache            promptCacheDiag   `json:"prompt_cache"`
 	Verify                 commandDiagnostic `json:"verify"`
 	Lint                   commandDiagnostic `json:"lint"`
 	MCP                    mcpDiagnostic     `json:"mcp"`
@@ -82,6 +83,14 @@ type resolvedConfigDiagnostic struct {
 	PatchOnly              bool              `json:"patch_only"`
 	Scope                  scopeDiagnostic   `json:"scope"`
 	StopOn                 stopOnDiagnostic  `json:"stop_on"`
+}
+
+// promptCacheDiag reports the configured mode AND what it resolved to. The
+// resolved half is the point: it tells a user why they are getting no cache hits
+// without making them read the allowlist in source.
+type promptCacheDiag struct {
+	Mode     string `json:"mode"`
+	Resolved bool   `json:"resolved"`
 }
 
 type scopeDiagnostic struct {
@@ -144,6 +153,14 @@ func effectiveRepeatRounds(configured, fallback int) int {
 		return configured
 	}
 	return fallback
+}
+
+// onOff renders a resolved boolean as the on/off word the doctor line uses.
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverride string, lint lintOpts) resolvedConfigDiagnostic {
@@ -214,6 +231,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		Temperature:         cfg.Temperature,
 		NoThink:             cfg.NoThink,
 		ToolFormat:          cfg.ToolFormat,
+		PromptCache:         promptCacheDiag{Mode: cfg.PromptCache, Resolved: cfg.PromptCacheEnabled()},
 		Verify:              verify,
 		Lint:                lintDiag,
 		MCP:                 mcpDiagnostic{Disabled: cfg.MCPDisabled, ConfiguredServers: len(cfg.MCPServers), EnabledServers: enabled, MaxExposedTools: cfg.MCPMaxExposedTools},
@@ -286,6 +304,7 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
 	fmt.Fprintf(out, "tool_format: %s\n", diag.ToolFormat)
+	fmt.Fprintf(out, "prompt_cache: %s (resolved=%s)\n", noneDash(diag.PromptCache.Mode), onOff(diag.PromptCache.Resolved))
 	fmt.Fprintf(out, "verify: %s (source=%s)\n", noneDash(diag.Verify.Command), diag.Verify.Source)
 	fmt.Fprintf(out, "lint: %s (source=%s, advisory=true)\n", noneDash(diag.Lint.Command), diag.Lint.Source)
 	fmt.Fprintf(out, "mcp: enabled=%t servers=%d enabled_names=%q max_exposed_tools=%d\n",

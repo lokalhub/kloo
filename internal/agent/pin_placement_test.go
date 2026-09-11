@@ -366,3 +366,98 @@ func harnessTranscript(t *testing.T) ([]llm.Message, []string) {
 	}
 	return rep.Transcript, paths
 }
+
+// TestBreakpointOnStablePrefixTail: with caching on, the marked message is the
+// last one before the per-turn pins, and the trailing repo map is never marked.
+// A breakpoint on the map would cache nothing (it changes every turn) and burn the
+// slot; a breakpoint below the pins would cache the volatile content itself.
+func TestBreakpointOnStablePrefixTail(t *testing.T) {
+	base := []llm.Message{
+		{Role: llm.RoleSystem, Content: "you are kloo"},
+		userMsg("the task"),
+		assistantMsg("TAIL-assistant"),
+		userMsg("TAIL-observation"), // ← the last stable-prefix message
+		userMsg("Last verify: go test ./...\npassed=false exit=1"),
+		userMsg("Current file under edit (re-read fresh from disk): a.go\nFRESH"),
+		userMsg(repoMapHeader + "a.go\n  function Add:3\n"),
+	}
+	const pins = 2
+
+	cases := []struct {
+		name    string
+		enabled bool
+		pins    int
+		msgs    []llm.Message
+		want    int // index expected to carry the marker (-1 ⇒ none)
+	}{
+		{name: "marks the last tail message, above the pins", enabled: true, pins: pins, msgs: base, want: 3},
+		{name: "off marks nothing", enabled: false, pins: pins, msgs: base, want: -1},
+		{name: "no map still skips the pins", enabled: true, pins: pins, msgs: base[:len(base)-1], want: 3},
+		{name: "no pins marks the message above the map", enabled: true, pins: 0, msgs: base, want: 5},
+		{name: "nothing above the system message ⇒ no marker", enabled: true, pins: 1, msgs: base[:2], want: -1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := append([]llm.Message(nil), tc.msgs...)
+			markCacheBreakpoint(msgs, tc.enabled, tc.pins)
+
+			marked := -1
+			for i, m := range msgs {
+				if m.CacheControl == nil {
+					continue
+				}
+				if marked >= 0 {
+					t.Fatalf("more than one breakpoint: %d and %d", marked, i)
+				}
+				marked = i
+			}
+			if marked != tc.want {
+				t.Fatalf("breakpoint at index %d, want %d", marked, tc.want)
+			}
+			for i, m := range msgs {
+				if isMapMessage(m) && m.CacheControl != nil {
+					t.Errorf("the repo map message[%d] must never be marked", i)
+				}
+			}
+		})
+	}
+}
+
+// TestBreakpointSurvivesTheRealAssembly: end-to-end through the loop's own
+// assembly — the marker lands above the pins the working memory actually emitted,
+// not at an index guessed by the test.
+func TestBreakpointSurvivesTheRealAssembly(t *testing.T) {
+	wm := NewWorkingMemory()
+	hist, err := wm.Assemble(MemoryInput{
+		Task:       "the task",
+		Convo:      []llm.Message{userMsg("the task"), assistantMsg("looked"), userMsg("tool read_file result:\nX")},
+		LastVerify: VerifyResult{Command: "go test ./...", ExitCode: 1, Passed: false, Stdout: "FAIL"},
+		EditPath:   "a.go", FreshFile: "FRESH\n", WindowTokens: 1_000_000,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	pins := wm.Stats().PinnedMessages
+	if pins != 2 {
+		t.Fatalf("expected both pins in this assembly, got %d", pins)
+	}
+
+	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: "you are kloo"}}, hist...)
+	msgs = append(msgs, userMsg(repoMapHeader+"a.go\n"))
+	markCacheBreakpoint(msgs, true, pins)
+
+	want := len(msgs) - 1 /*map*/ - pins - 1
+	if msgs[want].CacheControl == nil {
+		t.Fatalf("breakpoint missing at index %d (the last stable-prefix message)", want)
+	}
+	for i, m := range msgs {
+		if i != want && m.CacheControl != nil {
+			t.Errorf("unexpected breakpoint at index %d", i)
+		}
+	}
+	if strings.HasPrefix(msgs[want].Content, "Last verify: ") ||
+		strings.HasPrefix(msgs[want].Content, "Current file under edit") {
+		t.Errorf("the breakpoint landed ON a pin: %.60q", msgs[want].Content)
+	}
+}

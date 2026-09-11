@@ -79,7 +79,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
-		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout)),
+		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
 		Adapter:              adapter,
 		Registry:             reg,
 		Verifier:             buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
@@ -98,6 +98,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		StallRounds:          cfg.ChurnRounds,
 		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
+		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
 		Temperature:          cfg.Temperature,

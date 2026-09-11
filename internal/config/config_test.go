@@ -51,6 +51,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -70,6 +71,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -90,6 +92,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -110,6 +113,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -130,6 +134,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -150,6 +155,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -169,6 +175,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -190,6 +197,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -210,6 +218,7 @@ func TestResolve(t *testing.T) {
 				MaxContextTokens:    DefaultMaxContextTokens,
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
+				PromptCache:         DefaultPromptCache,
 				MaxTokens:           DefaultMaxTokens,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
@@ -898,4 +907,66 @@ func TestResolveRepeatRounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPromptCacheResolution pins the mode → enabled decision and the precedence
+// chain. "auto" must stay OFF for anything the allowlist does not know: an unknown
+// endpoint must never be sent a field it might reject.
+func TestPromptCacheResolution(t *testing.T) {
+	t.Run("mode against the allowlist", func(t *testing.T) {
+		cases := []struct {
+			name                     string
+			mode, provider, endpoint string
+			model                    string
+			want                     bool
+		}{
+			{name: "auto + allowlisted provider ⇒ on", mode: PromptCacheAuto, provider: "openrouter", endpoint: "https://openrouter.ai/api/v1", model: "some/model", want: true},
+			{name: "auto + allowlisted host ⇒ on", mode: PromptCacheAuto, endpoint: "https://api.anthropic.com/v1", model: "some/model", want: true},
+			{name: "auto + allowlisted model ⇒ on", mode: PromptCacheAuto, endpoint: "https://gateway.example/v1", model: "anthropic/claude-sonnet-4", want: true},
+			{name: "auto + unknown endpoint ⇒ off", mode: PromptCacheAuto, endpoint: "http://127.0.0.1:8080/v1", model: "qwen2.5-coder", want: false},
+			{name: "auto + empty everything ⇒ off", mode: PromptCacheAuto, want: false},
+			{name: "off + allowlisted ⇒ off", mode: PromptCacheOff, provider: "openrouter", endpoint: "https://openrouter.ai/api/v1", want: false},
+			{name: "on + unknown ⇒ on", mode: PromptCacheOn, endpoint: "http://127.0.0.1:8080/v1", model: "qwen2.5-coder", want: true},
+			{name: "unset mode behaves as auto ⇒ off for an unknown endpoint", mode: "", endpoint: "http://127.0.0.1:8080/v1", want: false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := PromptCacheEnabled(tc.mode, tc.provider, tc.endpoint, tc.model); got != tc.want {
+					t.Errorf("PromptCacheEnabled(%q, %q, %q, %q) = %t, want %t",
+						tc.mode, tc.provider, tc.endpoint, tc.model, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("precedence: flag > env > profile > default", func(t *testing.T) {
+		profile := writeProfile(t, `{"m": {"promptCache": "on"}}`)
+		cases := []struct {
+			name  string
+			flags Flags
+			env   map[string]string
+			want  string
+		}{
+			{name: "default", flags: Flags{}, want: DefaultPromptCache},
+			{name: "profile", flags: Flags{Model: strp("m")}, want: PromptCacheOn},
+			{name: "env beats profile", flags: Flags{Model: strp("m")}, env: map[string]string{EnvPromptCache: "off"}, want: PromptCacheOff},
+			{
+				name:  "flag beats env",
+				flags: Flags{Model: strp("m"), PromptCache: strp(PromptCacheAuto)},
+				env:   map[string]string{EnvPromptCache: "off"},
+				want:  PromptCacheAuto,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg, err := Resolve(tc.flags, envFunc(tc.env), profile)
+				if err != nil {
+					t.Fatalf("Resolve: %v", err)
+				}
+				if cfg.PromptCache != tc.want {
+					t.Errorf("PromptCache = %q, want %q", cfg.PromptCache, tc.want)
+				}
+			})
+		}
+	})
 }

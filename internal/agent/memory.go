@@ -168,11 +168,12 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	if window <= 0 || projectedFull <= triggerTokens(window) {
 		out := assemble(task, nil, pinMsgs, allTail)
 		w.stats = MemoryStats{
-			PromptTokens: in.SystemTokens + tokensOfWith(out, in.estimate),
-			WindowTokens: window,
-			Compactions:  w.compactions,
-			MapBudget:    in.MapBudget,
-			HotBudget:    hotBudget,
+			PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
+			WindowTokens:   window,
+			Compactions:    w.compactions,
+			MapBudget:      in.MapBudget,
+			HotBudget:      hotBudget,
+			PinnedMessages: len(pinMsgs),
 		}
 		return out, nil
 	}
@@ -257,16 +258,18 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 		}
 	}
 
-	out := assemble(task, entries, rebuildPins(), tail)
+	finalPins := rebuildPins()
+	out := assemble(task, entries, finalPins, tail)
 	w.stats = MemoryStats{
-		PromptTokens:  in.SystemTokens + tokensOfWith(out, in.estimate),
-		WindowTokens:  window,
-		Compactions:   w.compactions,
-		SummaryTokens: summaryTokens(entries, in.estimate),
-		DroppedTurns:  len(cold),
-		TrimmedTail:   tailTrimmed,
-		MapBudget:     in.MapBudget,
-		HotBudget:     hotBudget,
+		PinnedMessages: len(finalPins),
+		PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
+		WindowTokens:   window,
+		Compactions:    w.compactions,
+		SummaryTokens:  summaryTokens(entries, in.estimate),
+		DroppedTurns:   len(cold),
+		TrimmedTail:    tailTrimmed,
+		MapBudget:      in.MapBudget,
+		HotBudget:      hotBudget,
 	}
 	return out, nil
 }
