@@ -45,6 +45,8 @@ churn detection as the primary guard).
 | `--ctx` | `8000` | The model's context window (`maxContextTokens`). Usually unnecessary now — kloo sizes it from the endpoint catalog — but setting it explicitly pins the value and disables auto-sizing. Match your server's `-c`/`num_ctx` for a local server that serves no catalog. |
 | `--curator-budget` | `32768` | Cap on the repo map kloo assembles per step, separate from `--ctx`. |
 | `--map-position` | `tail` | Where the repo map sits: `tail` (after the conversation) or `system` (legacy, inside the system prompt). Affects prompt-cache reuse in proportion to map size — see below. |
+| `--repeat-nudge-rounds` | `0` (⇒ `3`) | Identical consecutive tool calls (name + args) before the repetition rail injects a corrective nudge. `0` ⇒ the built-in default `3`. For a repeated **read-only** call the nudge re-arms and fires at every multiple of this number; for a repeated **mutating** call it is one-shot. |
+| `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** tool calls (`edit_file`, `write_file`, `run_command`) before the repetition rail halts the run as churn. `0` ⇒ the built-in default `6`. Read-only calls are exempt — see [the repetition rail](#the-repetition-rail-and-repeated-reads). |
 | `--strict-model` | off | Also fail on a single-model endpoint, the one case the default only warns about. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
@@ -338,6 +340,8 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `XDG_CONFIG_HOME` | If set, the profile file lives at `$XDG_CONFIG_HOME/kloo/profiles.json`. |
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
 | `KLOO_CURATOR_BUDGET` | Cap on the per-step assembled repo map (same as `--curator-budget`). |
+| `KLOO_REPEAT_NUDGE_ROUNDS` | Repetition-rail nudge threshold (same as `--repeat-nudge-rounds`). Only a value **greater than 0** is accepted; `0`, a negative number, or a non-integer is silently ignored and the built-in default `3` applies. |
+| `KLOO_REPEAT_ABORT_ROUNDS` | Repetition-rail abort threshold for **mutating** calls (same as `--repeat-abort-rounds`). Same `> 0` rule as above; otherwise the built-in default `6` applies. |
 | `KLOO_CTX_AUTO_CAP` | Ceiling on automatic window sizing, for a server whose real limit is below what its catalog advertises. |
 | `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
 | `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
@@ -411,9 +415,53 @@ profile if you want a hard kloo-side cost cap.
 | `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
 | `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
+| `repeatNudgeRounds` | `0` (⇒ `3`) | Identical consecutive tool calls before the repetition rail nudges. Unset (`0`) means **use the agent package default** `3` — there is no config-level default, which is why `kloo doctor` resolves it before printing. |
+| `repeatAbortRounds` | `0` (⇒ `6`) | Identical consecutive **mutating** tool calls before the repetition rail halts the run as churn. Unset (`0`) ⇒ the agent package default `6`. Read-only calls never reach this threshold. |
 
 `maxTokens`, `maxWallClockSeconds`, and `churnRounds` are seeded by the effort tier;
-`maxContextTokens` is a flat default. All are overridable per-model in the profile.
+`maxContextTokens` is a flat default. `repeatNudgeRounds`/`repeatAbortRounds` are **not**
+tier-seeded — they default to `0`, which means "use the built-in". All are overridable
+per-model in the profile.
+
+### The repetition rail and repeated reads
+
+The repetition rail watches for the model firing the **identical** tool call (name + arguments)
+over and over — the classic small-model flail of re-reading one empty file forever. A *different*
+call resets the streak, so a progressing run never trips it.
+
+What happens at the thresholds depends on whether the repeated call **mutates**:
+
+| Repeated call | At `repeatNudgeRounds` (3) | At `repeatAbortRounds` (6) |
+|---|---|---|
+| **Mutating** — `edit_file`, `write_file`, `run_command` | one corrective nudge, then silence | run halts, `failure_code:"repetition_halt"`, churn kind `repeated-call` |
+| **Read-only** — `read_file`, `list_dir`, `read_dir`, `search`, `command_output` | a corrective nudge, re-armed: it fires again at every multiple (3, 6, 9 …) | **nothing — the run continues** |
+
+**This changed after v0.16.7.** A repeated read used to end the run as churn with
+`failure_detail.class: "repeated_read_file"`. A 220-case benchmark found that abort was ending
+runs that were recovering: 11 of the 16 tasks a comparison agent solved and kloo did not died on
+it while re-reading their way toward a fix. So the abort is **downgraded for read-only calls
+only** — not removed. Consequences worth knowing:
+
+- `failure_detail.class: "repeated_read_file"` is no longer emitted by any run.
+- `tool_counters.repeated_read_file` still counts every identical repeated `read_file`. It is now
+  purely a **diagnostic** signal — useful for spotting a model that reads in circles — and never
+  terminates a run.
+- `rail_fires["repeated-call"]` can exceed 1, because the read-only nudge re-arms.
+- `run_command` stays **mutating** even when the command only inspects (`go test`, `git diff`).
+  Re-running a shell command still executes a process, so it keeps the abort.
+
+A read-only spin that never recovers is still bounded — just later, and after more chances to
+break out. Three backstops still end it: the **exploration rail** (16 consecutive read-only
+turns ⇒ a calm `answered` stop), the **stall backstop**, and the step/token/wall-clock
+[budgets](#budgets-and-context).
+
+Raise `repeatAbortRounds` for a model that legitimately retries a mutating call, or lower
+`repeatNudgeRounds` to correct a spinning model sooner. `kloo doctor` prints the values a run
+will actually use:
+
+```text
+repeat_rounds: nudge=3 abort=6
+```
 
 ### `maxContextTokens` and working memory
 
@@ -685,8 +733,8 @@ The JSON shape is:
 | `error` | Optional report/model/validation error. Upstream model errors include endpoint/model and a bounded upstream body tail, not API keys. |
 | `failure_code` | Stable automation category for non-success outcomes. Omitted on verified success. |
 | `failure_detail` | Sparse redacted detail for the category: source, reason, class, tool, HTTP status, and bounded message when available. |
-| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file`, `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, `tool_errors`, `off_scope_edits` (scope-denied writes + rejected scoped `run_command`), and `read_only_edits` (the read-only subset). Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
-| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
+| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file` (**diagnostic only** — it counts identical repeated `read_file` calls and never terminates a run; see [the repetition rail](#the-repetition-rail-and-repeated-reads)), `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, `tool_errors`, `off_scope_edits` (scope-denied writes + rejected scoped `run_command`), and `read_only_edits` (the read-only subset). Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
+| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Most rails are one-shot per streak, but `repeated-call` fires **once per `repeatNudgeRounds` rounds** while a read-only call keeps repeating (it re-arms rather than latching), so a count above 1 is expected on a read spin — see [the repetition rail](#the-repetition-rail-and-repeated-reads). Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
 | `prechecks`, `postchecks` | Optional arrays of the [verifier-hook](#verifier-hooks---precheck----postcheck) gates attempted for the final verify — each `{command, passed, exit_code}`. Omitted when no hooks are configured. |
 | `files_changed` | Changed-file accounting for the run: `{count, paths}` with workspace-relative paths (git working tree vs HEAD, plus untracked, sorted). Present in `--json`/`--benchmark`; `count:0` with an empty list for a clean tree or a non-git workspace. |
 | `off_scope_edits` | Count of model writes (and scoped `run_command` calls) the scope policy denied this run — from the counter, not transcript scraping. Incremented even when no file changed. Mirrors `tool_counters.off_scope_edits`. |
@@ -707,7 +755,7 @@ The JSON shape is:
 | `off_scope_edit` | A model write (or a scoped `run_command`) was denied by the [file scope](#file-scope---allow----deny----read-only) policy — `failure_detail.class` is `deny`/`outside_allow`/`read_only`/`run_command_disabled_for_scope`. Emitted for a `--stop-on off-scope-edit`/`read-only-edit` hard stop and for a non-stop run that ended calmly after a denial. |
 | `precheck_failed` | A [precheck](#verifier-hooks---precheck----postcheck) hook failed, so verify never ran (`failure_detail.source:"precheck"`). |
 | `postcheck_failed` | Verify passed but a [postcheck](#verifier-hooks---precheck----postcheck) hook failed, so the run is still non-success (`failure_detail.source:"postcheck"`). |
-| `repetition_halt` | Repetition/exploration/no-progress halt, incl. a `--stop-on repeated-verify=N` stop (`failure_detail.class:"repeated_verify_failure"`). |
+| `repetition_halt` | Repetition/exploration/no-progress halt, incl. a `--stop-on repeated-verify=N` stop (`failure_detail.class:"repeated_verify_failure"`). The repetition rail reaches this only for a repeated **mutating** call; a repeated read-only call is nudged instead, so `failure_detail.class:"repeated_read_file"` is **no longer emitted** (it existed up to v0.16.7) — a never-recovering read spin ends via the exploration rail or a budget instead. |
 | `context_too_small` | Configured context window cannot fit the irreducible prompt. |
 | `json_invalid` | `--json-only` rejected the final answer. |
 | `budget_exceeded` | Step/token/wall-clock budget stopped the run. |
@@ -901,6 +949,8 @@ Common sections, all optional:
     "maxTokens": 200000,
     "maxWallClockSeconds": 600,
     "churnRounds": 3,
+    "repeatNudgeRounds": 3,        // 0 / omitted ⇒ built-in default 3
+    "repeatAbortRounds": 12,       // mutating calls only; 0 / omitted ⇒ built-in default 6
     "llmMaxRetries": 2,
     "llmRetryCodes": [408, 429, 500, 502, 503, 504],
     "llmRetryBaseDelay": "2s",
@@ -946,7 +996,8 @@ hooks around task runs:
 ```
 
 Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
-`maxTokens`, `maxWallClockSeconds`, `churnRounds`, `llmMaxRetries`,
+`maxTokens`, `maxWallClockSeconds`, `churnRounds`, `repeatNudgeRounds`,
+`repeatAbortRounds`, `llmMaxRetries`,
 `llmRetryCodes`, `llmRetryBaseDelay`, `llmRetryMaxDelay`,
 `llmColdLoadTimeout`, `llmStreamIdleTimeout`, `noThink`.
 Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,

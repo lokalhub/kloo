@@ -832,3 +832,70 @@ func TestResolveContextTokensOverride(t *testing.T) {
 		t.Errorf("unset = %d, want default %d", got.MaxContextTokens, DefaultMaxContextTokens)
 	}
 }
+
+// TestResolveRepeatRounds pins the repetition-rail knobs to the project's
+// precedence chain (flags > env > profile > default). The default is a literal 0
+// on purpose: config has no default of its own, so an unset knob leaves the
+// agent package's 0-⇒-default seam to supply 3/6.
+func TestResolveRepeatRounds(t *testing.T) {
+	cases := []struct {
+		name        string
+		flags       Flags
+		env         map[string]string
+		profileBody string
+		wantNudge   int
+		wantAbort   int
+	}{
+		{
+			name:      "unset leaves both zero (agent package supplies the default)",
+			wantNudge: 0, wantAbort: 0,
+		},
+		{
+			name:        "profile only",
+			profileBody: `{"glimmer": {"repeatNudgeRounds": 4, "repeatAbortRounds": 12}}`,
+			flags:       Flags{Model: strp("glimmer")},
+			wantNudge:   4, wantAbort: 12,
+		},
+		{
+			name:        "env beats profile",
+			profileBody: `{"glimmer": {"repeatNudgeRounds": 4, "repeatAbortRounds": 12}}`,
+			flags:       Flags{Model: strp("glimmer")},
+			env:         map[string]string{EnvRepeatNudgeRounds: "5", EnvRepeatAbortRounds: "20"},
+			wantNudge:   5, wantAbort: 20,
+		},
+		{
+			name:        "flag beats env",
+			profileBody: `{"glimmer": {"repeatNudgeRounds": 4, "repeatAbortRounds": 12}}`,
+			flags:       Flags{Model: strp("glimmer"), RepeatNudgeRounds: ip(7), RepeatAbortRounds: ip(9)},
+			env:         map[string]string{EnvRepeatNudgeRounds: "5", EnvRepeatAbortRounds: "20"},
+			wantNudge:   7, wantAbort: 9,
+		},
+		{
+			// The cobra layer only populates Flags when fs.Changed(...) is true, so an
+			// unchanged flag arrives as nil — never as a 0 that would clobber the env
+			// value with "use the default".
+			name:      "a zero flag value is not set unless fs.Changed",
+			env:       map[string]string{EnvRepeatNudgeRounds: "5", EnvRepeatAbortRounds: "20"},
+			wantNudge: 5, wantAbort: 20,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "missing.json")
+			if tc.profileBody != "" {
+				path = writeProfile(t, tc.profileBody)
+			}
+			cfg, err := Resolve(tc.flags, envFunc(tc.env), path)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if cfg.RepeatNudgeRounds != tc.wantNudge {
+				t.Errorf("RepeatNudgeRounds = %d, want %d", cfg.RepeatNudgeRounds, tc.wantNudge)
+			}
+			if cfg.RepeatAbortRounds != tc.wantAbort {
+				t.Errorf("RepeatAbortRounds = %d, want %d", cfg.RepeatAbortRounds, tc.wantAbort)
+			}
+		})
+	}
+}

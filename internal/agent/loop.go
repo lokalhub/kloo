@@ -432,9 +432,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 
 		// Repetition rail state: the previous turn's tool-call signature, how many
 		// times it has repeated identically in a row, and whether the one-shot nudge
-		// for this streak has been emitted. Catches a model locked onto a single
-		// identical call (e.g. re-reading one empty file) — a read-only spin the
-		// edit/verify churn rails cannot see.
+		// for this streak has been emitted (the latch governs the MUTATING path only —
+		// a downgraded read-only repeat re-nudges instead of latching). Catches a model
+		// locked onto a single identical call (e.g. re-reading one empty file) — a
+		// read-only spin the edit/verify churn rails cannot see.
 		repeatKeyLast string
 		repeatStreak  int
 		repeatNudged  bool
@@ -953,11 +954,27 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// emitting the same prose each turn — see [[kloo-edit-silent-noop]] /
 		// [[kloo-churn-flail-gap]]). The repeated-failure/edit rails never see it: a
 		// read_file/list_dir leaves no edit signature and no verify change. So we
-		// track the call's normalised (name + args) signature; the FIRST time it has
-		// repeated repeatNudgeRounds times we inject one corrective observation (a
-		// chance to recover without losing the run), and if it keeps repeating to
-		// repeatAbortRounds we halt as churn. A distinct call resets the streak, so a
-		// progressing run — which never fires the same call twice running — is immune.
+		// track the call's normalised (name + args) signature. A distinct call resets
+		// the streak, so a progressing run — which never fires the same call twice
+		// running — is immune.
+		//
+		// What happens at the thresholds depends on whether the repeated call MUTATES:
+		//
+		//   - A MUTATING call (edit_file/write_file/run_command) is nudged once at
+		//     repeatNudgeRounds and ENDS the run as churn at repeatAbortRounds. Firing
+		//     the same mutation forever is not exploration, and there is nothing to
+		//     recover toward.
+		//   - A READ-ONLY call is nudged AGAIN at every multiple of repeatNudgeRounds
+		//     and never ends the run here. Measurement (KLOO-VS-GROK.md, 2026-09-11)
+		//     found 11 of the 16 solvable-but-lost runs died on this abort while
+		//     re-reading their way toward a fix: it was cutting off recovery, not
+		//     stopping a stuck model. A read spin that never recovers is still
+		//     terminated — by the explore rail just below (consecutive read-only turns
+		//     to DefaultExploreAbortRounds), the stall backstop and the budget — only
+		//     later, and after more chances to break out.
+		//
+		// counters.RepeatedReadFile counts every repeat either way: it is the
+		// benchmark's diagnostic signal, and it no longer zeroes the run.
 		if key := repeatKey(call); key != "" {
 			if key == repeatKeyLast {
 				repeatStreak++
@@ -967,19 +984,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			} else {
 				repeatKeyLast, repeatStreak, repeatNudged = key, 1, false
 			}
+			nudgeEvery := l.repeatNudgeRounds()
 			switch {
+			case isReadOnlyTool(call.Name):
+				// Downgraded: no abort arm at all. Re-armed rather than one-shot, so the
+				// model gets a fresh push every nudgeEvery rounds instead of silence all
+				// the way to the explore ceiling.
+				if repeatStreak >= nudgeEvery && repeatStreak%nudgeEvery == 0 {
+					recordRail(RailRepeatedCall)
+					convo = append(convo, l.repeatCorrective(call, repeatStreak))
+				}
 			case repeatStreak >= l.repeatAbortRounds():
-				ev := &ChurnEvidence{
+				return finish(ReasonChurn, nil, nil, &ChurnEvidence{
 					Kind:     ChurnRepeatedCall,
 					Artifact: repeatArtifact(call, repeatStreak),
-				}
-				if call.Name == tools.NameReadFile {
-					ev.Class = "repeated_read_file"
-					ev.Tool = tools.NameReadFile
-					ev.Artifact = l.repeatedReadArtifact(call, repeatStreak)
-				}
-				return finish(ReasonChurn, nil, nil, ev)
-			case repeatStreak >= l.repeatNudgeRounds() && !repeatNudged:
+				})
+			case repeatStreak >= nudgeEvery && !repeatNudged:
 				repeatNudged = true
 				recordRail(RailRepeatedCall)
 				convo = append(convo, l.repeatCorrective(call, repeatStreak))
@@ -1443,26 +1463,6 @@ func repeatArtifact(call tools.Call, n int) string {
 		return fmt.Sprintf("%s %s (×%d)", call.Name, firstLine(target), n)
 	}
 	return fmt.Sprintf("%s (×%d)", call.Name, n)
-}
-
-func (l *Loop) repeatedReadArtifact(call tools.Call, n int) string {
-	path := str(call.Args["path"])
-	state := "state unknown"
-	if path != "" && l.Root != "" {
-		if content, ok := l.currentFileContents(path); ok {
-			if strings.TrimSpace(content) == "" {
-				state = "empty file"
-			} else {
-				state = fmt.Sprintf("unchanged content, %d bytes", len(content))
-			}
-		} else {
-			state = "missing or unreadable file"
-		}
-	}
-	if path == "" {
-		return fmt.Sprintf("read_file repeated %d times with unchanged arguments (%s)", n, state)
-	}
-	return fmt.Sprintf("read_file %s repeated %d times with unchanged arguments (%s)", path, n, state)
 }
 
 // repeatCorrective is the one-shot nudge injected the first time a call repeats

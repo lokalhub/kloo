@@ -96,6 +96,8 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		System:               systemPrompt,
 		StopOn:               agentStopPolicy(cfg.StopOn),
 		StallRounds:          cfg.ChurnRounds,
+		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
+		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
 		Temperature:          cfg.Temperature,
