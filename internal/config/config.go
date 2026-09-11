@@ -70,7 +70,20 @@ const (
 	DefaultLLMStreamIdle      = 5 * time.Minute
 )
 
-var DefaultLLMRetryableStatusCodes = []int{408, 429, 500, 502, 503, 504}
+// DefaultLLMRetryableStatusCodes are the HTTP statuses worth retrying.
+//
+// 520-524 are Cloudflare's origin-error family, and they matter because a great
+// many hosted and self-hosted endpoints sit behind Cloudflare: 520 unknown
+// error, 521 origin down, 522 connection timed out, 523 origin unreachable,
+// 524 origin timeout. 524 in particular is what a COLD-STARTING model server
+// produces — exactly the moment a retry is most likely to succeed.
+//
+// Omitting them meant a single transient blip ended an otherwise healthy run
+// with `model_error`, mid-task, with no recovery attempt.
+var DefaultLLMRetryableStatusCodes = []int{
+	408, 429, 500, 502, 503, 504,
+	520, 521, 522, 523, 524, // Cloudflare origin errors
+}
 
 // Env var names (KLOO_-prefixed, SCREAMING_SNAKE). Extendable.
 const (

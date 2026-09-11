@@ -286,3 +286,101 @@ func TestNoAliasHintWithoutSuggestions(t *testing.T) {
 		t.Errorf("no suggestion to alias to — the hint should be suppressed:\n%v", err)
 	}
 }
+
+// catalogNoWindows mirrors an endpoint (lokalai) whose /v1/models reports only
+// {id, object, created, owned_by} — no context_length anywhere.
+func catalogNoWindows() []llm.ModelInfo {
+	return []llm.ModelInfo{{ID: "glm-5.3-flash"}, {ID: "muse-glimmer-30b"}}
+}
+
+// TestWarnsWhenCatalogAdvertisesNoWindow: the silent case that cost a real run
+// nine compactions. kloo must say the window was guessed.
+func TestWarnsWhenCatalogAdvertisesNoWindow(t *testing.T) {
+	cfg := config.Config{Model: "glm-5.3-flash", MaxContextTokens: config.DefaultMaxContextTokens}
+	logf, lines := collectLog()
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalogNoWindows()}, false, logf); err != nil {
+		t.Fatalf("a missing context_length must not fail the run: %v", err)
+	}
+	if len(*lines) == 0 {
+		t.Fatal("no warning — this is the silent default the fix exists to expose")
+	}
+	got := (*lines)[0]
+	for _, want := range []string{"glm-5.3-flash", "does not report context lengths", "--ctx"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning missing %q: %s", want, got)
+		}
+	}
+}
+
+// TestWarnDistinguishesCatalogGap: when OTHER models advertise a window and this
+// one doesn't, that is a different problem and the message says so.
+func TestWarnDistinguishesCatalogGap(t *testing.T) {
+	models := []llm.ModelInfo{{ID: "has-window", ContextLength: 131072}, {ID: "no-window"}}
+	cfg := config.Config{Model: "no-window", MaxContextTokens: config.DefaultMaxContextTokens}
+	logf, lines := collectLog()
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: models}, false, logf); err != nil {
+		t.Fatal(err)
+	}
+	if len(*lines) == 0 || !strings.Contains((*lines)[0], "others on this endpoint do") {
+		t.Errorf("expected the catalog-gap wording, got %v", *lines)
+	}
+}
+
+// TestNoWarnWhenWindowSetDeliberately: someone who passed --ctx has already
+// handled it; warning them is noise.
+func TestNoWarnWhenWindowSetDeliberately(t *testing.T) {
+	cfg := config.Config{
+		Model:                    "glm-5.3-flash",
+		MaxContextTokens:         131072,
+		MaxContextTokensExplicit: true,
+	}
+	logf, lines := collectLog()
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalogNoWindows()}, false, logf); err != nil {
+		t.Fatal(err)
+	}
+	if len(*lines) != 0 {
+		t.Errorf("explicit window should warn nothing, got %v", *lines)
+	}
+}
+
+// TestNoWarnWhenWindowAlreadyAboveDefault: a bundled/profile row resolved
+// something sane — nothing to complain about.
+func TestNoWarnWhenWindowAlreadyAboveDefault(t *testing.T) {
+	cfg := config.Config{Model: "glm-5.3-flash", MaxContextTokens: 32768}
+	logf, lines := collectLog()
+	if err := applyModelInfo(context.Background(), &cfg, fakeLister{models: catalogNoWindows()}, false, logf); err != nil {
+		t.Fatal(err)
+	}
+	if len(*lines) != 0 {
+		t.Errorf("a window above the default should warn nothing, got %v", *lines)
+	}
+}
+
+// TestCloudflareOriginErrorsAreRetryable: 520-524 end a run instantly when they
+// are not in the retry set, and they are exactly what a cold-starting model
+// server behind Cloudflare emits.
+func TestCloudflareOriginErrorsAreRetryable(t *testing.T) {
+	for _, code := range []int{520, 521, 522, 523, 524} {
+		var found bool
+		for _, c := range config.DefaultLLMRetryableStatusCodes {
+			if c == code {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("HTTP %d (Cloudflare origin error) is not retryable by default", code)
+		}
+	}
+	// And the originals must survive.
+	for _, code := range []int{408, 429, 500, 502, 503, 504} {
+		var found bool
+		for _, c := range config.DefaultLLMRetryableStatusCodes {
+			if c == code {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("HTTP %d dropped from the retryable set", code)
+		}
+	}
+}
