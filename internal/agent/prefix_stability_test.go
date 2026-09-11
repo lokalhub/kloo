@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/repomap"
 )
 
 // ─── Prompt-prefix stability harness ────────────────────────────────────────
@@ -117,6 +118,16 @@ type capturedMsg struct {
 // the loop sent, in order.
 func capturePrompts(t *testing.T) [][]capturedMsg {
 	t.Helper()
+	prompts, _ := capturePromptsWithSchemas(t)
+	return prompts
+}
+
+// capturePromptsWithSchemas also returns the tool-schema token count. The schemas
+// are part of every real prompt — (*Loop).act counts them in lastPromptChars, and
+// the provider counts them in prompt_tokens — so any measurement expressed as a
+// FRACTION of the prompt has to include them or its denominator is fiction.
+func capturePromptsWithSchemas(t *testing.T) ([][]capturedMsg, int) {
+	t.Helper()
 	fixture := prefixFixture()
 	mocks := make([]llmtest.Mock, 0, len(fixture))
 	for _, turn := range fixture {
@@ -139,6 +150,15 @@ func capturePrompts(t *testing.T) [][]capturedMsg {
 	bodies := srv.ModelCalls()
 	if len(bodies) < 6 {
 		t.Fatalf("harness captured %d requests, want at least 6", len(bodies))
+	}
+	schemaTokens := 0
+	if len(bodies) > 0 {
+		var withTools struct {
+			Tools json.RawMessage `json:"tools"`
+		}
+		if err := json.Unmarshal(bodies[0], &withTools); err == nil {
+			schemaTokens = repomap.ApproxTokens(string(withTools.Tools))
+		}
 	}
 	out := make([][]capturedMsg, 0, len(bodies))
 	for i, b := range bodies {
@@ -164,7 +184,7 @@ func capturePrompts(t *testing.T) [][]capturedMsg {
 		}
 		out = append(out, msgs)
 	}
-	return out
+	return out, schemaTokens
 }
 
 // ─── metric ─────────────────────────────────────────────────────────────────

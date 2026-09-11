@@ -144,12 +144,11 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	fp, hasFile := filePin(in.EditPath, in.FreshFile)
 
 	// Recent tail: prior-session turns (oldest) followed by this run's transcript
-	// after the task, minus any stale read-dump of the file currently under edit
-	// (it is re-read fresh into the file pin). Seeding History as the oldest tail
-	// means a follow-up has the prior run's context, and it's the first thing the
-	// compactor folds into the summary under window pressure — while the current
-	// task (in.Task) stays pinned regardless.
-	allTail := append(append([]llm.Message{}, in.History...), recentTail(in.Convo, in.EditPath)...)
+	// after the task, verbatim — nothing is removed retroactively (see recentTail).
+	// Seeding History as the oldest tail means a follow-up has the prior run's
+	// context, and it's the first thing the compactor folds into the summary under
+	// window pressure — while the current task (in.Task) stays pinned regardless.
+	allTail := append(append([]llm.Message{}, in.History...), recentTail(in.Convo)...)
 
 	// Pin tokens (everything pinned besides the task) — they share the hot budget
 	// with the tail.
@@ -272,16 +271,28 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	return out, nil
 }
 
-// assemble lays out the per-request messages in prompt order: task, then the
-// running-summary slot (right after the task), then the pins, then the tail.
+// assemble lays out the per-request messages in prompt order, ASCENDING BY
+// VOLATILITY: task (fixed for the run), the running-summary slot (changes only on
+// a compaction), the append-only tail, then the pins — which are regenerated every
+// single turn (the verify pin changes whenever verify output does, and the file pin
+// is re-read from disk each turn).
+//
+// The pins used to sit above the tail. That put a guaranteed per-turn diff above
+// the entire conversation, so a provider's prefix cache was cut at the top of the
+// prompt and the whole history was re-prefilled every turn. Below the tail they sit
+// immediately before the trailing repo map that (*Loop).act appends — the two
+// volatile blocks together, at the end, where a cut costs only themselves.
+//
+// Position must not change the token math: Assemble's shed steps operate on totals,
+// not indices (TestShedOrderUnchangedByPinPlacement pins that).
 func assemble(task llm.Message, summaryEntries []string, pins, tail []llm.Message) []llm.Message {
 	out := make([]llm.Message, 0, 2+len(pins)+len(tail))
 	out = append(out, task)
 	if len(summaryEntries) > 0 {
 		out = append(out, llm.Message{Role: llm.RoleUser, Content: summaryPrefix + strings.Join(summaryEntries, "\n")})
 	}
-	out = append(out, pins...)
 	out = append(out, tail...)
+	out = append(out, pins...)
 	return out
 }
 
@@ -357,45 +368,27 @@ func filePin(path, fresh string) (llm.Message, bool) {
 	}, true
 }
 
-// recentTail returns the transcript after the task message, dropping any
-// observation that is a stale read-dump of editPath — that file is re-read fresh
-// into the file pin, so an old dump of it is wasted, possibly-stale tokens.
-func recentTail(convo []llm.Message, editPath string) []llm.Message {
+// recentTail returns the transcript after the task message, verbatim and in order.
+// It is a pure function of convo — and must stay one: the tail is append-only, so a
+// message that was sent once appears in every later prompt until the compactor
+// legitimately folds it into the summary.
+//
+// It used to take editPath and drop any already-sent read-dump of the file now
+// under edit, on the theory that the file pin carries it fresh anyway. That saving
+// was real but small, and it was paid for at a terrible rate: removing a message
+// from the MIDDLE of the prompt invalidates the provider's cache from that point
+// down, so a few hundred saved tokens cost a re-prefill of the entire conversation
+// below them — and the deletion re-appeared and re-vanished as the edit path moved,
+// cutting the prefix at a different place each turn. If a duplicate dump ever does
+// hurt the window, the compactor folds it (it already summarizes the cold middle);
+// the hot tail is never rewritten retroactively.
+func recentTail(convo []llm.Message) []llm.Message {
 	if len(convo) <= 1 {
 		return nil
 	}
-	stale := staleReadDumps(convo, editPath)
 	out := make([]llm.Message, 0, len(convo)-1)
-	for i := 1; i < len(convo); i++ {
-		if stale[i] {
-			continue
-		}
-		out = append(out, convo[i])
-	}
+	out = append(out, convo[1:]...)
 	return out
-}
-
-// staleReadDumps marks the indices of observation messages that carry a read_file
-// result for editPath: the observation immediately follows the assistant message
-// whose tool call read that path. Empty editPath ⇒ nothing stale.
-func staleReadDumps(convo []llm.Message, editPath string) map[int]bool {
-	stale := map[int]bool{}
-	if editPath == "" {
-		return stale
-	}
-	for i, m := range convo {
-		if m.Role != llm.RoleAssistant {
-			continue
-		}
-		for _, tc := range m.ToolCalls {
-			if tc.Function.Name == tools.NameReadFile && argString(tc.Function.Arguments, "path") == editPath {
-				if i+1 < len(convo) {
-					stale[i+1] = true // the observation carrying the dump
-				}
-			}
-		}
-	}
-	return stale
 }
 
 // argString extracts a string field from a tool call's JSON arguments ("" when
