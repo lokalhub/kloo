@@ -149,6 +149,7 @@ different profile with `/profile <path>`.
 | `--map-position` | `tail` | Where the repo map sits in the prompt: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
 | `--repeat-nudge-rounds` | `0` (⇒ `3`) | Identical consecutive tool calls before the repetition rail nudges the model to try something else. `0` ⇒ the built-in default. |
 | `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** calls (`edit_file`/`write_file`/`run_command`) before the run halts as churn. `0` ⇒ the built-in default. Repeated **read-only** calls are nudged, not halted — see [configuration.md](docs/configuration.md#the-repetition-rail-and-repeated-reads). |
+| `--prompt-cache` | `auto` | Ask the provider to cache the stable prompt prefix: `auto` (on only for a provider known to support it), `on`, `off`. `kloo doctor` prints the resolved state — see [configuration.md](docs/configuration.md#prompt-caching---prompt-cache). |
 | `--strict-model` | `false` | Fail at startup when the endpoint doesn't list `--model`. By default an unknown id fails anyway when the id demonstrably matters (hosted/multi-model endpoints) and only warns on a single-model server. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command the loop runs each step (the real success signal); auto-detected from the project when unset. |
