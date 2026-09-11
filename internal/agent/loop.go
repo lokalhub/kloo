@@ -269,7 +269,9 @@ func isEditTool(name string) bool {
 
 // isReadOnlyTool reports whether a tool only inspects (no mutation, no shell).
 func isReadOnlyTool(name string) bool {
-	return name == tools.NameReadFile || name == tools.NameListDir || name == tools.NameReadDir || name == tools.NameSearch
+	return name == tools.NameReadFile || name == tools.NameListDir ||
+		name == tools.NameReadDir || name == tools.NameSearch ||
+		name == tools.NameCommandOutput
 }
 
 // stallLimit is the effective stall backstop threshold.
@@ -913,6 +915,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			VerifyOutput: verifyOut,
 			Edit:         editSig,
 			Acted:        call.Name == tools.NameRunCommand && derr == nil,
+			ReadOnly:     isReadOnlyTool(call.Name),
 		})
 
 		// ── DECIDE ──────────────────────────────────────────────────────────

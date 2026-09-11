@@ -82,6 +82,15 @@ func (c *churnDetector) Observe(t Turn) {
 	case !c.everActed:
 		c.lastFail = normalizeChurn(t.VerifyOutput) // remember it, but don't count it as no-progress yet
 		c.failCount = 0
+	case t.ReadOnly:
+		// Exploration. The agent only read; it has not yet had a chance to change
+		// anything, so an unchanged failure is not evidence it is stuck. Neutral —
+		// neither counts nor resets — so a genuine edit/edit/edit no-progress run
+		// still trips, while reading the three files the task named does not.
+		//
+		// Without this, the FIRST run_command flipped everActed (a bare
+		// `go test ./...` is side-effect-free, but the rail cannot know that), and
+		// the next three read_file turns halted the run at step 4.
 	case distinctEdit:
 		c.lastFail = normalizeChurn(t.VerifyOutput)
 		c.failCount = 0

@@ -278,6 +278,14 @@ type Turn struct {
 	// churn. Without this, work done through the shell is invisible to the churn
 	// rail and a stuck run loops to the budget ceiling. See [[kloo-churn-flail-gap]].
 	Acted bool
+	// ReadOnly is true when the turn's tool only LOOKED at the tree (read_file,
+	// list_dir, read_dir, search, command_output). Such a turn is exploration, and
+	// exploration is not a no-progress round: the agent has not yet had its chance
+	// to fix anything, so an unchanged verify failure says nothing about it. The
+	// explore rail (nudge at 6 read-only turns, abort at 16) owns read-only
+	// spinning; the failure rail must not also police it, or reading the files the
+	// task named becomes fatal. See [[kloo-churn-flail-gap]].
+	ReadOnly bool
 }
 
 // ChurnDetector halts a no-progress loop. (Seam implemented in churn.go.)
