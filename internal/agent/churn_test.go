@@ -186,3 +186,45 @@ func TestReadsDoNotLaunderAStuckLoop(t *testing.T) {
 		t.Fatal("interleaving reads hid a stuck acting loop from the rail")
 	}
 }
+
+// The sequence that killed BOTH 8k arms of the kloo-vs-grok A/B. The model
+// edits, then re-runs the suite to see where it stands, reads a little, runs it
+// again, runs a targeted -v variant — all diagnostics, none of them a retry of a
+// failed fix. Steps 12/15/17 were a bare `go test ./...`, and the rail halted
+// the run at three.
+//
+// Diagnostic shell turns arrive with ReadOnly set (see isReadOnlyTool /
+// tools.IsReadOnlyCommand at the Observe site) and must be neutral, exactly like
+// a read_file turn.
+func TestDiagnosticCommandsAfterAnEditAreNotChurn(t *testing.T) {
+	c := NewChurnDetector(3)
+	fail := "FAIL\thardtask\t0.002s"
+
+	c.Observe(Turn{VerifyOutput: fail, Edit: "dedupe.go|x|y"}) // a real fix attempt
+	diagnostics := []string{
+		"go test ./...", "read_file", "read_file",
+		"go test ./...", "search", "go test ./... -run TestMaxWindow -v",
+	}
+	for i, what := range diagnostics {
+		c.Observe(Turn{VerifyOutput: fail, ReadOnly: true})
+		if churned, kind := c.Check(); churned {
+			t.Fatalf("churned after %d diagnostic turns (at %q, kind=%s); investigating is not flailing", i+1, what, kind)
+		}
+	}
+}
+
+// A MUTATING shell loop must still churn: the agent keeps running commands that
+// change the tree while the failure never moves.
+func TestMutatingCommandLoopStillChurns(t *testing.T) {
+	c := NewChurnDetector(3)
+	fail := "FAIL\thardtask\t0.002s"
+
+	c.Observe(Turn{VerifyOutput: fail, Edit: "window.go|a|b"})
+	for i := 0; i < 3; i++ {
+		c.Observe(Turn{VerifyOutput: fail, Acted: true}) // e.g. `sed -i`, `rm`
+	}
+	churned, kind := c.Check()
+	if !churned || kind != ChurnRepeatedFailure {
+		t.Fatalf("want repeated-failure churn for a mutating loop, got churned=%v kind=%s", churned, kind)
+	}
+}
