@@ -176,3 +176,45 @@ func TestRunCommandNonInteractiveEnv(t *testing.T) {
 		}
 	}
 }
+
+// A failing command piped into head must report failure. The exit status of a
+// POSIX pipeline is its LAST stage, so without pipefail `go test ./... | head`
+// reports 0 however badly the suite fails — and models pipe into head/tail
+// constantly to keep output small. An observed run was told its failing suite
+// passed, then burned four steps hunting a "stale build cache" to explain the
+// contradiction before tripping the churn rail.
+func TestPipedFailureIsNotReportedAsSuccess(t *testing.T) {
+	skipIfNoSh(t)
+	if !pipefailOnce() {
+		t.Skip("shell has no pipefail; harness degrades to POSIX behaviour by design")
+	}
+	ws, _ := wsAt(t)
+	tool := NewRunCommandTool(ws)
+
+	res, err := runCmd(t, tool, map[string]any{"command": "exit 3 | head -5"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if res.ExitCode == 0 {
+		t.Fatalf("piped failure reported as success (exit 0); the model is told a broken build passed")
+	}
+}
+
+// A genuinely succeeding pipeline must still read as success, and still capture
+// its output — pipefail must not turn working commands into failures.
+func TestPipedSuccessStillSucceeds(t *testing.T) {
+	skipIfNoSh(t)
+	ws, _ := wsAt(t)
+	tool := NewRunCommandTool(ws)
+
+	res, err := runCmd(t, tool, map[string]any{"command": "echo hello | head -1"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("exit = %d, want 0", res.ExitCode)
+	}
+	if !strings.Contains(res.Output, "hello") {
+		t.Errorf("stdout = %q, want it preserved", res.Output)
+	}
+}

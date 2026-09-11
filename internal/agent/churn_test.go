@@ -131,3 +131,58 @@ func TestChurnDistinctEditResets(t *testing.T) {
 		t.Errorf("distinct edit should reset edit churn")
 	}
 }
+
+// The sequence that killed real runs at step 4: the task says "run the tests,
+// then fix these three files", the model does exactly that, and the rail halts
+// it before it has edited anything.
+//
+//	step 1  run_command go test   → fails (Acted ⇒ everActed)
+//	step 2  read_file             → same failure
+//	step 3  read_file             → same failure
+//	step 4  read_file             → CHURN, 0 edits attempted
+//
+// Reading is exploration, not a no-progress round.
+func TestReadingAfterRunCommandIsNotChurn(t *testing.T) {
+	c := NewChurnDetector(3)
+	fail := "FAIL\thardtask\t0.002s"
+
+	c.Observe(Turn{VerifyOutput: fail, Acted: true}) // ran the test suite
+	for i := 0; i < 6; i++ {
+		c.Observe(Turn{VerifyOutput: fail, ReadOnly: true})
+		if churned, kind := c.Check(); churned {
+			t.Fatalf("churned after %d read-only turns (kind=%s); reading the files the task named must not halt the run", i+1, kind)
+		}
+	}
+}
+
+// The rail must still fire when the agent has actually had its chance: it edits,
+// the same failure persists, and it keeps going with no new edit.
+func TestRepeatedFailureAfterActingStillChurns(t *testing.T) {
+	c := NewChurnDetector(3)
+	fail := "FAIL\thardtask\t0.002s"
+
+	c.Observe(Turn{VerifyOutput: fail, Edit: "ledger.go|x|y"}) // distinct edit, resets
+	for i := 0; i < 3; i++ {
+		c.Observe(Turn{VerifyOutput: fail, Acted: true}) // acting, nothing changing
+	}
+	churned, kind := c.Check()
+	if !churned || kind != ChurnRepeatedFailure {
+		t.Fatalf("want repeated-failure churn, got churned=%v kind=%s", churned, kind)
+	}
+}
+
+// Reads interleaved with a genuinely stuck edit loop must not launder it: the
+// read turns are neutral, so the acting turns still accumulate to the ceiling.
+func TestReadsDoNotLaunderAStuckLoop(t *testing.T) {
+	c := NewChurnDetector(3)
+	fail := "FAIL\thardtask\t0.002s"
+
+	c.Observe(Turn{VerifyOutput: fail, Acted: true})
+	for i := 0; i < 3; i++ {
+		c.Observe(Turn{VerifyOutput: fail, ReadOnly: true})
+		c.Observe(Turn{VerifyOutput: fail, Acted: true})
+	}
+	if churned, _ := c.Check(); !churned {
+		t.Fatal("interleaving reads hid a stuck acting loop from the rail")
+	}
+}

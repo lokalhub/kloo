@@ -148,7 +148,7 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "sh", "-c", command)
+	cmd := exec.CommandContext(runCtx, "sh", "-c", shellCommand(command))
 	cmd.Dir = cwd
 	cmd.Env = controlledEnv(t.allowEnv)
 	setProcGroup(cmd) // unix: own process group so we can kill the child tree
