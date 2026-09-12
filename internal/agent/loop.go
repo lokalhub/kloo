@@ -667,6 +667,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// success, which always requires a real green verify.
 				return finish(ReasonUnverified, nil, nil, nil)
 			}
+			// UNCONDITIONAL, and it must stay that way: this is the one verify that
+			// decides success, so it may never be gated — not on the verify step's
+			// mutation flag, not on anything. That step skips turns that could not have
+			// changed the tree; that is only safe because the tree is re-checked here
+			// before any run is called successful. Adding a gate would let a stale
+			// green become a false pass, and an out-of-band mutation (a run_command
+			// that breaks the build after the last edit) would go unnoticed.
+			// TestFinishVerifiesEvenWithNoMutation and TestNoSuccessOnStaleGreen fail
+			// if this is ever made conditional.
 			lastVerify = l.Verifier.Verify(ctx)
 			counters.VerifyAttempts++
 			if lastVerify.Err == nil && lastVerify.Passed {
