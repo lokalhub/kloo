@@ -271,3 +271,65 @@ func readAll(t *testing.T, r *http.Request) []byte {
 	}
 	return b
 }
+
+// The merge guard was ONE-SIDED: it checked whether the PREVIOUS message carried a
+// breakpoint, but an INCOMING one was merged in and its marker copied nowhere. The
+// request then went out with no breakpoint at all — no error, no rejection, just a
+// silently worse cache hit rate that nothing attributes to anything.
+//
+// Found by the lead lens reviewing Phase 01 of the J1 rails/caching initiative.
+func TestCacheBreakpointSurvivesSameRoleMerge(t *testing.T) {
+	in := []Message{
+		{Role: RoleUser, Content: "first"},
+		{Role: RoleUser, Content: "second", CacheControl: CacheControlEphemeral()},
+	}
+	out := normalizeMessages(in)
+
+	if len(out) != 1 {
+		t.Fatalf("want the two same-role messages merged into 1, got %d", len(out))
+	}
+	if out[0].CacheControl == nil {
+		t.Fatal("the incoming breakpoint was swallowed by the merge; the request would " +
+			"carry no cache_control at all and degrade silently")
+	}
+	if !strings.Contains(out[0].Content, "first") || !strings.Contains(out[0].Content, "second") {
+		t.Errorf("merge lost content: %q", out[0].Content)
+	}
+}
+
+// The pre-existing guard must still hold: a breakpoint on the PREVIOUS message
+// blocks the merge entirely, because merging would move that marker BELOW content
+// it was placed above and cache something volatile.
+func TestBreakpointOnPreviousMessageStillBlocksMerge(t *testing.T) {
+	in := []Message{
+		{Role: RoleUser, Content: "cached prefix", CacheControl: CacheControlEphemeral()},
+		{Role: RoleUser, Content: "volatile tail"},
+	}
+	out := normalizeMessages(in)
+
+	if len(out) != 2 {
+		t.Fatalf("want the merge blocked (2 messages), got %d — the breakpoint moved below "+
+			"content it was placed above", len(out))
+	}
+	if out[0].CacheControl == nil {
+		t.Error("the prefix breakpoint was lost")
+	}
+}
+
+// Three in a row: the marker on the last must end up on the single merged message,
+// not be dropped by the second merge after surviving the first.
+func TestBreakpointSurvivesRepeatedMerges(t *testing.T) {
+	in := []Message{
+		{Role: RoleUser, Content: "a"},
+		{Role: RoleUser, Content: "b"},
+		{Role: RoleUser, Content: "c", CacheControl: CacheControlEphemeral()},
+	}
+	out := normalizeMessages(in)
+
+	if len(out) != 1 {
+		t.Fatalf("want 1 merged message, got %d", len(out))
+	}
+	if out[0].CacheControl == nil {
+		t.Fatal("breakpoint lost across repeated merges")
+	}
+}
