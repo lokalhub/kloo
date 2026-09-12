@@ -111,6 +111,8 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		StopOn:               agentStopPolicy(cfg.StopOn),
 		StallRounds:          cfg.ChurnRounds,
 		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
+		ExploreNudgeRounds:   cfg.ExploreNudgeRounds,
+		ExploreAbortRounds:   cfg.ExploreAbortRounds,
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,

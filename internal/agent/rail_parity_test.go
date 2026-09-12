@@ -242,7 +242,14 @@ func TestRepeatedVerifyStopUnchanged(t *testing.T) {
 }
 
 func TestExploreRailUnchangedWithVerifyGate(t *testing.T) {
-	assertParity(t, "explore-read-only", 16, ReasonAnswered, "-")
+	// DELIBERATE drift from v0.16.7, not regression. Two changes, both intended:
+	//   step 16 -> 17: the first read of a target is now NEW GROUND and resets the
+	//     streak, so the 30 identical reads trip the ceiling one turn later.
+	//   answered -> explore-stop: a run a rail killed with no edits is not the model
+	//     answering. Reporting it as "answered" hid the largest kloo-bench failure
+	//     mode behind a success-flavoured word.
+	// The rail still STOPS this case, which is what the parity check is protecting.
+	assertParity(t, "explore-read-only", 17, ReasonExploreStop, "-")
 }
 
 func TestReadThenEditRunTripsNothing(t *testing.T) {

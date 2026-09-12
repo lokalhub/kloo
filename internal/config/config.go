@@ -120,6 +120,12 @@ const (
 	// that re-reads its way out of a spin more chances before the run is cut.
 	EnvRepeatNudgeRounds = "KLOO_REPEAT_NUDGE_ROUNDS"
 	EnvRepeatAbortRounds = "KLOO_REPEAT_ABORT_ROUNDS"
+
+	// EnvExploreNudgeRounds / EnvExploreAbortRounds tune the exploration rail.
+	// Raising the abort suits a large real repo, where locating a one-file change
+	// legitimately takes many reads before the first edit.
+	EnvExploreNudgeRounds = "KLOO_EXPLORE_NUDGE_ROUNDS"
+	EnvExploreAbortRounds = "KLOO_EXPLORE_ABORT_ROUNDS"
 	// EnvPromptCache selects the prompt-caching mode (same as --prompt-cache).
 	EnvPromptCache          = "KLOO_PROMPT_CACHE"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
@@ -191,6 +197,10 @@ type Config struct {
 	// an unset config builds a Loop byte-identical to the untuned one.
 	RepeatNudgeRounds int
 	RepeatAbortRounds int
+	// ExploreNudgeRounds / ExploreAbortRounds tune the exploration rail; 0 ⇒ the
+	// agent package default.
+	ExploreNudgeRounds int
+	ExploreAbortRounds int
 	// MCPServers is the parsed mcpServers block (empty map when none configured).
 	// internal/mcp consumes these to dial servers; internal/config never imports
 	// the SDK. Path/env values in command/args/env are already expanded.
@@ -307,8 +317,10 @@ type Flags struct {
 	MapPosition *string
 	// RepeatNudgeRounds / RepeatAbortRounds (--repeat-nudge-rounds /
 	// --repeat-abort-rounds) tune the repetition rail. nil ⇒ not set on the CLI.
-	RepeatNudgeRounds *int
-	RepeatAbortRounds *int
+	RepeatNudgeRounds  *int
+	RepeatAbortRounds  *int
+	ExploreNudgeRounds *int
+	ExploreAbortRounds *int
 	// PromptCache (--prompt-cache) is "auto", "off" or "on". nil ⇒ not set on the CLI.
 	PromptCache *string
 	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
@@ -368,6 +380,8 @@ type profileEntry struct {
 	ChurnRounds          *int     `json:"churnRounds,omitempty"`
 	RepeatNudgeRounds    *int     `json:"repeatNudgeRounds,omitempty"`
 	RepeatAbortRounds    *int     `json:"repeatAbortRounds,omitempty"`
+	ExploreNudgeRounds   *int     `json:"exploreNudgeRounds,omitempty"`
+	ExploreAbortRounds   *int     `json:"exploreAbortRounds,omitempty"`
 	NoThink              *bool    `json:"noThink,omitempty"`
 	LLMMaxRetries        *int     `json:"llmMaxRetries,omitempty"`
 	LLMRetryCodes        []int    `json:"llmRetryCodes,omitempty"`
@@ -494,6 +508,12 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.RepeatAbortRounds != nil {
 		cfg.RepeatAbortRounds = *e.RepeatAbortRounds
+	}
+	if e.ExploreNudgeRounds != nil {
+		cfg.ExploreNudgeRounds = *e.ExploreNudgeRounds
+	}
+	if e.ExploreAbortRounds != nil {
+		cfg.ExploreAbortRounds = *e.ExploreAbortRounds
 	}
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
@@ -708,6 +728,16 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.RepeatAbortRounds = n
 		}
 	}
+	if v := getenv(EnvExploreNudgeRounds); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.ExploreNudgeRounds = n
+		}
+	}
+	if v := getenv(EnvExploreAbortRounds); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.ExploreAbortRounds = n
+		}
+	}
 	if v := getenv(EnvLLMMaxRetries); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.LLMMaxRetries = n
@@ -770,6 +800,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.RepeatAbortRounds != nil {
 		cfg.RepeatAbortRounds = *flags.RepeatAbortRounds
+	}
+	if flags.ExploreNudgeRounds != nil {
+		cfg.ExploreNudgeRounds = *flags.ExploreNudgeRounds
+	}
+	if flags.ExploreAbortRounds != nil {
+		cfg.ExploreAbortRounds = *flags.ExploreAbortRounds
 	}
 	if flags.PromptCache != nil {
 		cfg.PromptCache = *flags.PromptCache

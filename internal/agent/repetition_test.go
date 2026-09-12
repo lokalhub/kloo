@@ -285,11 +285,14 @@ func TestRepeatedReadStillTerminates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.Reason != ReasonAnswered {
-		t.Fatalf("reason = %q, want answered (the exploration rail's calm stop)", rep.Reason)
+	if rep.Reason != ReasonExploreStop {
+		t.Fatalf("reason = %q, want explore-stop (the exploration rail's stop)", rep.Reason)
 	}
-	if rep.Steps != DefaultExploreAbortRounds {
-		t.Errorf("steps = %d, want %d (the exploration-rail ceiling)", rep.Steps, DefaultExploreAbortRounds)
+	// +1: the FIRST read of a target is new ground and resets the streak, so the
+	// ceiling is reached one turn after the raw round count.
+	if rep.Steps != DefaultExploreAbortRounds+1 {
+		t.Errorf("steps = %d, want %d (the exploration-rail ceiling, +1 for the first read)",
+			rep.Steps, DefaultExploreAbortRounds+1)
 	}
 }
 

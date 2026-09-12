@@ -70,6 +70,14 @@ const (
 	// terminating the run early. The specific rule + class is carried in
 	// Report.Safety; the headless classifier maps it to a stable failure code.
 	ReasonSafetyStop Reason = "safety-stop"
+
+	// ReasonExploreStop is the exploration rail halting a run that kept reading
+	// without covering new ground. It is deliberately NOT ReasonAnswered: a run a
+	// rail stopped with no edits written is a failure, and reporting it as
+	// "answered" made it indistinguishable from the model genuinely replying —
+	// which hid the single largest failure mode on kloo-bench behind a
+	// success-flavoured word.
+	ReasonExploreStop Reason = "explore-stop"
 )
 
 // StopPolicy is the resolved A7 hard-stop configuration the loop enforces. It

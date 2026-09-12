@@ -68,6 +68,8 @@ type resolvedConfigDiagnostic struct {
 	MaxWallClockSeconds    int               `json:"max_wall_clock_seconds"`
 	ChurnRounds            int               `json:"churn_rounds"`
 	RepeatNudgeRounds      int               `json:"repeat_nudge_rounds"`
+	ExploreNudgeRounds     int               `json:"explore_nudge_rounds"`
+	ExploreAbortRounds     int               `json:"explore_abort_rounds"`
 	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
 	Temperature            float64           `json:"temperature"`
 	NoThink                bool              `json:"no_think"`
@@ -227,6 +229,8 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		MaxWallClockSeconds: cfg.MaxWallClockSeconds,
 		ChurnRounds:         cfg.ChurnRounds,
 		RepeatNudgeRounds:   effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
+		ExploreNudgeRounds:  effectiveRepeatRounds(cfg.ExploreNudgeRounds, agent.DefaultExploreNudgeRounds),
+		ExploreAbortRounds:  effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
 		RepeatAbortRounds:   effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
 		Temperature:         cfg.Temperature,
 		NoThink:             cfg.NoThink,
@@ -301,6 +305,7 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "max_wall_clock_seconds: %d\n", diag.MaxWallClockSeconds)
 	fmt.Fprintf(out, "churn_rounds: %d\n", diag.ChurnRounds)
 	fmt.Fprintf(out, "repeat_rounds: nudge=%d abort=%d\n", diag.RepeatNudgeRounds, diag.RepeatAbortRounds)
+	fmt.Fprintf(out, "explore_rounds: nudge=%d abort=%d\n", diag.ExploreNudgeRounds, diag.ExploreAbortRounds)
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
 	fmt.Fprintf(out, "tool_format: %s\n", diag.ToolFormat)

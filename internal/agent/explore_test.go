@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -14,9 +13,15 @@ import (
 // not repetition; no verify change, so not stall; no edit, so not churn) is nudged
 // to act, then stopped (ReasonAnswered) so the human can step in.
 func TestLoopExplorationRailStopsTheSpin(t *testing.T) {
+	// The SAME target each turn. This test used to read a DISTINCT file per turn,
+	// but distinct reads are now treated as new ground and no longer trip the rail:
+	// on a real repo, reading many files to locate a one-file change is the job, not
+	// a spin (kloo-bench, 22 real-commit cases). The spin this rail exists to catch
+	// is re-reading without learning anything, which is what this now exercises.
+	// Distinct-read survival is pinned by TestExploreRailAllowsManyDistinctReads.
 	var mocks []llmtest.Mock
 	for i := 0; i < 12; i++ { // more reads than the abort threshold
-		mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": fmt.Sprintf("f%d.go", i)}})})
+		mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "same.go"}})})
 	}
 	srv := llmtest.Sequence(t, mocks...)
 	loop, calls := newLoop(t, srv, nil, &stubBudget{tripAt: 100}, &stubChurn{})
@@ -26,14 +31,16 @@ func TestLoopExplorationRailStopsTheSpin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.Reason != ReasonAnswered {
-		t.Fatalf("reason = %q, want answered (explore rail stops the spin)", rep.Reason)
+	// ReasonExploreStop, not ReasonAnswered: the rail KILLED this run with no edits,
+	// and calling that "answered" made a stopped run read as a clean one.
+	if rep.Reason != ReasonExploreStop {
+		t.Fatalf("reason = %q, want explore-stop (explore rail stops the spin)", rep.Reason)
 	}
-	if rep.Steps != 7 {
-		t.Errorf("steps = %d, want 7 (stopped at the explore abort)", rep.Steps)
+	if rep.Steps != 8 {
+		t.Errorf("steps = %d, want 8 (abort=7 repeats, +1 for the first read that was new ground)", rep.Steps)
 	}
-	if n := len(*calls); n != 7 {
-		t.Errorf("dispatched %d calls, want 7 (no spinning to the budget ceiling)", n)
+	if n := len(*calls); n != 8 {
+		t.Errorf("dispatched %d calls, want 8 (no spinning to the budget ceiling)", n)
 	}
 	var nudged bool
 	for _, m := range rep.Transcript {

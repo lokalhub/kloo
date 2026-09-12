@@ -477,6 +477,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// model that inspects+analyzes forever without acting.
 		exploreStreak int
 		exploreNudged bool
+		// Read targets already visited this run. Revisiting one is not new ground.
+		seenTargets = map[string]bool{}
 
 		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
@@ -1088,17 +1090,37 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// file, narrating analysis and asking the user questions, but never edits — and
 		// because it reads a DIFFERENT file each turn (not repetition), with no verify
 		// change (not stall) and no edit/failure (not churn), nothing else stops it; it
-		// spins to the step ceiling. Count consecutive READ-ONLY turns (any edit / write
-		// / run_command resets it): nudge once to act-or-ask, then stop the run
-		// (ReasonAnswered) so the human can step in.
+		// spins to the step ceiling.
+		//
+		// The streak counts read-only turns that reveal NOTHING NEW. Reading a file
+		// this run has not read before is exploration doing its job: on a real repo a
+		// competent model reads many files to locate a one-file change, and a raw
+		// count of read-only turns cannot tell that from a 2B model narrating in a
+		// loop. Measured on kloo-bench (22 real-commit cases, median ONE source file
+		// edited per case): every v0.17.1 failure was this rail stopping a run at 16
+		// read-only steps having written nothing.
+		//
+		// A repeat of something already seen still climbs the streak, so the weak-model
+		// spin the rail was built for is still caught.
 		if readOnlyTurn {
-			exploreStreak++
+			sig := exploreSignature(call)
+			if sig != "" && !seenTargets[sig] {
+				seenTargets[sig] = true
+				exploreStreak = 0 // new ground: this turn made progress
+				exploreNudged = false
+			} else {
+				exploreStreak++
+			}
 		} else {
 			exploreStreak, exploreNudged = 0, false
 		}
 		switch {
 		case exploreStreak >= l.exploreAbortRounds():
-			return finish(ReasonAnswered, nil, nil, nil)
+			// ReasonExploreStop, not ReasonAnswered: a run a RAIL killed with no edits
+			// is not the model answering a question, and reporting it as "answered"
+			// made a stopped run indistinguishable from a clean one in every report
+			// and benchmark that reads the reason.
+			return finish(ReasonExploreStop, nil, nil, nil)
 		case exploreStreak >= l.exploreNudgeRounds() && !exploreNudged:
 			exploreNudged = true
 			recordRail(RailExplore)
@@ -1533,6 +1555,19 @@ func observation(call tools.Call, res tools.Result, err error) llm.Message {
 		}
 	}
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// exploreSignature identifies WHAT a read-only turn looked at, so the explore rail
+// can tell "read a file I have not seen" (progress) from "looked at the same thing
+// again" (spinning). Empty when the call carries no identifiable target, which is
+// treated as no-new-ground so an unrecognised read cannot defeat the rail.
+func exploreSignature(call tools.Call) string {
+	for _, k := range []string{"path", "dir", "query", "pattern", "command", "id"} {
+		if v := str(call.Args[k]); v != "" {
+			return call.Name + "\x00" + v
+		}
+	}
+	return ""
 }
 
 // editSignature is the normalised edit a churn detector compares (empty for
