@@ -273,6 +273,26 @@ func isEditTool(name string) bool {
 	return name == tools.NameEditFile || name == tools.NameWriteFile
 }
 
+// mutated reports whether the dispatched call may have CHANGED the tree, and so
+// whether the verify gate owes a re-check. It is the COMPLEMENT of read-only, not
+// an allowlist of edit tools: MCP-bridged tools register into the same
+// tools.Registry under arbitrary server-supplied names (internal/mcp/bridge.go), so
+// an allowlist would skip the regression check after a real mutation until some
+// later edit_file happened to run. An unrecognised tool therefore defaults to
+// MUTATING — the same conservative default the shell-command classifier in
+// internal/tools/readonly_command.go already takes, and for the same reason: a miss
+// costs one extra verify, a false "read-only" costs a missed regression.
+func mutated(readOnlyTurn, timedOut bool, derr error) bool {
+	if readOnlyTurn {
+		return false
+	}
+	// A command that was KILLED for exceeding its timeout still RAN: run_command
+	// returns the partial result alongside ErrCommandTimeout, so a half-finished
+	// `npm install` or `sed -i` may already have changed the tree. derr != nil does
+	// not mean "nothing landed" here.
+	return derr == nil || timedOut
+}
+
 // isReadOnlyTool reports whether a tool only inspects (no mutation, no shell).
 func isReadOnlyTool(name string) bool {
 	return name == tools.NameReadFile || name == tools.NameListDir ||
@@ -442,6 +462,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// a downgraded read-only repeat re-nudges instead of latching). Catches a model
 		// locked onto a single identical call (e.g. re-reading one empty file) — a
 		// read-only spin the edit/verify churn rails cannot see.
+		// mutatedSinceVerify gates the verify step: true once a dispatched call may
+		// have changed the tree, cleared only when a verify actually runs. See the
+		// `mutated` predicate and the gate in the VERIFY block.
+		mutatedSinceVerify bool
+
 		repeatKeyLast string
 		repeatStreak  int
 		repeatNudged  bool
@@ -642,6 +667,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// success, which always requires a real green verify.
 				return finish(ReasonUnverified, nil, nil, nil)
 			}
+			// UNCONDITIONAL, and it must stay that way: this is the one verify that
+			// decides success, so it may never be gated — not on the verify step's
+			// mutation flag, not on anything. That step skips turns that could not have
+			// changed the tree; that is only safe because the tree is re-checked here
+			// before any run is called successful. Adding a gate would let a stale
+			// green become a false pass, and an out-of-band mutation (a run_command
+			// that breaks the build after the last edit) would go unnoticed.
+			// TestFinishVerifiesEvenWithNoMutation and TestNoSuccessOnStaleGreen fail
+			// if this is ever made conditional.
 			lastVerify = l.Verifier.Verify(ctx)
 			counters.VerifyAttempts++
 			if lastVerify.Err == nil && lastVerify.Passed {
@@ -854,14 +888,45 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 
+		// A run_command that only INSPECTS (go test, git diff, ls) is exploration,
+		// not action: re-running the suite after an edit is the most natural move an
+		// agent makes, and counting it as a no-progress round killed real runs. The
+		// classifier is conservative — anything unrecognised stays acting.
+		//
+		// Computed HERE, above the verify gate, because both the gate and the churn
+		// feed below need it. It is a pure function of the call, so its position
+		// changes nothing — and there is exactly one definition of it.
+		readOnlyTurn := isReadOnlyTool(call.Name) ||
+			(call.Name == tools.NameRunCommand && tools.IsReadOnlyCommand(str(call.Args["command"])))
+		// Sticky, not a bare `mutatedSinceVerify = mutated(...)`: the flag means "a
+		// mutation has happened since the last verify", and only the verify step may
+		// clear it. A plain assignment would clear a pending mutation on the next
+		// read-only turn, and the mutation would never be checked.
+		if mutated(readOnlyTurn, result.TimedOut, derr) {
+			mutatedSinceVerify = true
+		}
+
 		// ── VERIFY ──────────────────────────────────────────────────────────
 		// Unverified mode (nil Verifier) skips this entirely: lastVerify stays the
 		// zero value (Passed=false), so the success gate below never fires and the
 		// run can only end via finish (→ unverified), churn, budget, or answered.
-		if l.Verifier != nil {
+		//
+		// GATED on a mutation since the last verify. Measurement (KLOO-VS-GROK.md,
+		// 2026-09-11): verify_attempts >= steps in 78 of 83 runs — 1,023 full vitest
+		// invocations across 83 cases, re-running the suite after steps that only
+		// READ and could not have changed the result. That is the wall-clock tax, and
+		// six concurrent lanes of it exhausted swap with 154 workerd processes.
+		//
+		// Skipping is safe because it can never become a false pass: `finish` verifies
+		// UNCONDITIONALLY (see the finish branch), and the mid-loop success gate needs
+		// `edited`, which always sets mutatedSinceVerify — so the green that authorises
+		// success was always produced after the last mutation.
+		verifySkipped := l.Verifier != nil && !mutatedSinceVerify
+		if l.Verifier != nil && mutatedSinceVerify {
 			l.onState(StateVerify)
 			lastVerify = l.Verifier.Verify(ctx)
 			counters.VerifyAttempts++
+			mutatedSinceVerify = false
 
 			// A non-runnable verify command is an error outcome, never a false pass.
 			if lastVerify.Err != nil {
@@ -906,8 +971,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// repeated-failure rail mis-reads as "same red build every step", churning a
 		// progressing shell-driven run). Pass "" so only the repeated-EDIT rail can
 		// fire — the one churn signal that still means "stuck" without a verify.
+		//
+		// A SKIPPED verify feeds nothing either, for the mirror-image reason: the
+		// only output available is the PREVIOUS turn's, and re-feeding it would count
+		// a failure the model was never re-shown, advancing the repeated-failure rail
+		// on turns that produced no new evidence. VerifySkipped carries the turn
+		// instead, and churn.Observe handles it as neutral — see types.Turn.
 		verifyOut := ""
-		if l.Verifier != nil {
+		if l.Verifier != nil && !verifySkipped {
 			verifyOut = failingOutput(lastVerify)
 		}
 		// #2 malformation-aware churn: a CORRECTABLE edit failure (got a corrective
@@ -918,17 +989,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if smartChurn() && correctableEdit {
 			editSig = ""
 		}
-		// A run_command that only INSPECTS (go test, git diff, ls) is exploration,
-		// not action: re-running the suite after an edit is the most natural move an
-		// agent makes, and counting it as a no-progress round killed real runs. The
-		// classifier is conservative — anything unrecognised stays acting.
-		readOnlyTurn := isReadOnlyTool(call.Name) ||
-			(call.Name == tools.NameRunCommand && tools.IsReadOnlyCommand(str(call.Args["command"])))
 		l.Churn.Observe(Turn{
-			VerifyOutput: verifyOut,
-			Edit:         editSig,
-			Acted:        call.Name == tools.NameRunCommand && derr == nil && !readOnlyTurn,
-			ReadOnly:     readOnlyTurn,
+			VerifyOutput:  verifyOut,
+			Edit:          editSig,
+			Acted:         call.Name == tools.NameRunCommand && derr == nil && !readOnlyTurn,
+			ReadOnly:      readOnlyTurn,
+			VerifySkipped: verifySkipped,
 		})
 
 		// ── DECIDE ──────────────────────────────────────────────────────────

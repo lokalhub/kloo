@@ -27,8 +27,12 @@ func TestToolCountersRepeatedReadAndVerifyAttempts(t *testing.T) {
 	if rep.ToolCounters.RepeatedReadFile != 2 {
 		t.Fatalf("RepeatedReadFile = %d, want 2", rep.ToolCounters.RepeatedReadFile)
 	}
-	if rep.ToolCounters.VerifyAttempts != 4 {
-		t.Fatalf("VerifyAttempts = %d, want 4", rep.ToolCounters.VerifyAttempts)
+	// Was 4 (one verify per step) before the verify gate. The three read_file turns
+	// cannot have changed the tree, so they no longer re-run the suite; the single
+	// remaining attempt is the UNCONDITIONAL one on the finish path. This test is
+	// the counter-level witness of the gate, so the number is asserted exactly.
+	if rep.ToolCounters.VerifyAttempts != 1 {
+		t.Fatalf("VerifyAttempts = %d, want 1 (reads skip verify; finish always verifies)", rep.ToolCounters.VerifyAttempts)
 	}
 }
 

@@ -583,8 +583,14 @@ func TestLoopRepairsNonMatchingEdit(t *testing.T) {
 		llmtest.Mock{Body: editFileCall(t, "answer.txt", "WRONG\n", "right\n", 5)}, // turn 1: no-match
 		llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 5)}, // turn 2: applies
 	)
+	// One verify, not two: turn 1's edit FAILS to apply and so changes no bytes, and
+	// the verify gate does not re-run the suite for a mutation that did not happen
+	// (TestFailedEditDoesNotTriggerVerify pins that directly). The single verify is
+	// the one after turn 2's applied edit, and it passes. Before the gate this
+	// script needed a leading failResult() for the verify that ran after the failed
+	// edit; that verify no longer happens.
 	loop, root := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
-		&stubVerifier{results: []VerifyResult{failResult(), passResult()}},
+		&stubVerifier{results: []VerifyResult{passResult()}},
 		&stubBudget{}, &stubChurn{})
 
 	rep, err := loop.Run(context.Background(), "make answer.txt say right")
