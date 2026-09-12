@@ -110,6 +110,8 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 
 		StopOn:               agentStopPolicy(cfg.StopOn),
 		StallRounds:          cfg.ChurnRounds,
+		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
+		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
 		Temperature:          cfg.Temperature,

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -66,6 +67,8 @@ type resolvedConfigDiagnostic struct {
 	MaxTokens              int               `json:"max_tokens"`
 	MaxWallClockSeconds    int               `json:"max_wall_clock_seconds"`
 	ChurnRounds            int               `json:"churn_rounds"`
+	RepeatNudgeRounds      int               `json:"repeat_nudge_rounds"`
+	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
 	Temperature            float64           `json:"temperature"`
 	NoThink                bool              `json:"no_think"`
 	ToolFormat             string            `json:"tool_format"`
@@ -132,6 +135,17 @@ func newDoctorCmd(deps *Deps) *cobra.Command {
 	return cmd
 }
 
+// effectiveRepeatRounds resolves the repetition-rail knobs the way the loop does.
+// Unlike ChurnRounds these have no config-level default: 0 means "use the agent
+// package default" (the seam that keeps an unset config building an untuned Loop),
+// so doctor must resolve the zero here or report a 0 that no run ever uses.
+func effectiveRepeatRounds(configured, fallback int) int {
+	if configured > 0 {
+		return configured
+	}
+	return fallback
+}
+
 func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverride string, lint lintOpts) resolvedConfigDiagnostic {
 	path := profilePath
 	if path == "" {
@@ -195,6 +209,8 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		MaxTokens:           cfg.MaxTokens,
 		MaxWallClockSeconds: cfg.MaxWallClockSeconds,
 		ChurnRounds:         cfg.ChurnRounds,
+		RepeatNudgeRounds:   effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
+		RepeatAbortRounds:   effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
 		Temperature:         cfg.Temperature,
 		NoThink:             cfg.NoThink,
 		ToolFormat:          cfg.ToolFormat,
@@ -266,6 +282,7 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "max_tokens: %d\n", diag.MaxTokens)
 	fmt.Fprintf(out, "max_wall_clock_seconds: %d\n", diag.MaxWallClockSeconds)
 	fmt.Fprintf(out, "churn_rounds: %d\n", diag.ChurnRounds)
+	fmt.Fprintf(out, "repeat_rounds: nudge=%d abort=%d\n", diag.RepeatNudgeRounds, diag.RepeatAbortRounds)
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
 	fmt.Fprintf(out, "tool_format: %s\n", diag.ToolFormat)

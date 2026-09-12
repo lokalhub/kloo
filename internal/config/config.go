@@ -114,7 +114,12 @@ const (
 	// so the window matches the server's real -c without editing a profile.
 	EnvContextTokens = "KLOO_CONTEXT_TOKENS"
 	// EnvCuratorBudget caps the per-step ASSEMBLED context (same as --curator-budget).
-	EnvCuratorBudget        = "KLOO_CURATOR_BUDGET"
+	EnvCuratorBudget = "KLOO_CURATOR_BUDGET"
+	// EnvRepeatNudgeRounds / EnvRepeatAbortRounds tune the repetition rail (same as
+	// --repeat-nudge-rounds / --repeat-abort-rounds). Raising the abort buys a model
+	// that re-reads its way out of a spin more chances before the run is cut.
+	EnvRepeatNudgeRounds    = "KLOO_REPEAT_NUDGE_ROUNDS"
+	EnvRepeatAbortRounds    = "KLOO_REPEAT_ABORT_ROUNDS"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
 	EnvLLMRetryCodes        = "KLOO_LLM_RETRY_CODES"
 	EnvLLMRetryBaseDelay    = "KLOO_LLM_RETRY_BASE_DELAY"
@@ -175,6 +180,12 @@ type Config struct {
 	MaxTokens           int // cumulative tokens ceiling per run (0 ⇒ unbounded)
 	MaxWallClockSeconds int // wall-clock ceiling per run in seconds (0 ⇒ unbounded)
 	ChurnRounds         int // repeated failure/edit rounds before halting
+	// RepeatNudgeRounds / RepeatAbortRounds tune the repetition rail (identical
+	// consecutive tool calls before the corrective nudge, then the abort). 0 ⇒ the
+	// agent package's defaults — there is deliberately no config-level default, so
+	// an unset config builds a Loop byte-identical to the untuned one.
+	RepeatNudgeRounds int
+	RepeatAbortRounds int
 	// MCPServers is the parsed mcpServers block (empty map when none configured).
 	// internal/mcp consumes these to dial servers; internal/config never imports
 	// the SDK. Path/env values in command/args/env are already expanded.
@@ -289,6 +300,10 @@ type Flags struct {
 	CuratorBudgetTokens *int
 	// MapPosition (--map-position) is "tail" or "system". nil ⇒ not set on the CLI.
 	MapPosition *string
+	// RepeatNudgeRounds / RepeatAbortRounds (--repeat-nudge-rounds /
+	// --repeat-abort-rounds) tune the repetition rail. nil ⇒ not set on the CLI.
+	RepeatNudgeRounds *int
+	RepeatAbortRounds *int
 	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
 	StrictModel *bool
 	// NoMCP, when non-nil, forces MCP on/off above env+profile (true ⇒ disabled).
@@ -343,6 +358,8 @@ type profileEntry struct {
 	MaxTokens            *int     `json:"maxTokens,omitempty"`
 	MaxWallClockSeconds  *int     `json:"maxWallClockSeconds,omitempty"`
 	ChurnRounds          *int     `json:"churnRounds,omitempty"`
+	RepeatNudgeRounds    *int     `json:"repeatNudgeRounds,omitempty"`
+	RepeatAbortRounds    *int     `json:"repeatAbortRounds,omitempty"`
 	NoThink              *bool    `json:"noThink,omitempty"`
 	LLMMaxRetries        *int     `json:"llmMaxRetries,omitempty"`
 	LLMRetryCodes        []int    `json:"llmRetryCodes,omitempty"`
@@ -460,6 +477,12 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.ChurnRounds != nil {
 		cfg.ChurnRounds = *e.ChurnRounds
+	}
+	if e.RepeatNudgeRounds != nil {
+		cfg.RepeatNudgeRounds = *e.RepeatNudgeRounds
+	}
+	if e.RepeatAbortRounds != nil {
+		cfg.RepeatAbortRounds = *e.RepeatAbortRounds
 	}
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
@@ -658,6 +681,16 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.MaxContextTokens = n
 		}
 	}
+	if v := getenv(EnvRepeatNudgeRounds); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.RepeatNudgeRounds = n
+		}
+	}
+	if v := getenv(EnvRepeatAbortRounds); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.RepeatAbortRounds = n
+		}
+	}
 	if v := getenv(EnvLLMMaxRetries); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.LLMMaxRetries = n
@@ -714,6 +747,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.MapPosition != nil {
 		cfg.MapPosition = *flags.MapPosition
+	}
+	if flags.RepeatNudgeRounds != nil {
+		cfg.RepeatNudgeRounds = *flags.RepeatNudgeRounds
+	}
+	if flags.RepeatAbortRounds != nil {
+		cfg.RepeatAbortRounds = *flags.RepeatAbortRounds
 	}
 	if flags.StrictModel != nil {
 		cfg.StrictModel = *flags.StrictModel
