@@ -358,6 +358,10 @@ type MemoryStats struct {
 	TrimmedTail   bool // tail shortened to fit after compaction
 	MapBudget     int  // repo-map budget the loop used (echoed from MemoryInput)
 	HotBudget     int  // pin-hot+tail token cap (hotBudgetFrac × window)
+	// PinnedMessages is how many TRAILING messages of the assembled history are
+	// per-turn pins. Everything above them is the stable prefix, which is what the
+	// prompt-cache breakpoint is placed at the end of.
+	PinnedMessages int
 }
 
 // Snapshot identifies a checkpointed working-tree state.

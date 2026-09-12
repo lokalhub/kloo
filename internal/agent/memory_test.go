@@ -193,8 +193,21 @@ func TestMemoryA3VerifyPin(t *testing.T) {
 	}
 }
 
-// ─── A4: current-file pin is FRESH; the stale read-dump is dropped ────────────
+// ─── A4: current-file pin is FRESH; the earlier read-dump is KEPT ─────────────
 
+// TestMemoryA4FreshFileNoStaleDump: the file pin still carries the FRESH on-disk
+// content, which is what A4 was actually about — the model must never act on a
+// stale copy.
+//
+// The second half of this test used to assert the opposite of what it asserts now:
+// that the earlier read-dump of the edited file was REMOVED from the tail. That
+// removal was dropped in Phase 01 (D5). Deleting an already-sent message from the
+// middle of the prompt invalidates the provider's cache from that point down, so a
+// few hundred saved tokens cost a re-prefill of the whole conversation below them —
+// and because the deletion followed the edit path, it cut the prefix in a different
+// place each turn. The freshness guarantee never depended on the removal: the pin
+// sits BELOW the tail and is the last word on the file's contents, so the model
+// reads the fresh copy last either way. Updated deliberately, not regenerated.
 func TestMemoryA4FreshFileNoStaleDump(t *testing.T) {
 	task := "edit foo.go"
 	readArgs, _ := json.Marshal(map[string]any{"path": "foo.go"})
@@ -214,8 +227,14 @@ func TestMemoryA4FreshFileNoStaleDump(t *testing.T) {
 	if !strings.Contains(joined, "NEW-FRESH-CONTENT") {
 		t.Errorf("assembled set must contain the FRESH file content:\n%s", joined)
 	}
-	if strings.Contains(joined, "OLD-STALE-CONTENT") {
-		t.Errorf("assembled set must NOT contain the stale read-dump of the edited file:\n%s", joined)
+	// The earlier dump STAYS: the tail is append-only (see recentTail). What matters
+	// is that the fresh pin comes after it, so the model's last word on the file is
+	// the on-disk truth.
+	if !strings.Contains(joined, "OLD-STALE-CONTENT") {
+		t.Errorf("the already-sent read-dump must remain — the tail is append-only:\n%s", joined)
+	}
+	if strings.LastIndex(joined, "NEW-FRESH-CONTENT") < strings.LastIndex(joined, "OLD-STALE-CONTENT") {
+		t.Errorf("the FRESH pin must come after the earlier dump, so it is the last word:\n%s", joined)
 	}
 }
 

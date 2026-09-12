@@ -66,7 +66,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	clientFactory := func(endpoint, model, apiKey string) llm.LLMClient {
 		return llm.New(endpoint, model, llm.WithAPIKey(apiKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
 	}
-	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
+	client := llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(os.Stderr)))
 
 	// Validate the model against the endpoint catalog and size the window from its
 	// advertised context_length. Same call as the headless path — the check used to
@@ -112,6 +112,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		StallRounds:          cfg.ChurnRounds,
 		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
+		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,
 		Model:                cfg.Model,
 		Temperature:          cfg.Temperature,

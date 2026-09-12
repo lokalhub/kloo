@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +47,28 @@ type Client struct {
 	httpClient *http.Client
 	timeout    time.Duration // per-call deadline for Complete
 	streamIdle time.Duration // abort a stream after this long with no new token
+	// cacheRejected remembers that THIS endpoint refused cache_control, so the
+	// marker is dropped for the rest of the run instead of costing a retry per
+	// request. It is per-Client and atomic on purpose: kloo runs more than one
+	// endpoint in a single binary (the main loop plus the curator/compactor
+	// paths), requests are issued from multiple goroutines, and a package-level
+	// var would both race and let one rejecting endpoint silently disable
+	// caching for every other endpoint in the process.
+	cacheRejected atomic.Bool
+	logf          func(format string, args ...any)
+}
+
+// WithLogf installs a one-line notice sink (nil ⇒ silent). Used for the
+// prompt-cache rejection notice, which must be visible but must never fail a run.
+func WithLogf(f func(format string, args ...any)) Option {
+	return func(c *Client) { c.logf = f }
+}
+
+// notify emits a single run notice when a sink is installed.
+func (c *Client) notify(format string, args ...any) {
+	if c.logf != nil {
+		c.logf(format, args...)
+	}
 }
 
 // Option customises a Client.
@@ -138,13 +161,104 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (ChatResponse, e
 	return resp, nil
 }
 
-// do marshals req and issues the POST, returning the live *http.Response (the
-// caller owns Body). Shared by Complete and Stream (task 05).
+// do issues the POST, recovering once from an endpoint that rejects
+// cache_control. Shared by Complete and Stream; the caller owns the Body.
+//
+// The recovery is deliberately narrow. It engages ONLY when this request actually
+// carried a marker and the reply was a 4xx whose body names the field, and it
+// retries exactly once without the marker. It does not widen the transient-retry
+// ladder (DefaultLLMRetryableStatusCodes): a 4xx is still not retryable in
+// general, and TestNonRetryable4xxStillNotRetried pins that.
 func (c *Client) do(ctx context.Context, req ChatRequest) (*http.Response, error) {
 	if req.Model == "" {
 		req.Model = c.model
 	}
-	req.Messages = normalizeMessages(req.Messages)
+	raw := req.Messages
+	if c.cacheRejected.Load() {
+		raw = stripCacheControl(raw)
+	}
+	req.Messages = normalizeMessages(raw)
+
+	resp, err := c.post(ctx, req)
+	if err != nil || !hasCacheControl(req.Messages) {
+		return resp, err
+	}
+	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
+		return resp, nil
+	}
+
+	// A 4xx on a request that asked for caching: read the body to see whether the
+	// field is what the endpoint objected to. If not, hand the response back
+	// untouched (with its body restored) so the caller reports the real error.
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil || !mentionsCacheControl(body) {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return resp, nil
+	}
+
+	if c.cacheRejected.CompareAndSwap(false, true) {
+		c.notify("prompt cache rejected by endpoint (http %d: %s) — retried without it; prompt caching is off for the rest of this run",
+			resp.StatusCode, firstLineOf(redactSecrets(string(body), c.apiKey)))
+	}
+	retry := req
+	retry.Messages = normalizeMessages(stripCacheControl(raw))
+	return c.post(ctx, retry)
+}
+
+// hasCacheControl reports whether any message carries a breakpoint.
+func hasCacheControl(msgs []Message) bool {
+	for _, m := range msgs {
+		if m.CacheControl != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// stripCacheControl returns msgs with every breakpoint removed. It copies rather
+// than mutating: the caller's slice is shared with the agent loop.
+func stripCacheControl(msgs []Message) []Message {
+	if !hasCacheControl(msgs) {
+		return msgs
+	}
+	out := make([]Message, len(msgs))
+	copy(out, msgs)
+	for i := range out {
+		out[i].CacheControl = nil
+	}
+	return out
+}
+
+// mentionsCacheControl reports whether an error body blames the cache field or the
+// content-parts shape it arrives in. Endpoints word this differently ("unknown
+// field", "unexpected keyword", "content must be a string"), so match on the
+// field and shape names rather than on any one provider's phrasing.
+func mentionsCacheControl(body []byte) bool {
+	s := strings.ToLower(string(body))
+	for _, needle := range []string{"cache_control", "cache control", "content parts", "content must be a string"} {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstLineOf trims an error body to one line so the notice stays a single line.
+func firstLineOf(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	const max = 160
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+// post marshals an already-normalized request and issues the POST.
+func (c *Client) post(ctx context.Context, req ChatRequest) (*http.Response, error) {
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: encode request: %w", err)
@@ -184,7 +298,11 @@ func normalizeMessages(in []Message) []Message {
 	out := make([]Message, 0, len(in))
 	for _, m := range in {
 		n := len(out)
-		if n > 0 && out[n-1].Role == m.Role && m.Role != RoleSystem {
+		// A cache breakpoint is a semantic boundary: merging the message that
+		// carries it with the one after would move the breakpoint BELOW content the
+		// marker was placed above, caching something volatile. Unmarked messages
+		// (every message when caching is off) merge exactly as before.
+		if n > 0 && out[n-1].Role == m.Role && m.Role != RoleSystem && out[n-1].CacheControl == nil {
 			prev := out[n-1]
 			switch {
 			case prev.Content == "":

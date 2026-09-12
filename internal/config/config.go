@@ -118,8 +118,10 @@ const (
 	// EnvRepeatNudgeRounds / EnvRepeatAbortRounds tune the repetition rail (same as
 	// --repeat-nudge-rounds / --repeat-abort-rounds). Raising the abort buys a model
 	// that re-reads its way out of a spin more chances before the run is cut.
-	EnvRepeatNudgeRounds    = "KLOO_REPEAT_NUDGE_ROUNDS"
-	EnvRepeatAbortRounds    = "KLOO_REPEAT_ABORT_ROUNDS"
+	EnvRepeatNudgeRounds = "KLOO_REPEAT_NUDGE_ROUNDS"
+	EnvRepeatAbortRounds = "KLOO_REPEAT_ABORT_ROUNDS"
+	// EnvPromptCache selects the prompt-caching mode (same as --prompt-cache).
+	EnvPromptCache          = "KLOO_PROMPT_CACHE"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
 	EnvLLMRetryCodes        = "KLOO_LLM_RETRY_CODES"
 	EnvLLMRetryBaseDelay    = "KLOO_LLM_RETRY_BASE_DELAY"
@@ -176,6 +178,9 @@ type Config struct {
 	// provider's prompt cache) or "system" (the legacy in-system-prompt layout,
 	// for an endpoint that rejects a non-leading system message).
 	MapPosition string
+	// PromptCache is the prompt-caching mode: "auto" (default — on only for an
+	// allowlisted provider), "off" or "on". Resolve it with PromptCacheEnabled.
+	PromptCache string
 	// Phase-04 autonomous-loop safety budgets.
 	MaxTokens           int // cumulative tokens ceiling per run (0 ⇒ unbounded)
 	MaxWallClockSeconds int // wall-clock ceiling per run in seconds (0 ⇒ unbounded)
@@ -304,6 +309,8 @@ type Flags struct {
 	// --repeat-abort-rounds) tune the repetition rail. nil ⇒ not set on the CLI.
 	RepeatNudgeRounds *int
 	RepeatAbortRounds *int
+	// PromptCache (--prompt-cache) is "auto", "off" or "on". nil ⇒ not set on the CLI.
+	PromptCache *string
 	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
 	StrictModel *bool
 	// NoMCP, when non-nil, forces MCP on/off above env+profile (true ⇒ disabled).
@@ -355,6 +362,7 @@ type profileEntry struct {
 	MaxContextTokens     *int     `json:"maxContextTokens,omitempty"`
 	CuratorBudgetTokens  *int     `json:"curatorBudgetTokens,omitempty"`
 	MapPosition          *string  `json:"mapPosition,omitempty"`
+	PromptCache          *string  `json:"promptCache,omitempty"`
 	MaxTokens            *int     `json:"maxTokens,omitempty"`
 	MaxWallClockSeconds  *int     `json:"maxWallClockSeconds,omitempty"`
 	ChurnRounds          *int     `json:"churnRounds,omitempty"`
@@ -469,6 +477,9 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	if e.MapPosition != nil {
 		cfg.MapPosition = *e.MapPosition
 	}
+	if e.PromptCache != nil && IsPromptCacheMode(*e.PromptCache) {
+		cfg.PromptCache = *e.PromptCache
+	}
 	if e.MaxTokens != nil {
 		cfg.MaxTokens = *e.MaxTokens
 	}
@@ -541,6 +552,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		MaxContextTokens:        DefaultMaxContextTokens,
 		CuratorBudgetTokens:     DefaultCuratorBudgetTokens,
 		MapPosition:             DefaultMapPosition,
+		PromptCache:             DefaultPromptCache,
 		MaxTokens:               DefaultMaxTokens,
 		MaxWallClockSeconds:     DefaultMaxWallClockSeconds,
 		ChurnRounds:             DefaultChurnRounds,
@@ -676,6 +688,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.CuratorBudgetTokens = n
 		}
 	}
+	if v := getenv(EnvPromptCache); v != "" {
+		if m := strings.ToLower(strings.TrimSpace(v)); IsPromptCacheMode(m) {
+			cfg.PromptCache = m
+		}
+	}
 	if v := getenv(EnvContextTokens); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			cfg.MaxContextTokens = n
@@ -753,6 +770,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.RepeatAbortRounds != nil {
 		cfg.RepeatAbortRounds = *flags.RepeatAbortRounds
+	}
+	if flags.PromptCache != nil {
+		cfg.PromptCache = *flags.PromptCache
 	}
 	if flags.StrictModel != nil {
 		cfg.StrictModel = *flags.StrictModel

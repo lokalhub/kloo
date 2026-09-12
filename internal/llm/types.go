@@ -5,7 +5,10 @@
 // OpenAI-compatible endpoint.
 package llm
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Role constants for chat messages.
 const (
@@ -78,6 +81,64 @@ type Message struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID links a tool-result message back to the assistant's call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// CacheControl, when set, asks the provider to cache the prompt UP TO AND
+	// INCLUDING this message (a "breakpoint"). It is tagged "-" because the field
+	// never serializes as a message key: MarshalJSON instead rewrites this one
+	// message's content into the OpenAI-compatible content-parts form that carries
+	// cache_control. nil ⇒ the message serializes exactly as it always has, which
+	// is what keeps every endpoint that has never heard of this field unaffected.
+	CacheControl *CacheControl `json:"-"`
+}
+
+// CacheControl is the prompt-cache breakpoint marker. "ephemeral" is the only
+// type the OpenAI-compatible providers define.
+type CacheControl struct {
+	Type string `json:"type"`
+}
+
+// CacheControlEphemeral is the marker to attach to a breakpoint message.
+func CacheControlEphemeral() *CacheControl { return &CacheControl{Type: "ephemeral"} }
+
+// contentPart is one element of the content-parts array form. Only a marked
+// message is ever serialized this way.
+type contentPart struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// markedMessage mirrors Message's serializable fields in the SAME key order, with
+// content as a parts array. Declared separately rather than reusing Message so the
+// unmarked path stays byte-for-byte what it was.
+type markedMessage struct {
+	Role             string        `json:"role"`
+	Content          []contentPart `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Name             string        `json:"name,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+}
+
+// MarshalJSON emits the plain OpenAI message shape unless this message carries a
+// cache breakpoint, in which case its content becomes a single-element parts array
+// carrying cache_control. An UNMARKED message is byte-identical to the pre-cache
+// serialization — that identity is the whole "never break other providers"
+// guarantee, and TestRequestBodyUnchangedWhenCacheOff pins it against a golden
+// captured from v0.16.7.
+func (m Message) MarshalJSON() ([]byte, error) {
+	// plain has no methods, so marshalling it cannot recurse back into this one.
+	type plain Message
+	if m.CacheControl == nil {
+		return json.Marshal(plain(m))
+	}
+	return json.Marshal(markedMessage{
+		Role:             m.Role,
+		Content:          []contentPart{{Type: "text", Text: m.Content, CacheControl: m.CacheControl}},
+		ReasoningContent: m.ReasoningContent,
+		Name:             m.Name,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+	})
 }
 
 // FinalizeReasoning applies the reasoning_content fallback: when Content is blank but

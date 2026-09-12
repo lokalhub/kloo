@@ -100,6 +100,12 @@ type Loop struct {
 	// ENRICHMENT only, never termination. 0 ⇒ DefaultMaxRepairAttempts.
 	MaxRepairAttempts int
 
+	// PromptCache, when true, asks the provider to cache the stable prompt prefix
+	// by marking its last message with a cache breakpoint. Resolved upstream in
+	// internal/config (mode + provider allowlist); this layer only places the
+	// marker and never learns a provider name.
+	PromptCache bool
+
 	// RepeatNudgeRounds / RepeatAbortRounds tune the repetition rail: how many
 	// IDENTICAL consecutive tool calls (name + args) before the loop injects one
 	// corrective observation, then halts the run as churn. 0 ⇒ the package
@@ -1176,6 +1182,11 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// Appended AFTER history, never spliced into it: a tool result must stay
 	// adjacent to the assistant message that requested it.
 	msgs = append(msgs, tailMsgs...)
+	// Prompt-cache breakpoint: mark the LAST message of the stable prefix — the
+	// final tail message, immediately above the per-turn pins. Everything below it
+	// (pins, then the repo map) is rewritten every turn, so a breakpoint there
+	// would cache nothing and burn the slot.
+	markCacheBreakpoint(msgs, l.PromptCache, pinnedMessages(l.Memory))
 	req := l.withThinkingControl(l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,
 		Messages:    msgs,
@@ -1258,6 +1269,42 @@ func estimateUsage(u llm.Usage, msgs []llm.Message, msg llm.Message) llm.Usage {
 
 // repoMapHeader labels the curated repo-map section, wherever it is placed.
 const repoMapHeader = "Repository map (most relevant first):\n"
+
+// pinnedMessages reports how many trailing history messages were per-turn pins in
+// the assembly just performed (0 when no working memory is wired).
+func pinnedMessages(m WorkingMemory) int {
+	if m == nil {
+		return 0
+	}
+	return m.Stats().PinnedMessages
+}
+
+// markCacheBreakpoint attaches the cache breakpoint to the last message of the
+// stable prefix. msgs is [system, ...history, map?]; the history's trailing pins
+// and the map are the volatile tail, so the breakpoint goes immediately above
+// them. A no-op when caching is off, which is what keeps the request byte-identical
+// for every endpoint that does not opt in.
+func markCacheBreakpoint(msgs []llm.Message, enabled bool, pins int) {
+	if !enabled || len(msgs) == 0 {
+		return
+	}
+	// Walk back over the trailing map message (never marked — it changes every
+	// turn) and the pins, to the last message that is stable across turns.
+	end := len(msgs) - 1
+	for end > 0 && isMapMessage(msgs[end]) {
+		end--
+	}
+	end -= pins
+	if end <= 0 { // nothing but the system message above: nothing worth caching
+		return
+	}
+	msgs[end].CacheControl = llm.CacheControlEphemeral()
+}
+
+// isMapMessage reports whether a message is the trailing repo map.
+func isMapMessage(m llm.Message) bool {
+	return m.Role == llm.RoleUser && strings.HasPrefix(m.Content, repoMapHeader)
+}
 
 // repoMapSection renders the curated map as a standalone prompt section, or ""
 // when there is no map for this turn.

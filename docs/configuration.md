@@ -47,6 +47,7 @@ churn detection as the primary guard).
 | `--map-position` | `tail` | Where the repo map sits: `tail` (after the conversation) or `system` (legacy, inside the system prompt). Affects prompt-cache reuse in proportion to map size — see below. |
 | `--repeat-nudge-rounds` | `0` (⇒ `3`) | Identical consecutive tool calls (name + args) before the repetition rail injects a corrective nudge. `0` ⇒ the built-in default `3`. For a repeated **read-only** call the nudge re-arms and fires at every multiple of this number; for a repeated **mutating** call it is one-shot. |
 | `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** tool calls (`edit_file`, `write_file`, `run_command`) before the repetition rail halts the run as churn. `0` ⇒ the built-in default `6`. Read-only calls are exempt — see [the repetition rail](#the-repetition-rail-and-repeated-reads). |
+| `--prompt-cache` | `auto` | Ask the provider to cache the stable prompt prefix: `auto` (on only for a provider known to support it), `on` (force it — the escape hatch for a provider the allowlist does not know yet), `off`. See [prompt caching](#prompt-caching---prompt-cache). `kloo doctor` prints the resolved state. |
 | `--strict-model` | off | Also fail on a single-model endpoint, the one case the default only warns about. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
@@ -342,6 +343,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_CURATOR_BUDGET` | Cap on the per-step assembled repo map (same as `--curator-budget`). |
 | `KLOO_REPEAT_NUDGE_ROUNDS` | Repetition-rail nudge threshold (same as `--repeat-nudge-rounds`). Only a value **greater than 0** is accepted; `0`, a negative number, or a non-integer is silently ignored and the built-in default `3` applies. |
 | `KLOO_REPEAT_ABORT_ROUNDS` | Repetition-rail abort threshold for **mutating** calls (same as `--repeat-abort-rounds`). Same `> 0` rule as above; otherwise the built-in default `6` applies. |
+| `KLOO_PROMPT_CACHE` | Prompt-caching mode: `auto`, `on` or `off` (same as `--prompt-cache`). An unrecognised value is ignored and the default `auto` applies. |
 | `KLOO_CTX_AUTO_CAP` | Ceiling on automatic window sizing, for a server whose real limit is below what its catalog advertises. |
 | `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
 | `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
@@ -412,6 +414,7 @@ profile if you want a hard kloo-side cost cap.
 | `maxContextTokens` | `8000` | The **model's context window** — what the endpoint can accept. Drives the prompt budget and the compaction trigger. Auto-sized from the endpoint catalog when you don't set it (see below). |
 | `curatorBudgetTokens` | `32768` | Cap on what kloo **assembles** per step (the repo map), clamped to the usable window. Separate from the window on purpose — see below. |
 | `mapPosition` | `tail` | Where the curated repo map goes: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
+| `promptCache` | `auto` | Prompt-caching mode for this model: `auto`, `on` or `off`. See [prompt caching](#prompt-caching---prompt-cache). |
 | `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
 | `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
 | `churnRounds` | `3` | Repeated-failure / repeated-edit rounds before the loop halts and reports. |
@@ -583,6 +586,55 @@ approx_tokens:  9 (estimated - uncalibrated, assuming 4.00 chars/token)
 A run's `--json` reports `token_ratio` (what was measured) and
 `token_estimate_error` (how wrong flat chars/4 would have been), omitted when the
 endpoint reports no usage.
+
+### Prompt caching (`--prompt-cache`)
+
+Most of kloo's token spend is prompt, re-sent every turn. Providers that support
+prompt caching will serve a repeated **prefix** from cache if you ask them to — but
+you have to ask, by marking a breakpoint on the last message you want cached.
+
+`--prompt-cache` / `KLOO_PROMPT_CACHE` / profile `promptCache` chooses the mode:
+
+| Mode | Behaviour |
+|---|---|
+| `auto` (default) | On **only** for a provider known to accept the marker; off for everything else. An endpoint that has never heard of the field is never sent it speculatively. |
+| `on` | Force it. The escape hatch for a provider the allowlist does not know yet. |
+| `off` | Never ask. |
+
+`kloo doctor` prints the mode **and what it resolved to**, which is the line to check
+when you expect cache hits and are not getting them:
+
+```text
+prompt_cache: auto (resolved=off)      ← endpoint not on the allowlist
+prompt_cache: auto (resolved=on)       ← allowlisted provider
+prompt_cache: off (resolved=off)       ← forced off
+prompt_cache: on (resolved=on)         ← forced on
+```
+
+**Where the breakpoint goes.** On the last message of the stable prefix — below the
+conversation, above the per-turn pins (the last verify result and the current file,
+both regenerated every turn) and above the trailing repo map. A breakpoint any lower
+would cache content that changes every turn, which caches nothing and spends the
+slot.
+
+**If the provider rejects it.** kloo retries the request **once** without the marker,
+prints one line, and stops asking for the rest of the run:
+
+```text
+prompt cache rejected by endpoint (http 400: …) — retried without it; prompt caching is off for the rest of this run
+```
+
+The run is never failed for this, and the memory is per-endpoint: another endpoint in
+the same process keeps asking.
+
+**Off means unchanged.** With caching resolved off — the default everywhere except an
+allowlisted provider — the request body kloo sends is byte-for-byte what it sent
+before this feature existed. That identity is pinned by a test against a golden
+captured from a v0.16.7 binary.
+
+**No claim is made here about how much caching saves.** That is a property of a
+provider and has to be measured against one; see the note on measuring rather than
+reasoning in the section below.
 
 ### Prompt caching and map placement
 
@@ -951,6 +1003,7 @@ Common sections, all optional:
     "churnRounds": 3,
     "repeatNudgeRounds": 3,        // 0 / omitted ⇒ built-in default 3
     "repeatAbortRounds": 12,       // mutating calls only; 0 / omitted ⇒ built-in default 6
+    "promptCache": "auto",         // "auto" | "on" | "off"
     "llmMaxRetries": 2,
     "llmRetryCodes": [408, 429, 500, 502, 503, 504],
     "llmRetryBaseDelay": "2s",
@@ -998,6 +1051,7 @@ hooks around task runs:
 Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`,
 `maxTokens`, `maxWallClockSeconds`, `churnRounds`, `repeatNudgeRounds`,
 `repeatAbortRounds`, `llmMaxRetries`,
+`maxTokens`, `maxWallClockSeconds`, `churnRounds`, `promptCache`, `llmMaxRetries`,
 `llmRetryCodes`, `llmRetryBaseDelay`, `llmRetryMaxDelay`,
 `llmColdLoadTimeout`, `llmStreamIdleTimeout`, `noThink`.
 Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,

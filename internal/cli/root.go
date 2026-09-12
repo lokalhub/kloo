@@ -137,6 +137,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagMapPosition string
 		flagRepeatNudge int
 		flagRepeatAbort int
+		flagPromptCache string
 		flagStrictModel bool
 		flagAllowedDirs []string
 		flagAllowEnv    []string
@@ -210,6 +211,12 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("repeat-abort-rounds") {
 				flags.RepeatAbortRounds = &flagRepeatAbort
+			}
+			if fs.Changed("prompt-cache") {
+				if !config.IsPromptCacheMode(flagPromptCache) {
+					return fmt.Errorf("invalid --prompt-cache %q (want one of: %s)", flagPromptCache, strings.Join(config.PromptCacheModes(), ", "))
+				}
+				flags.PromptCache = &flagPromptCache
 			}
 			if fs.Changed("strict-model") {
 				flags.StrictModel = &flagStrictModel
@@ -320,6 +327,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
 	f.IntVar(&flagRepeatNudge, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&flagRepeatAbort, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
+	f.StringVar(&flagPromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
 	f.BoolVar(&flagStrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "", "override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
@@ -394,6 +402,12 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("repeat-abort-rounds") {
 		flags.RepeatAbortRounds = &values.RepeatAbortRounds
+	}
+	if fs.Changed("prompt-cache") {
+		if !config.IsPromptCacheMode(values.PromptCache) {
+			return flags, fmt.Errorf("invalid --prompt-cache %q (want one of: %s)", values.PromptCache, strings.Join(config.PromptCacheModes(), ", "))
+		}
+		flags.PromptCache = &values.PromptCache
 	}
 	if fs.Changed("strict-model") {
 		flags.StrictModel = &values.StrictModel
@@ -482,6 +496,7 @@ type configFlagValues struct {
 	MapPosition          string
 	RepeatNudgeRounds    int
 	RepeatAbortRounds    int
+	PromptCache          string
 	StrictModel          bool
 	AllowedDirs          []string
 	AllowEnv             []string
@@ -518,6 +533,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
 	f.IntVar(&v.RepeatNudgeRounds, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&v.RepeatAbortRounds, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
+	f.StringVar(&v.PromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
 	f.BoolVar(&v.StrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
 	f.Float64Var(&v.Temperature, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.BoolVar(&v.NoMCP, "no-mcp", false, "disable all MCP servers for this run (overrides KLOO_MCP and the profile's mcpServers)")
