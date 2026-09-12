@@ -676,6 +676,50 @@ from a real 16-step run against `deepseek/deepseek-v4-flash`):
 The fields are omitted entirely when the provider reports nothing, which is the
 normal case for a local server.
 
+## When verify runs
+
+The verify command is kloo's only success signal, and it used to run after **every**
+step — including steps that only read a file and so could not possibly have changed
+its result. Measurement across an 83-run benchmark found `verify_attempts >= steps`
+in 78 of them: 1,023 full test-suite invocations, most of them re-checking a tree
+nothing had touched.
+
+kloo now runs verify only when a step **may have changed the tree** since the last
+verify:
+
+| Step | Verify runs? |
+|---|---|
+| `read_file`, `list_dir`, `read_dir`, `search`, `command_output` | no |
+| `run_command` whose command only inspects (`go test`, `git diff`, `ls`) | no |
+| `edit_file` / `write_file` that APPLIED | yes |
+| `edit_file` / `write_file` that failed to apply | no — nothing changed |
+| `run_command` that ran (including one KILLED by its timeout) | yes |
+| any other tool, including an [MCP](mcp.md) tool under a name kloo does not know | yes |
+
+The last row is deliberate: mutation is defined as the **complement** of read-only,
+not as a list of edit tools. An unrecognised tool might have changed anything, so it
+is treated as though it did. A miss costs one extra verify; the opposite mistake
+costs a missed regression.
+
+A command killed by its timeout also counts. `run_command` returns the output it
+captured before the kill, so a half-finished `npm install` has already written to the
+tree even though the call reports an error.
+
+**`finish` always verifies, unconditionally.** That is what makes skipping safe: no
+run is ever called successful on a verify that predates the last change. If something
+outside kloo breaks the tree after the last green, the finish verify catches it and
+the run reports `answered`, not `success`.
+
+Nothing else changed. The verify command, its timeout, and the
+[precheck/postcheck hooks](#verifier-hooks---precheck----postcheck) all behave
+exactly as before — this governs *when* verify runs, never *what* it runs. The churn,
+stall, repeated-verify and exploration rails all stop on the same turn they did
+before; a skipped verify is neutral to them rather than being read as a pass.
+
+You will see this in `--json` as `tool_counters.verify_attempts` being well below
+`steps` on a read-heavy run, and in the transcript as the verify line no longer
+appearing after steps that only read.
+
 ## Choosing and changing models
 
 There are two ways to set the model: **at launch** (a flag or profile) and **live
@@ -787,6 +831,8 @@ The JSON shape is:
 | `failure_detail` | Sparse redacted detail for the category: source, reason, class, tool, HTTP status, and bounded message when available. |
 | `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file` (**diagnostic only** — it counts identical repeated `read_file` calls and never terminates a run; see [the repetition rail](#the-repetition-rail-and-repeated-reads)), `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts`, `tool_errors`, `off_scope_edits` (scope-denied writes + rejected scoped `run_command`), and `read_only_edits` (the read-only subset). Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
 | `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Most rails are one-shot per streak, but `repeated-call` fires **once per `repeatNudgeRounds` rounds** while a read-only call keeps repeating (it re-arms rather than latching), so a count above 1 is expected on a read spin — see [the repetition rail](#the-repetition-rail-and-repeated-reads). Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
+| `tool_counters` | Optional tool-quality counters: `invalid_tool_calls`, `repeated_read_file`, `repeated_edits`, `failed_edits`, `no_op_edits`, `verify_attempts` (real verify runs — see [when verify runs](#when-verify-runs), so this is normally LESS than `steps`), `tool_errors`, `off_scope_edits` (scope-denied writes + rejected scoped `run_command`), and `read_only_edits` (the read-only subset). Omitted when all zero, except benchmark mode includes the object even when all counters are zero. The human footer prints a compact `tool counters:` line when any are non-zero. |
+| `rail_fires` | Optional tally of the soft recovery rails that fired this run (corrective injected, run continued), keyed by rail name (`confirm-finish`, `promise-to-act`, `repeated-call`, `explore`). Omitted when none fired. Lets a benchmark assert a run's self-corrections — e.g. that an acted multi-step run was rescued by exactly one `confirm-finish` nudge — instead of parsing the transcript. The human footer prints the same as a `rails:` line. |
 | `prechecks`, `postchecks` | Optional arrays of the [verifier-hook](#verifier-hooks---precheck----postcheck) gates attempted for the final verify — each `{command, passed, exit_code}`. Omitted when no hooks are configured. |
 | `files_changed` | Changed-file accounting for the run: `{count, paths}` with workspace-relative paths (git working tree vs HEAD, plus untracked, sorted). Present in `--json`/`--benchmark`; `count:0` with an empty list for a clean tree or a non-git workspace. |
 | `off_scope_edits` | Count of model writes (and scoped `run_command` calls) the scope policy denied this run — from the counter, not transcript scraping. Incremented even when no file changed. Mirrors `tool_counters.off_scope_edits`. |
