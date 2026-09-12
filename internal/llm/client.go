@@ -311,6 +311,16 @@ func normalizeMessages(in []Message) []Message {
 				prev.Content = strings.TrimRight(prev.Content, "\n") + "\n" + m.Content
 			}
 			prev.ToolCalls = append(prev.ToolCalls, m.ToolCalls...)
+			// Carry the INCOMING breakpoint onto the merged message. The guard above
+			// only protects prev's marker, so without this an incoming marker was
+			// copied nowhere and silently vanished — the request went out with no
+			// breakpoint, no error, and a quietly worse hit rate.
+			//
+			// Moving it is exactly right rather than merely safe: the merged message
+			// ends where m ended, so a marker meaning "cache through the end of m"
+			// still marks the same boundary. prev.CacheControl is necessarily nil
+			// here — a non-nil one fails the guard and never reaches this branch.
+			prev.CacheControl = m.CacheControl
 			out[n-1] = prev
 			continue
 		}
