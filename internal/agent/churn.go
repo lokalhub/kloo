@@ -76,6 +76,16 @@ func (c *churnDetector) Observe(t Turn) {
 	// as acting because it can mutate the tree (rm/mv/sed -i), so work done through
 	// the shell — invisible to the edit signal — no longer hides a stuck loop.
 	switch {
+	case t.VerifySkipped:
+		// The verify gate skipped this turn: nothing mutated, so the previous
+		// result still stands and no NEW evidence arrived. Neutral — neither counts
+		// nor resets — exactly like the ReadOnly case below.
+		//
+		// Placed FIRST, ahead of the blank-output reset, and that order is
+		// load-bearing: a skipped turn carries VerifyOutput: "", so
+		// `case t.VerifyOutput == "" would reset` failCount and disarm the
+		// repeated-failure rail on every skipped turn. Written beside ReadOnly
+		// instead, this case would be unreachable.
 	case t.VerifyOutput == "":
 		c.lastFail = ""
 		c.failCount = 0

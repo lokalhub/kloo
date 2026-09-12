@@ -286,6 +286,15 @@ type Turn struct {
 	// spinning; the failure rail must not also police it, or reading the files the
 	// task named becomes fatal. See [[kloo-churn-flail-gap]].
 	ReadOnly bool
+	// VerifySkipped is true when a verify was DUE this turn and was skipped because
+	// nothing mutated since the last one. It is not the same as "no verifier
+	// configured": in unverified mode there is no verify to skip, and the loop sets
+	// this false there so that path stays byte-identical to pre-gate behaviour.
+	//
+	// The churn rail must treat such a turn as NEUTRAL. Passing VerifyOutput: ""
+	// instead would read as "verify passed" and reset failCount on every read-only
+	// turn, silently disarming the repeated-failure rail.
+	VerifySkipped bool
 }
 
 // ChurnDetector halts a no-progress loop. (Seam implemented in churn.go.)
