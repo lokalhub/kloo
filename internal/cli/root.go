@@ -139,6 +139,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagRepeatAbort  int
 		flagExploreNudge int
 		flagExploreAbort int
+		flagExploreTotal int
 		flagPromptCache  string
 		flagStrictModel  bool
 		flagAllowedDirs  []string
@@ -219,6 +220,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("explore-abort-rounds") {
 				flags.ExploreAbortRounds = &flagExploreAbort
+			}
+			if fs.Changed("explore-total-cap") {
+				flags.ExploreTotalCap = &flagExploreTotal
 			}
 			if fs.Changed("prompt-cache") {
 				if !config.IsPromptCacheMode(flagPromptCache) {
@@ -336,6 +340,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagRepeatNudge, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&flagRepeatAbort, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreNudge, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
+	f.IntVar(&flagExploreTotal, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreAbort, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.StringVar(&flagPromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
 	f.BoolVar(&flagStrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
@@ -418,6 +423,9 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("explore-abort-rounds") {
 		flags.ExploreAbortRounds = &values.ExploreAbortRounds
+	}
+	if fs.Changed("explore-total-cap") {
+		flags.ExploreTotalCap = &values.ExploreTotalCap
 	}
 	if fs.Changed("prompt-cache") {
 		if !config.IsPromptCacheMode(values.PromptCache) {
@@ -514,6 +522,7 @@ type configFlagValues struct {
 	RepeatAbortRounds    int
 	ExploreNudgeRounds   int
 	ExploreAbortRounds   int
+	ExploreTotalCap      int
 	PromptCache          string
 	StrictModel          bool
 	AllowedDirs          []string
@@ -551,6 +560,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
 	f.IntVar(&v.RepeatNudgeRounds, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&v.ExploreNudgeRounds, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
+	f.IntVar(&v.ExploreTotalCap, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.ExploreAbortRounds, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.RepeatAbortRounds, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
 	f.StringVar(&v.PromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
