@@ -709,3 +709,49 @@ func TestUsableWindowReservesHeadroom(t *testing.T) {
 		}
 	}
 }
+
+// THE INVARIANT: the component budgets must fit UNDER the compaction trigger,
+// with room left for the conversation compaction exists to make space for.
+//
+// They did not. map was 0.35 of the curator budget, hot was 0.35 of the RAW
+// window — two different bases — and at window 65536 they summed to 41287 against
+// a trigger of 36700. Every turn projected over the trigger, so compaction fired
+// continuously: kloo-bench C17 took 16 compactions in 21 steps and never held the
+// test and the source at once long enough to write a fix.
+//
+// This test fails on any window where the budgets stop fitting, which is the
+// property that actually matters and that no test asserted before.
+func TestBudgetsFitUnderTheCompactionTrigger(t *testing.T) {
+	for _, window := range []int{8000, 16384, 32768, 65536, 131072, 200000} {
+		usable := usableWindow(window)
+		trigger := int(float64(usable) * compactTriggerFrac)
+		m := mapBudgetTokens(EffectiveCuratorBudget(window, 0))
+		h := hotBudgetTokens(window)
+
+		if m+h >= trigger {
+			t.Errorf("window %d: map %d + hot %d = %d >= trigger %d — the budgets alone "+
+				"force a compaction every turn", window, m, h, m+h, trigger)
+		}
+		// and they must leave a MEANINGFUL slice for fresh conversation, not 1 token
+		if headroom := trigger - (m + h); headroom < trigger/10 {
+			t.Errorf("window %d: only %d tokens of headroom under the trigger (%d) — "+
+				"too little room for the conversation", window, headroom, trigger)
+		}
+	}
+}
+
+// The two budgets must be computed from the SAME base. Mixing usable-window and
+// raw-window bases is what let them overflow unnoticed.
+func TestBudgetsScaleTogether(t *testing.T) {
+	small, large := 32768, 65536
+	mS, hS := mapBudgetTokens(EffectiveCuratorBudget(small, 0)), hotBudgetTokens(small)
+	mL, hL := mapBudgetTokens(EffectiveCuratorBudget(large, 0)), hotBudgetTokens(large)
+
+	if mL <= mS || hL <= hS {
+		t.Fatalf("doubling the window did not grow both budgets: map %d->%d, hot %d->%d", mS, mL, hS, hL)
+	}
+	ratio := func(a, b int) float64 { return float64(a) / float64(b) }
+	if r1, r2 := ratio(mL, mS), ratio(hL, hS); r1 < 1.9 || r1 > 2.1 || r2 < 1.9 || r2 > 2.1 {
+		t.Errorf("budgets must scale linearly with the window: map x%.2f, hot x%.2f", r1, r2)
+	}
+}
