@@ -118,6 +118,9 @@ type Loop struct {
 	// the loop nudges the model to act, then stops the run. 0 ⇒ the package defaults.
 	ExploreNudgeRounds int
 	ExploreAbortRounds int
+	// ExploreTotalCap bounds consecutive read-only turns regardless of novelty;
+	// 0 ⇒ DefaultExploreTotalCap.
+	ExploreTotalCap int
 
 	// EditFailLimit is how many consecutive failed edit_file attempts (no successful
 	// edit between) before the run halts as churn. 0 ⇒ DefaultEditFailLimit.
@@ -250,6 +253,9 @@ const (
 const (
 	DefaultExploreNudgeRounds = 6
 	DefaultExploreAbortRounds = 16
+	// DefaultExploreTotalCap bounds TOTAL consecutive read-only turns. 16 distinct
+	// reads is normal on a real repo; 40 without a single edit is a spiral.
+	DefaultExploreTotalCap = 40
 )
 
 // DefaultEditFailLimit bounds the failed-edit rail: after this many CONSECUTIVE
@@ -340,6 +346,16 @@ func (l *Loop) exploreNudgeRounds() int {
 		return l.ExploreNudgeRounds
 	}
 	return DefaultExploreNudgeRounds
+}
+
+// exploreTotalCap bounds consecutive read-only turns however varied they are.
+// Sized for a real repo: kloo-bench cases need 20-30 reads to locate a one-file
+// change, so the cap must clear that comfortably while still stopping a spiral.
+func (l *Loop) exploreTotalCap() int {
+	if l.ExploreTotalCap > 0 {
+		return l.ExploreTotalCap
+	}
+	return DefaultExploreTotalCap
 }
 
 func (l *Loop) exploreAbortRounds() int {
@@ -476,7 +492,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// no edit/run_command, and whether the one-shot nudge fired. Catches a weak
 		// model that inspects+analyzes forever without acting.
 		exploreStreak int
-		exploreNudged bool
+		// The turn count at which the nudge last fired, so it re-arms at every
+		// multiple instead of once per run: one nudge at turn 6 is easy to ignore.
+		exploreNudgedAt int
+		// Read targets already visited this run. Revisiting one is not new ground.
+		seenTargets  = map[string]bool{}
+		exploreTotal int
 
 		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
@@ -1088,19 +1109,54 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// file, narrating analysis and asking the user questions, but never edits — and
 		// because it reads a DIFFERENT file each turn (not repetition), with no verify
 		// change (not stall) and no edit/failure (not churn), nothing else stops it; it
-		// spins to the step ceiling. Count consecutive READ-ONLY turns (any edit / write
-		// / run_command resets it): nudge once to act-or-ask, then stop the run
-		// (ReasonAnswered) so the human can step in.
+		// spins to the step ceiling.
+		//
+		// The streak counts read-only turns that reveal NOTHING NEW. Reading a file
+		// this run has not read before is exploration doing its job: on a real repo a
+		// competent model reads many files to locate a one-file change, and a raw
+		// count of read-only turns cannot tell that from a 2B model narrating in a
+		// loop. Measured on kloo-bench (22 real-commit cases, median ONE source file
+		// edited per case): every v0.17.1 failure was this rail stopping a run at 16
+		// read-only steps having written nothing.
+		//
+		// A repeat of something already seen still climbs the streak, so the weak-model
+		// spin the rail was built for is still caught.
 		if readOnlyTurn {
-			exploreStreak++
+			exploreTotal++ // read-only turns since the last action, new ground or not
+			sig := exploreSignature(call)
+			if sig != "" && !seenTargets[sig] {
+				seenTargets[sig] = true
+				exploreStreak = 0 // new ground: this turn made progress
+			} else {
+				exploreStreak++
+			}
 		} else {
-			exploreStreak, exploreNudged = 0, false
+			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
 		}
 		switch {
+		// A CEILING on total consecutive read-only turns, independent of whether each
+		// covers new ground. Measured on kloo-bench case C12: a model issued 42
+		// DISTINCT searches and 9 other reads without a single edit, burning 1.2M
+		// tokens to the step budget — every query was new ground, so the no-new-ground
+		// streak alone never fired. Distinctness proves a turn is not a REPEAT; it does
+		// not prove the run is converging on a change.
+		case exploreTotal >= l.exploreTotalCap():
+			return finish(ReasonExploreStop, nil, nil, nil)
 		case exploreStreak >= l.exploreAbortRounds():
-			return finish(ReasonAnswered, nil, nil, nil)
-		case exploreStreak >= l.exploreNudgeRounds() && !exploreNudged:
-			exploreNudged = true
+			// ReasonExploreStop, not ReasonAnswered: a run a RAIL killed with no edits
+			// is not the model answering a question, and reporting it as "answered"
+			// made a stopped run indistinguishable from a clean one in every report
+			// and benchmark that reads the reason.
+			return finish(ReasonExploreStop, nil, nil, nil)
+		// The NUDGE keys on TOTAL read-only turns, not the no-new-ground streak, and
+		// re-arms. It only appends a message, so firing it early and repeatedly is
+		// cheap — and it is what converts reading into an edit attempt. Measured on
+		// kloo-bench C30: with the nudge tied to the no-new-ground streak a model
+		// reading distinct files was NEVER nudged and made 0 edits, where the same
+		// case under the old rule was nudged and made 2. Nudge eagerly; abort
+		// reluctantly. They are not the same decision and must not share a counter.
+		case exploreTotal > 0 && exploreTotal%l.exploreNudgeRounds() == 0 && exploreNudgedAt != exploreTotal:
+			exploreNudgedAt = exploreTotal
 			recordRail(RailExplore)
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
@@ -1533,6 +1589,19 @@ func observation(call tools.Call, res tools.Result, err error) llm.Message {
 		}
 	}
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// exploreSignature identifies WHAT a read-only turn looked at, so the explore rail
+// can tell "read a file I have not seen" (progress) from "looked at the same thing
+// again" (spinning). Empty when the call carries no identifiable target, which is
+// treated as no-new-ground so an unrecognised read cannot defeat the rail.
+func exploreSignature(call tools.Call) string {
+	for _, k := range []string{"path", "dir", "query", "pattern", "command", "id"} {
+		if v := str(call.Args[k]); v != "" {
+			return call.Name + "\x00" + v
+		}
+	}
+	return ""
 }
 
 // editSignature is the normalised edit a churn detector compares (empty for

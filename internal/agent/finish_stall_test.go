@@ -154,8 +154,10 @@ func TestLoopStallNotTrippedBeforeFirstAction(t *testing.T) {
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"read_file", map[string]any{"path": "a"}})})
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
 	loop.StallRounds = 3
-	// Disable explore rail so only stall and budget gates can fire.
-	loop.ExploreNudgeRounds, loop.ExploreAbortRounds = 1000, 1000
+	// Disable explore rail so only stall and budget gates can fire. All THREE of
+	// its ceilings must be raised: the total cap bounds read-only turns regardless
+	// of novelty, so nudge/abort alone no longer disables the rail.
+	loop.ExploreNudgeRounds, loop.ExploreAbortRounds, loop.ExploreTotalCap = 1000, 1000, 1000
 	// Disable repetition rail so only stall and budget can stop this.
 	loop.RepeatNudgeRounds, loop.RepeatAbortRounds = 1000, 1000
 
