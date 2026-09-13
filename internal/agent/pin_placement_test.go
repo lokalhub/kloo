@@ -50,11 +50,18 @@ func shedPressureInput() MemoryInput {
 // worktree before the pin move landed.
 func TestShedOrderUnchangedByPinPlacement(t *testing.T) {
 	const (
-		baselinePromptTokens  = 2071
+		// Updated deliberately for the budget-partition fix. The map and hot budgets
+		// were fractions of DIFFERENT bases (curator budget / raw window) and summed
+		// to MORE than the compaction trigger at every window size, so compaction
+		// fired every turn. They are now a partition of the trigger, which changes
+		// how much survives a shed — hence new literals. The PROPERTY this file
+		// guards (pin placement must not change the shed order) is unaffected and
+		// still asserted below; only the sizes moved.
+		baselinePromptTokens  = 1672
 		baselineWindowTokens  = 4000
-		baselineSummaryTokens = 386
-		baselineDroppedTurns  = 62
-		baselineHotBudget     = 1400
+		baselineSummaryTokens = 435
+		baselineDroppedTurns  = 70
+		baselineHotBudget     = 1008 // budget-partition fix: hot is now a fraction of the trigger, same base as map
 		baselineTrimmedTail   = false
 	)
 

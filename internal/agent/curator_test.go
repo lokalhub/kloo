@@ -59,9 +59,15 @@ func TestSplitBoundsLargeWindows(t *testing.T) {
 		t.Errorf("compaction trigger = %d, want %d", got, want)
 	}
 	// Appetite does not.
+	// 6881, not 11468: the map budget is now a fraction of the COMPACTION TRIGGER
+	// rather than of the curator budget directly. The old value, combined with a hot
+	// budget taken from the RAW window, summed to MORE than the trigger at every
+	// window size, so the two budgets alone forced a compaction every turn. See
+	// TestBudgetsFitUnderTheCompactionTrigger.
 	mapBudget := mapBudgetTokens(EffectiveCuratorBudget(window, defaultCap))
-	if mapBudget != 11_468 {
-		t.Errorf("map budget = %d, want 11468", mapBudget)
+	want := mapBudgetTokens(defaultCap)
+	if mapBudget != want {
+		t.Errorf("map budget = %d, want %d", mapBudget, want)
 	}
 	if unbounded := mapBudgetTokens(usableWindow(window)); mapBudget >= unbounded {
 		t.Errorf("map budget %d should be far below the unbounded %d", mapBudget, unbounded)

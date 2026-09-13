@@ -18,10 +18,30 @@ import (
 // trigger and the hard ceiling (1.0 × window) for the running-summary slot.
 const (
 	compactTriggerFrac = 0.70 // projected prompt > this × window ⇒ start a compaction
-	mapBudgetFrac      = 0.35 // repo-map section cap (was 100% — the "map eats the window" bug)
-	hotBudgetFrac      = 0.35 // pin-hot set + recent tail cap
-	maxKeepItemTokens  = 256  // per-item verbatim cap; a larger kept item is truncated-with-marker
-	ceilSlack          = 4    // tokens reserved when truncating, to absorb ApproxTokens rounding so the hard ceiling holds strictly
+	// The map and hot budgets are a PARTITION OF WHAT FITS BEFORE COMPACTION, as
+	// fractions of the compaction trigger — not independent fractions of whatever
+	// base each happened to use.
+	//
+	// They used to be 0.35 of the curator budget and 0.35 of the raw WINDOW, two
+	// different bases, and their sum EXCEEDED the trigger:
+	//
+	//	window 65536 -> usable 52428, trigger 36700
+	//	  map 0.35 x 52428 = 18350
+	//	  hot 0.35 x 65536 = 22937
+	//	                     -----
+	//	                     41287  >  36700
+	//
+	// So once both filled, every turn projected over the trigger and compacted.
+	// Measured on kloo-bench C17: 16 compactions in 21 steps, ~25k tokens/step, the
+	// same test file read four times, zero edits — the model could never hold the
+	// test and the source at once long enough to write a fix.
+	//
+	// Now they sum to 0.75 of the trigger, leaving a quarter of it for the fresh
+	// conversation that compaction exists to make room for.
+	mapBudgetFrac     = 0.30 // repo-map section cap, as a fraction of the compaction trigger
+	hotBudgetFrac     = 0.45 // pin-hot set + recent tail cap, same base
+	maxKeepItemTokens = 256  // per-item verbatim cap; a larger kept item is truncated-with-marker
+	ceilSlack         = 4    // tokens reserved when truncating, to absorb ApproxTokens rounding so the hard ceiling holds strictly
 	// usableWindowFrac budgets the PROMPT to a fraction of the model's context
 	// window (maxContextTokens), reserving the rest for: the COMPLETION (n_ctx holds
 	// prompt + output), the tool/function schemas added to each request (not counted
@@ -54,7 +74,11 @@ func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 // Those are different decisions, and tying them together was a real bug: a model
 // advertising a 900k window made this authorise a 252k-token repo map on EVERY
 // turn. Capacity is discovered from the endpoint; appetite is chosen by us.
-func mapBudgetTokens(curator int) int { return int(float64(curator) * mapBudgetFrac) }
+// mapBudgetTokens caps the repo-map section. Budgeted against the COMPACTION
+// TRIGGER, so the map can never be large enough to force a compaction by itself.
+func mapBudgetTokens(curator int) int {
+	return int(float64(curator) * compactTriggerFrac * mapBudgetFrac)
+}
 
 // EffectiveCuratorBudget resolves the per-step context-assembly budget from the
 // model's window and the configured curator cap, clamped so the curator can never
@@ -75,7 +99,11 @@ func EffectiveCuratorBudget(window, configured int) int {
 // one scales with the WINDOW, not the curator budget: hot state is conversation
 // you already have, so a bigger window should keep more of it. Only the repo map
 // (which kloo re-assembles and re-pays for each turn) is appetite.
-func hotBudgetTokens(window int) int { return int(float64(window) * hotBudgetFrac) }
+func hotBudgetTokens(window int) int {
+	// Against the same base as the map: usable window, then the trigger. Using the
+	// RAW window here was half of why the two budgets overflowed the trigger.
+	return int(float64(usableWindow(window)) * compactTriggerFrac * hotBudgetFrac)
+}
 
 // summaryPrefix labels the running-summary slot inserted right after the task.
 const summaryPrefix = "Progress so far (compacted):\n"
