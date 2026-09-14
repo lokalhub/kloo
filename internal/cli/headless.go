@@ -34,6 +34,9 @@ const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
 // is involved, so it works under nohup, CI, or a captured pipe (the Phase-06
 // acceptance benchmark, task 03).
 func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
+	// The context fractions multiply and decide how much of --ctx kloo actually
+	// works in; apply them before anything budgets against the window.
+	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return maybeBenchmarkSetupError(cfg, err)

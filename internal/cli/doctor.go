@@ -69,6 +69,10 @@ type resolvedConfigDiagnostic struct {
 	ChurnRounds            int               `json:"churn_rounds"`
 	RepeatNudgeRounds      int               `json:"repeat_nudge_rounds"`
 	ExploreNudgeRounds     int               `json:"explore_nudge_rounds"`
+	UsableWindowFrac       float64           `json:"usable_window_frac"`
+	CompactTriggerFrac     float64           `json:"compact_trigger_frac"`
+	UsablePromptTokens     int               `json:"usable_prompt_tokens"`
+	CompactAtTokens        int               `json:"compact_at_tokens"`
 	ExploreAbortRounds     int               `json:"explore_abort_rounds"`
 	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
 	Temperature            float64           `json:"temperature"`
@@ -146,6 +150,25 @@ func newDoctorCmd(deps *Deps) *cobra.Command {
 	return cmd
 }
 
+// doctorUsableFrac / doctorTriggerFrac report the fractions IN FORCE. Reporting
+// the configured value would print 0 for an unset knob, which tells the reader
+// nothing about the run — the same trap the repeat-rounds knobs had.
+func doctorUsableFrac(cfg config.Config) float64 {
+	u, _ := agent.ContextFractions()
+	if cfg.UsableWindowFrac > 0 && cfg.UsableWindowFrac <= 1 {
+		return cfg.UsableWindowFrac
+	}
+	return u
+}
+
+func doctorTriggerFrac(cfg config.Config) float64 {
+	_, t := agent.ContextFractions()
+	if cfg.CompactTriggerFrac > 0 && cfg.CompactTriggerFrac <= 1 {
+		return cfg.CompactTriggerFrac
+	}
+	return t
+}
+
 // effectiveRepeatRounds resolves the repetition-rail knobs the way the loop does.
 // Unlike ChurnRounds these have no config-level default: 0 means "use the agent
 // package default" (the seam that keeps an unset config building an untuned Loop),
@@ -166,6 +189,9 @@ func onOff(b bool) string {
 }
 
 func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverride string, lint lintOpts) resolvedConfigDiagnostic {
+	// Apply the configured fractions first so the numbers below describe the run
+	// the user would actually get, not the built-in defaults.
+	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
 	path := profilePath
 	if path == "" {
 		if p, err := config.DefaultProfilePathForDiagnostics(); err == nil {
@@ -230,6 +256,10 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		ChurnRounds:         cfg.ChurnRounds,
 		RepeatNudgeRounds:   effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
 		ExploreNudgeRounds:  effectiveRepeatRounds(cfg.ExploreNudgeRounds, agent.DefaultExploreNudgeRounds),
+		UsableWindowFrac:    doctorUsableFrac(cfg),
+		CompactTriggerFrac:  doctorTriggerFrac(cfg),
+		UsablePromptTokens:  agent.UsableWindow(cfg.MaxContextTokens),
+		CompactAtTokens:     agent.CompactTriggerTokens(agent.UsableWindow(cfg.MaxContextTokens)),
 		ExploreAbortRounds:  effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
 		RepeatAbortRounds:   effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
 		Temperature:         cfg.Temperature,
@@ -306,6 +336,13 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "churn_rounds: %d\n", diag.ChurnRounds)
 	fmt.Fprintf(out, "repeat_rounds: nudge=%d abort=%d\n", diag.RepeatNudgeRounds, diag.RepeatAbortRounds)
 	fmt.Fprintf(out, "explore_rounds: nudge=%d abort=%d\n", diag.ExploreNudgeRounds, diag.ExploreAbortRounds)
+	// Spell the multiplication out: a declared --ctx is NOT what kloo works in, and
+	// that was previously invisible — which made every cross-driver context
+	// comparison wrong without anyone being able to see why.
+	fmt.Fprintf(out, "context: declared=%d usable=%d (%.2f) compact_at=%d (%.2f) => %.0f%% of declared\n",
+		diag.Ctx, diag.UsablePromptTokens, diag.UsableWindowFrac,
+		diag.CompactAtTokens, diag.CompactTriggerFrac,
+		100*float64(diag.CompactAtTokens)/float64(max(diag.Ctx, 1)))
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
 	fmt.Fprintf(out, "tool_format: %s\n", diag.ToolFormat)

@@ -140,6 +140,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagExploreNudge int
 		flagExploreAbort int
 		flagExploreTotal int
+		flagUsableFrac   float64
+		flagTriggerFrac  float64
 		flagPromptCache  string
 		flagStrictModel  bool
 		flagAllowedDirs  []string
@@ -223,6 +225,12 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("explore-total-cap") {
 				flags.ExploreTotalCap = &flagExploreTotal
+			}
+			if fs.Changed("usable-window-frac") {
+				flags.UsableWindowFrac = &flagUsableFrac
+			}
+			if fs.Changed("compact-trigger-frac") {
+				flags.CompactTriggerFrac = &flagTriggerFrac
 			}
 			if fs.Changed("prompt-cache") {
 				if !config.IsPromptCacheMode(flagPromptCache) {
@@ -340,6 +348,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagRepeatNudge, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&flagRepeatAbort, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreNudge, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
+	f.Float64Var(&flagUsableFrac, "usable-window-frac", 0, "fraction of --ctx usable as PROMPT, reserving the rest for the completion and tool schemas (0 ⇒ built-in 0.80)")
+	f.Float64Var(&flagTriggerFrac, "compact-trigger-frac", 0, "fraction of the usable window at which compaction STARTS (0 ⇒ built-in 0.70); multiplies with --usable-window-frac")
 	f.IntVar(&flagExploreTotal, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreAbort, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.StringVar(&flagPromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
@@ -426,6 +436,12 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("explore-total-cap") {
 		flags.ExploreTotalCap = &values.ExploreTotalCap
+	}
+	if fs.Changed("usable-window-frac") {
+		flags.UsableWindowFrac = &values.UsableWindowFrac
+	}
+	if fs.Changed("compact-trigger-frac") {
+		flags.CompactTriggerFrac = &values.CompactTriggerFrac
 	}
 	if fs.Changed("prompt-cache") {
 		if !config.IsPromptCacheMode(values.PromptCache) {
@@ -523,6 +539,8 @@ type configFlagValues struct {
 	ExploreNudgeRounds   int
 	ExploreAbortRounds   int
 	ExploreTotalCap      int
+	UsableWindowFrac     float64
+	CompactTriggerFrac   float64
 	PromptCache          string
 	StrictModel          bool
 	AllowedDirs          []string
@@ -560,6 +578,8 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
 	f.IntVar(&v.RepeatNudgeRounds, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&v.ExploreNudgeRounds, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
+	f.Float64Var(&v.UsableWindowFrac, "usable-window-frac", 0, "fraction of --ctx usable as PROMPT (0 ⇒ built-in 0.80)")
+	f.Float64Var(&v.CompactTriggerFrac, "compact-trigger-frac", 0, "fraction of the usable window at which compaction starts (0 ⇒ built-in 0.70)")
 	f.IntVar(&v.ExploreTotalCap, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.ExploreAbortRounds, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.RepeatAbortRounds, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
