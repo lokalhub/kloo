@@ -127,6 +127,12 @@ const (
 	EnvExploreNudgeRounds = "KLOO_EXPLORE_NUDGE_ROUNDS"
 	EnvExploreAbortRounds = "KLOO_EXPLORE_ABORT_ROUNDS"
 	EnvExploreTotalCap    = "KLOO_EXPLORE_TOTAL_CAP"
+
+	// EnvUsableWindowFrac / EnvCompactTriggerFrac decide how much of --ctx kloo
+	// actually works in. They MULTIPLY: at the defaults (0.80, 0.70) a declared
+	// 131072 starts compacting at 73399 — 56% of it.
+	EnvUsableWindowFrac   = "KLOO_USABLE_WINDOW_FRAC"
+	EnvCompactTriggerFrac = "KLOO_COMPACT_TRIGGER_FRAC"
 	// EnvPromptCache selects the prompt-caching mode (same as --prompt-cache).
 	EnvPromptCache          = "KLOO_PROMPT_CACHE"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
@@ -203,6 +209,9 @@ type Config struct {
 	ExploreNudgeRounds int
 	ExploreAbortRounds int
 	ExploreTotalCap    int
+	// UsableWindowFrac / CompactTriggerFrac: 0 ⇒ the agent package default.
+	UsableWindowFrac   float64
+	CompactTriggerFrac float64
 	// MCPServers is the parsed mcpServers block (empty map when none configured).
 	// internal/mcp consumes these to dial servers; internal/config never imports
 	// the SDK. Path/env values in command/args/env are already expanded.
@@ -324,6 +333,8 @@ type Flags struct {
 	ExploreNudgeRounds *int
 	ExploreAbortRounds *int
 	ExploreTotalCap    *int
+	UsableWindowFrac   *float64
+	CompactTriggerFrac *float64
 	// PromptCache (--prompt-cache) is "auto", "off" or "on". nil ⇒ not set on the CLI.
 	PromptCache *string
 	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
@@ -386,6 +397,8 @@ type profileEntry struct {
 	ExploreNudgeRounds   *int     `json:"exploreNudgeRounds,omitempty"`
 	ExploreAbortRounds   *int     `json:"exploreAbortRounds,omitempty"`
 	ExploreTotalCap      *int     `json:"exploreTotalCap,omitempty"`
+	UsableWindowFrac     *float64 `json:"usableWindowFrac,omitempty"`
+	CompactTriggerFrac   *float64 `json:"compactTriggerFrac,omitempty"`
 	NoThink              *bool    `json:"noThink,omitempty"`
 	LLMMaxRetries        *int     `json:"llmMaxRetries,omitempty"`
 	LLMRetryCodes        []int    `json:"llmRetryCodes,omitempty"`
@@ -521,6 +534,12 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.ExploreTotalCap != nil {
 		cfg.ExploreTotalCap = *e.ExploreTotalCap
+	}
+	if e.UsableWindowFrac != nil {
+		cfg.UsableWindowFrac = *e.UsableWindowFrac
+	}
+	if e.CompactTriggerFrac != nil {
+		cfg.CompactTriggerFrac = *e.CompactTriggerFrac
 	}
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
@@ -750,6 +769,16 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.ExploreTotalCap = n
 		}
 	}
+	if v := getenv(EnvUsableWindowFrac); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 && f <= 1 {
+			cfg.UsableWindowFrac = f
+		}
+	}
+	if v := getenv(EnvCompactTriggerFrac); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 && f <= 1 {
+			cfg.CompactTriggerFrac = f
+		}
+	}
 	if v := getenv(EnvLLMMaxRetries); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.LLMMaxRetries = n
@@ -821,6 +850,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.ExploreTotalCap != nil {
 		cfg.ExploreTotalCap = *flags.ExploreTotalCap
+	}
+	if flags.UsableWindowFrac != nil {
+		cfg.UsableWindowFrac = *flags.UsableWindowFrac
+	}
+	if flags.CompactTriggerFrac != nil {
+		cfg.CompactTriggerFrac = *flags.CompactTriggerFrac
 	}
 	if flags.PromptCache != nil {
 		cfg.PromptCache = *flags.PromptCache

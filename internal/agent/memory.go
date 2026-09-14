@@ -55,7 +55,37 @@ const (
 // `window` (maxContextTokens): a fraction of it, leaving headroom for the output,
 // the request's tool schemas, and estimation slack so the real request stays under
 // the server's n_ctx.
-func usableWindow(window int) int { return int(float64(window) * usableWindowFrac) }
+// The two fractions are OVERRIDABLE. Together they decide how much of a declared
+// context window kloo actually works in, and they multiply: at the defaults a
+// --ctx of 131072 starts compacting at 0.70 x 0.80 = 56% of it, i.e. 73399 tokens.
+// That was invisible and unchangeable, and it is most of why a like-for-like
+// comparison against a driver that uses its full declared window is not like for
+// like at all.
+//
+// usableWindowFrac protects the request from overflowing the server's n_ctx and
+// should stay conservative. compactTriggerFrac only decides WHEN shedding starts,
+// against a budget that already has that headroom — it is the one worth raising.
+var (
+	usableFrac  = usableWindowFrac
+	triggerFrac = compactTriggerFrac
+)
+
+// SetContextFractions overrides the defaults. Values outside (0,1] are ignored so
+// a bad config degrades to the built-in behaviour rather than producing a window
+// of zero.
+func SetContextFractions(usable, trigger float64) {
+	if usable > 0 && usable <= 1 {
+		usableFrac = usable
+	}
+	if trigger > 0 && trigger <= 1 {
+		triggerFrac = trigger
+	}
+}
+
+// ContextFractions reports the values in force, for `kloo doctor`.
+func ContextFractions() (usable, trigger float64) { return usableFrac, triggerFrac }
+
+func usableWindow(window int) int { return int(float64(window) * usableFrac) }
 
 // UsableWindow is the prompt-token budget for a context window of `window`
 // tokens — the same budget the loop assembles against. Exported so `kloo tokens`
@@ -77,7 +107,7 @@ func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 // mapBudgetTokens caps the repo-map section. Budgeted against the COMPACTION
 // TRIGGER, so the map can never be large enough to force a compaction by itself.
 func mapBudgetTokens(curator int) int {
-	return int(float64(curator) * compactTriggerFrac * mapBudgetFrac)
+	return int(float64(curator) * triggerFrac * mapBudgetFrac)
 }
 
 // EffectiveCuratorBudget resolves the per-step context-assembly budget from the
@@ -102,7 +132,7 @@ func EffectiveCuratorBudget(window, configured int) int {
 func hotBudgetTokens(window int) int {
 	// Against the same base as the map: usable window, then the trigger. Using the
 	// RAW window here was half of why the two budgets overflowed the trigger.
-	return int(float64(usableWindow(window)) * compactTriggerFrac * hotBudgetFrac)
+	return int(float64(usableWindow(window)) * triggerFrac * hotBudgetFrac)
 }
 
 // summaryPrefix labels the running-summary slot inserted right after the task.
@@ -328,7 +358,7 @@ func assemble(task llm.Message, summaryEntries []string, pins, tail []llm.Messag
 }
 
 // triggerTokens is the soft compaction trigger: compactTriggerFrac × window.
-func triggerTokens(window int) int { return int(compactTriggerFrac * float64(window)) }
+func triggerTokens(window int) int { return int(triggerFrac * float64(window)) }
 
 // summaryTokens is the token cost of the summary slot for the given entries
 // (0 when there are none).

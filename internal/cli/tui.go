@@ -21,6 +21,9 @@ import (
 // ("" ⇒ kloo auto-detects the project's build/test); when it resolves to "" the
 // loop runs unverified (the model's finish stops calmly, but nothing is success).
 func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd string, lint lintOpts, opt SessionOpts, profilePath string, getenv func(string) string) error {
+	// The context fractions multiply and decide how much of --ctx kloo actually
+	// works in; apply them before anything budgets against the window.
+	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err

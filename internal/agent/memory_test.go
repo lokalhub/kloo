@@ -755,3 +755,46 @@ func TestBudgetsScaleTogether(t *testing.T) {
 		t.Errorf("budgets must scale linearly with the window: map x%.2f, hot x%.2f", r1, r2)
 	}
 }
+
+// The two fractions MULTIPLY, and the product was both invisible and unchangeable:
+// a declared --ctx of 131072 started compacting at 0.70 x 0.80 = 56% of it. Every
+// comparison against a driver that uses its full declared window was therefore not
+// like for like, and no flag could close the gap.
+func TestContextFractionsAreConfigurableAndMultiply(t *testing.T) {
+	u0, t0 := ContextFractions()
+	t.Cleanup(func() { SetContextFractions(u0, t0) })
+
+	const declared = 131072
+	if got := triggerTokens(usableWindow(declared)); got != 73399 {
+		t.Fatalf("default compaction point = %d, want 73399 (0.70 x 0.80 x %d)", got, declared)
+	}
+
+	SetContextFractions(0.92, 0.95)
+	got := triggerTokens(usableWindow(declared))
+	// Computed independently of the code under test — via float64 VARIABLES so Go
+	// does not constant-fold this into the same expression the implementation uses.
+	uf, tf := 0.92, 0.95
+	want := int(float64(int(float64(declared)*uf)) * tf)
+	if got != want {
+		t.Fatalf("raised compaction point = %d, want %d (0.95 x 0.92 x %d)", got, want, declared)
+	}
+	if got <= 73399 {
+		t.Errorf("raising the fractions must increase the working window: %d <= 73399", got)
+	}
+}
+
+// A nonsensical value must degrade to the built-in behaviour, never produce a
+// window of zero — a config typo must not silently disable the whole memory path.
+func TestBadContextFractionsAreIgnored(t *testing.T) {
+	u0, t0 := ContextFractions()
+	t.Cleanup(func() { SetContextFractions(u0, t0) })
+
+	for _, bad := range [][2]float64{{0, 0}, {-1, -1}, {2, 3}} {
+		SetContextFractions(u0, t0) // reset
+		SetContextFractions(bad[0], bad[1])
+		u, tr := ContextFractions()
+		if u != u0 || tr != t0 {
+			t.Errorf("SetContextFractions(%v) changed the fractions to (%v,%v); out-of-range values must be ignored", bad, u, tr)
+		}
+	}
+}
