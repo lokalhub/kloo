@@ -582,3 +582,77 @@ func TestClassifyPatchOnlyForbiddenTerminalError(t *testing.T) {
 		t.Fatalf("code=%q detail=%+v, want tool_call_invalid/patch_only_forbidden_tool", code, detail)
 	}
 }
+
+// A verify that ERRORED (non-runnable, timed out, jail escape) used to serialise as
+// {"passed":false,"exit_code":0} — which reads as "the command ran and failed with
+// exit code 0", a contradiction. Observed on a real kloo-bench case where the
+// independent gate re-ran the SAME command and it passed cleanly, so kloo was
+// under-reporting its own success rate in --benchmark mode.
+func TestVerifyThatCouldNotRunIsNotReportedAsAFailure(t *testing.T) {
+	cfg := config.Config{Model: "m", Endpoint: "http://x/v1"}
+	rep := &agent.Report{
+		Reason: agent.ReasonError,
+		FinalVerify: agent.VerifyResult{
+			Command: "npx vitest run",
+			Err:     errors.New(`exec: "npx": executable file not found in $PATH`),
+		},
+	}
+	var buf bytes.Buffer
+	printHeadlessJSON(&buf, cfg, "npx vitest run", rep, time.Second, nil)
+
+	var got struct {
+		Verify *struct {
+			Passed   bool   `json:"passed"`
+			ExitCode int    `json:"exit_code"`
+			Ran      bool   `json:"ran"`
+			Error    string `json:"error"`
+		} `json:"verify"`
+	}
+	payload := strings.TrimPrefix(strings.TrimSpace(buf.String()), "KLOO_RESULT_JSON ")
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, payload)
+	}
+	if got.Verify == nil {
+		t.Fatal("no verify block emitted")
+	}
+	if got.Verify.Ran {
+		t.Error("ran must be false when the verify command could not run")
+	}
+	if got.Verify.Error == "" {
+		t.Error("the reason it could not run must be reported, not swallowed")
+	}
+}
+
+// A verify that genuinely ran and failed must still report ran=true with its real
+// exit code, and carry no error string.
+func TestVerifyThatRanAndFailedStillReportsItsExitCode(t *testing.T) {
+	cfg := config.Config{Model: "m", Endpoint: "http://x/v1"}
+	rep := &agent.Report{
+		Reason:      agent.ReasonUnverified,
+		FinalVerify: agent.VerifyResult{Command: "go test ./...", ExitCode: 1, Passed: false},
+	}
+	var buf bytes.Buffer
+	printHeadlessJSON(&buf, cfg, "go test ./...", rep, time.Second, nil)
+
+	var got struct {
+		Verify *struct {
+			Passed   bool   `json:"passed"`
+			ExitCode int    `json:"exit_code"`
+			Ran      bool   `json:"ran"`
+			Error    string `json:"error"`
+		} `json:"verify"`
+	}
+	payload := strings.TrimPrefix(strings.TrimSpace(buf.String()), "KLOO_RESULT_JSON ")
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Verify.Ran {
+		t.Error("ran must be true for a verify that produced an exit code")
+	}
+	if got.Verify.ExitCode != 1 || got.Verify.Passed {
+		t.Errorf("got exit=%d passed=%v, want exit=1 passed=false", got.Verify.ExitCode, got.Verify.Passed)
+	}
+	if got.Verify.Error != "" {
+		t.Errorf("a genuine failure must carry no error string, got %q", got.Verify.Error)
+	}
+}

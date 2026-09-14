@@ -277,6 +277,15 @@ type verifySummary struct {
 	Command  string `json:"command"`
 	Passed   bool   `json:"passed"`
 	ExitCode int    `json:"exit_code"`
+	// Ran distinguishes "the verify command ran and reported a result" from "it
+	// never produced one". Without it a verify that ERRORED -- non-runnable,
+	// timed out, jail escape -- serialised as {"passed":false,"exit_code":0},
+	// which reads as "failed with exit code 0" and is a contradiction. Observed on
+	// a real bench case where the independent gate re-ran the same command and it
+	// passed cleanly, so kloo was under-reporting its own success.
+	Ran bool `json:"ran"`
+	// Error carries why it could not run. Empty on a verify that genuinely failed.
+	Error string `json:"error,omitempty"`
 }
 
 type failureDetail struct {
@@ -384,7 +393,16 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 			s.TokensPerSec = round2(float64(rep.TokensUsed) / secs)
 		}
 		if rep.FinalVerify.Command != "" {
-			s.Verify = &verifySummary{Command: rep.FinalVerify.Command, Passed: rep.FinalVerify.Passed, ExitCode: rep.FinalVerify.ExitCode}
+			vs := &verifySummary{
+				Command:  rep.FinalVerify.Command,
+				Passed:   rep.FinalVerify.Passed,
+				ExitCode: rep.FinalVerify.ExitCode,
+				Ran:      rep.FinalVerify.Err == nil,
+			}
+			if rep.FinalVerify.Err != nil {
+				vs.Error = rep.FinalVerify.Err.Error()
+			}
+			s.Verify = vs
 		}
 		if rep.Err != nil {
 			s.Error = rep.Err.Error()

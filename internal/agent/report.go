@@ -45,7 +45,12 @@ func (r *Report) String() string {
 	// The real verify signal (never a model claim). Omitted in unverified mode,
 	// where no command ran — an empty/zero verify line would just be noise.
 	if r.FinalVerify.Command != "" {
-		fmt.Fprintf(&b, "\n  verify: %q exit=%d passed=%v", r.FinalVerify.Command, r.FinalVerify.ExitCode, r.FinalVerify.Passed)
+		if r.FinalVerify.Err != nil {
+			// "exit=0 passed=false" reads as a contradiction; say it could not run.
+			fmt.Fprintf(&b, "\n  verify: %q DID NOT RUN: %v", r.FinalVerify.Command, r.FinalVerify.Err)
+		} else {
+			fmt.Fprintf(&b, "\n  verify: %q exit=%d passed=%v", r.FinalVerify.Command, r.FinalVerify.ExitCode, r.FinalVerify.Passed)
+		}
 		if out := strings.TrimSpace(r.FinalVerify.Stdout + "\n" + r.FinalVerify.Stderr); out != "" {
 			fmt.Fprintf(&b, "\n  output: %s", firstLine(out))
 		}
