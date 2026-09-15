@@ -1180,6 +1180,30 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		case exploreTotal > 0 && exploreTotal%l.exploreNudgeRounds() == 0 && exploreNudgedAt != exploreTotal:
 			exploreNudgedAt = exploreTotal
 			recordRail(RailExplore)
+			// BASELINE VERIFY. The verify gate is `mutatedSinceVerify`, so a run that
+			// has only READ never verifies — the model is told to fix a failure whose
+			// text it has never seen, so it keeps reading to find it. Measured on
+			// kloo-bench (v0.18.4 + rail131, 41 runs): every one of the 21 PASSING runs
+			// ran verify at least once, with no exceptions, and all 7 runs that reached
+			// the end with verify_attempts == 0 failed. Zero attempts is a guaranteed
+			// loss, and the nudge alone does not break it: on A29 and C07 the corrective
+			// fired three times and the model read on regardless.
+			//
+			// So when the explore rail first fires and verify has NEVER run, run it and
+			// hand the model the real failing output. Deliberately scoped to that state
+			// rather than verifying eagerly at step 0: every passing run already
+			// verifies on its own, so this cannot perturb one — it can only add evidence
+			// to a run that is otherwise certain to lose.
+			if l.Verifier != nil && counters.VerifyAttempts == 0 {
+				l.onState(StateVerify)
+				lastVerify = l.Verifier.Verify(ctx)
+				counters.VerifyAttempts++
+				mutatedSinceVerify = false
+				if out := failingOutput(lastVerify); lastVerify.Err == nil && !lastVerify.Passed && strings.TrimSpace(out) != "" {
+					convo = append(convo, baselineVerifyCorrective(lastVerify.Command, out))
+					break
+				}
+			}
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
@@ -1743,6 +1767,23 @@ func exploreCorrective(n int) llm.Message {
 			"(c) call finish if all tasks are genuinely complete. "+
 			"Do NOT read another file. If you genuinely cannot proceed without clarification, "+
 			"reply with ONE short question and no tool call.", n)}
+}
+
+// baselineVerifyCorrective hands the model the REAL failing verify output after a
+// read-only spin. The explore corrective says "take action" but names no target;
+// this says exactly which assertion is red, which is the difference between a model
+// that guesses and one that has something to aim at.
+func baselineVerifyCorrective(cmd, out string) llm.Message {
+	const max = 4000
+	if len(out) > max {
+		out = out[:max] + "\n… (truncated)"
+	}
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"You have been reading without making any change. I ran the verify command for you "+
+			"so you can see the ACTUAL failure instead of looking for it:\n\n$ %s\n%s\n\n"+
+			"This is the failure you must fix. STOP reading and edit the source file that causes "+
+			"this specific assertion to fail — call edit_file or write_file THIS turn. "+
+			"Do not modify the test.", cmd, out)}
 }
 
 // promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail.
