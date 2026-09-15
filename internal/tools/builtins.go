@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -16,12 +17,17 @@ type readFileTool struct{ ws Workspace }
 
 func (t readFileTool) Name() string { return NameReadFile }
 func (t readFileTool) Description() string {
-	return "Read the full contents of a file in the workspace."
+	return "Read a file in the workspace. Returns at most " + itoa(DefaultReadLineLimit) +
+		" lines; use offset to page through a longer file, and search to locate what you need first."
 }
 func (t readFileTool) Schema() ParamSchema {
 	return ParamSchema{
-		Properties: map[string]Property{"path": {Type: "string", Description: "Workspace-relative path to the file."}},
-		Required:   []string{"path"},
+		Properties: map[string]Property{
+			"path":   {Type: "string", Description: "Workspace-relative path to the file."},
+			"offset": {Type: "integer", Description: "1-based first line to return. Omit for the start of the file."},
+			"limit":  {Type: "integer", Description: "Maximum lines to return (default " + itoa(DefaultReadLineLimit) + ")."},
+		},
+		Required: []string{"path"},
 	}
 }
 func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
@@ -29,6 +35,21 @@ func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	content, err := ReadFile(t.ws, path)
 	if err != nil {
 		return Result{}, err
+	}
+	// A whole-file dump can exceed the model's entire working budget. Real files in
+	// a production repo run to 34-41k TOKENS each, against a hot budget of ~51k at
+	// ctx 131072 — so ONE read consumed 80% of it, the next push crossed the
+	// compaction trigger, the file was shed, and the model read it again. Measured
+	// on kloo-bench: C07 made 46 reads with 18 of them repeats and never edited
+	// anything; C65 and A29 died the same way.
+	//
+	// Returning a bounded window with an explicit marker fixes the cause rather
+	// than the symptom: the model can still reach any part of the file, but no
+	// single call can swallow the window.
+	if body, note, truncated := clampLines(content, argInt(c.Args, "offset"), argInt(c.Args, "limit")); truncated {
+		return Result{Output: body + "\n" + note}, nil
+	} else {
+		content = body
 	}
 	// An empty (or whitespace-only) file would otherwise return a BLANK observation,
 	// which a small model can't tell apart from "the read gave me nothing" — and it
@@ -38,6 +59,59 @@ func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 		return Result{Output: "(file exists but is empty — 0 meaningful bytes)"}, nil
 	}
 	return Result{Output: content}, nil
+}
+
+// DefaultReadLineLimit bounds a single read_file result. Chosen so that even a
+// dense source file costs a small fraction of the hot budget rather than most of
+// it; a model that needs more pages with offset.
+const DefaultReadLineLimit = 400
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// argInt reads an integer argument, tolerating the float form JSON decoding
+// produces and the string form some models emit. 0 when absent or unusable.
+func argInt(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// clampLines returns the requested window of content plus a marker describing what
+// was withheld and how to get it. The marker matters as much as the clamp: a
+// silently truncated file is a correctness hazard, and kloo has been bitten by
+// silent truncation before.
+func clampLines(content string, offset, limit int) (body, note string, truncated bool) {
+	lines := strings.Split(content, "\n")
+	total := len(lines)
+	if offset < 1 {
+		offset = 1
+	}
+	if limit <= 0 {
+		limit = DefaultReadLineLimit
+	}
+	start := offset - 1
+	if start >= total {
+		return "", fmt.Sprintf("(offset %d is past the end; the file has %d lines)", offset, total), true
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	body = strings.Join(lines[start:end], "\n")
+	if start == 0 && end == total {
+		return body, "", false
+	}
+	return body, fmt.Sprintf(
+		"\n--- showing lines %d-%d of %d. Use read_file with offset=%d to continue, or search to find a specific symbol. ---",
+		start+1, end, total, end+1), true
 }
 
 // listDirTool is the list_dir tool.
