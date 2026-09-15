@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -629,6 +630,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish(ReasonInterrupted, nil, nil, nil)
+			}
+			// The prompt overflowed the server's context limit and the window has been
+			// reduced to the figure the SERVER reported. Rebuild this step under the new
+			// budget instead of ending the run: the old request can never succeed, but
+			// the shrunk one usually does. Does not consume a step — no work happened.
+			if errors.Is(err, errContextShrunk) {
+				l.observeUsage(usage)
+				step-- // no work happened; a forced rebuild must not eat the step budget
+				continue
 			}
 			if errors.Is(err, ErrNoToolCall) {
 				l.observeUsage(usage)
@@ -1928,8 +1938,9 @@ func (l *Loop) retryBaseDelay() time.Duration {
 func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	attempts := max(1, l.llmRetries()+1)
 	var (
-		resp llm.ChatResponse
-		err  error
+		resp   llm.ChatResponse
+		err    error
+		shrunk bool
 	)
 	for attempt := 1; attempt <= attempts; attempt++ {
 		emitted := false
@@ -1943,6 +1954,31 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 				}
 				return nil
 			})
+		}
+		// A context overflow is not a transient — retrying the SAME prompt cannot
+		// help, and the server says so. But it hands us the real limit, so shrink to
+		// it and rebuild rather than ending the run. Only once per call: if the
+		// shrunk prompt still overflows, something else is wrong.
+		if lim := contextOverflowLimit(err); lim != 0 && !shrunk {
+			shrunk = true
+			before := l.ContextTokens
+			if lim > 0 {
+				l.ContextTokens = lim
+			} else {
+				l.ContextTokens = before * 4 / 5 // limit unreadable: back off 20%
+			}
+			// Floor it. A server that keeps rejecting is a different problem, and a
+			// window driven toward zero would turn one bad response into an unusable
+			// agent rather than a clear failure.
+			if min := 8000; l.ContextTokens < min {
+				l.ContextTokens = min
+			}
+			if l.OnRetry != nil {
+				l.OnRetry(attempt, attempts-1, fmt.Errorf(
+					"prompt exceeded the server's context limit; shrinking %d -> %d and rebuilding",
+					before, l.ContextTokens), 0)
+			}
+			return resp, errContextShrunk
 		}
 		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !l.isRetryableLLMError(err) {
 			return resp, l.modelCallError(err)
@@ -1995,6 +2031,49 @@ func isRetryableLLMError(err error) bool {
 
 func (l *Loop) isRetryableLLMError(err error) bool {
 	return retryableLLMError(err, l.RetryableStatusCodes)
+}
+
+// contextOverflowLimit reads the TRUE per-request limit out of a 400 that says the
+// prompt is too long, e.g.
+//
+//	this request needs ~132449 tokens, above the glimmer-tp2-179 per-request limit
+//	of 131072. Retrying will not help; shorten the prompt or lower max_tokens.
+//
+// The server tells us the number AND that retrying is pointless, and kloo ignored
+// both and ended the run. Measured on kloo-bench at ctx 131072: two cases died
+// this way. Returns 0 when the error is not a context overflow.
+func contextOverflowLimit(err error) int {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+		return 0
+	}
+	low := strings.ToLower(apiErr.Body)
+	// An overflow says BOTH what is too big and that it is too big. Requiring a
+	// size word alone would swallow ordinary 400s (a bad tool schema, a malformed
+	// message) and shrink the window for a fault shrinking cannot fix.
+	sized := strings.Contains(low, "token") || strings.Contains(low, "context") ||
+		strings.Contains(low, "prompt")
+	over := strings.Contains(low, "above") || strings.Contains(low, "exceed") ||
+		strings.Contains(low, "too long") || strings.Contains(low, "too large") ||
+		strings.Contains(low, "maximum context")
+	if !sized || !over {
+		return 0
+	}
+	// Prefer an explicitly stated limit ("limit of N", "maximum ... N").
+	for _, re := range overflowLimitPatterns {
+		if m := re.FindStringSubmatch(low); len(m) > 1 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return -1 // an overflow whose limit we could not read: shrink by a fraction
+}
+
+var overflowLimitPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`limit of (\d+)`),
+	regexp.MustCompile(`maximum context length is (\d+)`),
+	regexp.MustCompile(`maximum of (\d+) tokens`),
 }
 
 func retryableLLMError(err error, retryCodes []int) bool {
@@ -2077,6 +2156,11 @@ const runawayReasoningChars = 2000
 // ctx 131072, one of kloo's eight losses to grok was a single such turn ending
 // the whole run ("0 reasoning chars but no usable content", finish_reason=length).
 var ErrNoUsableContent = errors.New("model produced no usable content")
+
+// errContextShrunk signals that the prompt overflowed the server's context limit
+// and the window has been reduced to the limit the SERVER reported. The step must
+// be rebuilt and retried under the new budget — the old request cannot succeed.
+var errContextShrunk = errors.New("context window shrunk to the server's limit; rebuilding")
 
 func runawayThinkingError(msg llm.Message) error {
 	if len(msg.ToolCalls) > 0 {
