@@ -812,7 +812,7 @@ func TestLoopRunawayThinkingProducesRecoverableError(t *testing.T) {
 	if rep.Reason != ReasonError || rep.Err == nil {
 		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
 	}
-	if msg := rep.Err.Error(); !strings.Contains(msg, "reasoning chars") || !strings.Contains(msg, "--no-think") || !strings.Contains(msg, "output budget") {
+	if msg := rep.Err.Error(); !strings.Contains(msg, "reasoning chars") || !strings.Contains(msg, "already retried") || !strings.Contains(msg, "output budget") {
 		t.Fatalf("recoverable error missing guidance: %q", msg)
 	}
 }
@@ -881,7 +881,7 @@ func TestLoopLengthFinishWithEmptyContentProducesRecoverableError(t *testing.T) 
 	if rep.Reason != ReasonError || rep.Err == nil {
 		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
 	}
-	if msg := rep.Err.Error(); !strings.Contains(msg, "0 reasoning chars") || !strings.Contains(msg, "--no-think") {
+	if msg := rep.Err.Error(); !strings.Contains(msg, "0 reasoning chars") || !strings.Contains(msg, "already retried") {
 		t.Fatalf("length recoverable error missing guidance/count: %q", msg)
 	}
 }
@@ -965,9 +965,14 @@ func TestEmptyModelTurnIsRetryable(t *testing.T) {
 	if !retryableLLMError(err, nil) {
 		t.Error("an empty turn must be retried; the same request usually succeeds next attempt")
 	}
-	// the remedy must survive into the message for when retries DO exhaust
-	if !strings.Contains(err.Error(), "--no-think") {
-		t.Errorf("the message must still name the remedy: %v", err)
+	// The message must still leave the reader with something to DO. kloo now
+	// re-asks with thinking disabled itself, so naming --no-think would be advice
+	// it has already taken; what remains is the output budget or a different model.
+	if !strings.Contains(err.Error(), "output budget") {
+		t.Errorf("the message must still name a remedy the user can act on: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already retried") {
+		t.Errorf("the message must say what kloo already tried, so the advice is the advice that is LEFT: %v", err)
 	}
 }
 
