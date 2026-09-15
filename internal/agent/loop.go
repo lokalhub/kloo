@@ -2015,6 +2015,23 @@ func retryableLLMError(err error, retryCodes []int) bool {
 			return true
 		}
 	}
+	// HTTP/2 stream faults. The REQUEST already succeeded — status 200 — and the
+	// stream then died mid-transfer, so there is no APIError to match on and none
+	// of the substrings above appear. Measured on kloo-bench at 131072: two of
+	// kloo's eight losses to grok were
+	//   "llm: read stream: stream error: stream ID 11; INTERNAL_ERROR; received from peer"
+	// with no retry attempted. That is ~10% of the bench thrown away on a fault
+	// the very next request would have survived.
+	//
+	// Only the SERVER-SIDE codes are retried. PROTOCOL_ERROR and FRAME_SIZE_ERROR
+	// indicate a malformed request and would repeat identically, so they are not
+	// matched — retrying a request the peer considers invalid is a loop, not a
+	// recovery.
+	for _, s := range []string{"internal_error", "refused_stream", "enhance_your_calm", "goaway"} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
 	// Upstream 5xx / 429 / 408 are server-side transient; other 4xx are not.
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
