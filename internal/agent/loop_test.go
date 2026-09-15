@@ -812,7 +812,7 @@ func TestLoopRunawayThinkingProducesRecoverableError(t *testing.T) {
 	if rep.Reason != ReasonError || rep.Err == nil {
 		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
 	}
-	if msg := rep.Err.Error(); !strings.Contains(msg, "reasoning chars") || !strings.Contains(msg, "--no-think") || !strings.Contains(msg, "output budget") {
+	if msg := rep.Err.Error(); !strings.Contains(msg, "reasoning chars") || !strings.Contains(msg, "already retried") || !strings.Contains(msg, "output budget") {
 		t.Fatalf("recoverable error missing guidance: %q", msg)
 	}
 }
@@ -881,7 +881,7 @@ func TestLoopLengthFinishWithEmptyContentProducesRecoverableError(t *testing.T) 
 	if rep.Reason != ReasonError || rep.Err == nil {
 		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
 	}
-	if msg := rep.Err.Error(); !strings.Contains(msg, "0 reasoning chars") || !strings.Contains(msg, "--no-think") {
+	if msg := rep.Err.Error(); !strings.Contains(msg, "0 reasoning chars") || !strings.Contains(msg, "already retried") {
 		t.Fatalf("length recoverable error missing guidance/count: %q", msg)
 	}
 }
@@ -965,9 +965,14 @@ func TestEmptyModelTurnIsRetryable(t *testing.T) {
 	if !retryableLLMError(err, nil) {
 		t.Error("an empty turn must be retried; the same request usually succeeds next attempt")
 	}
-	// the remedy must survive into the message for when retries DO exhaust
-	if !strings.Contains(err.Error(), "--no-think") {
-		t.Errorf("the message must still name the remedy: %v", err)
+	// The message must still leave the reader with something to DO. kloo now
+	// re-asks with thinking disabled itself, so naming --no-think would be advice
+	// it has already taken; what remains is the output budget or a different model.
+	if !strings.Contains(err.Error(), "output budget") {
+		t.Errorf("the message must still name a remedy the user can act on: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already retried") {
+		t.Errorf("the message must say what kloo already tried, so the advice is the advice that is LEFT: %v", err)
 	}
 }
 
@@ -1009,5 +1014,42 @@ func TestContextOverflowLimitIsReadFromTheServer(t *testing.T) {
 		if got := contextOverflowLimit(e); got != 0 {
 			t.Errorf("status %d body %q classified as overflow (%d)", e.StatusCode, e.Body, got)
 		}
+	}
+}
+
+// An empty turn is DETERMINISTIC in the way that matters: the model burned its
+// output budget on reasoning and returned nothing, and the identical request does
+// it again. kloo's own message names the remedy ("disable thinking") and it never
+// applied it — kloo-bench A06 died at step 7 after five identical empty retries.
+//
+// The recovery must be ADAPTIVE: re-ask once with thinking off.
+func TestEmptyTurnRetriesWithThinkingDisabled(t *testing.T) {
+	// first call: empty + length. second (thinking off): a real tool call.
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: `{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"length"}]}`},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "a.go"}})},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	loop, calls := newLoop(t, srv, nil, &stubBudget{tripAt: 50}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason == ReasonError {
+		t.Fatalf("an empty turn ended the run; it must be re-asked with thinking off: %v", rep.Err)
+	}
+	if len(*calls) == 0 {
+		t.Fatal("no tool call dispatched; the thinking-off retry did not take effect")
+	}
+	// and the retry must actually have asked with reasoning disabled
+	var sawNoThink bool
+	for _, raw := range srv.ModelCalls() {
+		if strings.Contains(string(raw), `"reasoning_effort":"none"`) {
+			sawNoThink = true
+		}
+	}
+	if !sawNoThink {
+		t.Error("the retry must set reasoning_effort=none — that is the remedy kloo's own error names")
 	}
 }

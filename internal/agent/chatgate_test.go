@@ -103,7 +103,7 @@ func TestChatGateRunawayThinkingStopsAsRecoverableError(t *testing.T) {
 	if rep.Reason != ReasonError || rep.Err == nil {
 		t.Fatalf("reason/err = %q/%v, want recoverable error", rep.Reason, rep.Err)
 	}
-	if !strings.Contains(rep.Err.Error(), "--no-think") || !strings.Contains(rep.Err.Error(), "output budget") {
+	if !strings.Contains(rep.Err.Error(), "already retried") || !strings.Contains(rep.Err.Error(), "output budget") {
 		t.Fatalf("recoverable error missing guidance: %q", rep.Err.Error())
 	}
 	if streamed != "" {
