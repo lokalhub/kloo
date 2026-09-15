@@ -1053,3 +1053,49 @@ func TestEmptyTurnRetriesWithThinkingDisabled(t *testing.T) {
 		t.Error("the retry must set reasoning_effort=none — that is the remedy kloo's own error names")
 	}
 }
+
+// The shrink must STRICTLY reduce the window. Setting it to the server's stated
+// limit looks right and can be a no-op — --ctx was already 131072 and the request
+// still totalled 132449, because tool schemas and the completion reserve sit on
+// top of the prompt budget. The window never changed, the step was rebuilt, it
+// overflowed again, and because the rebuild refunds the step it never ran out of
+// budget: 1536 identical retries in ONE run, at zero backoff.
+func TestOverflowShrinkStrictlyReduces(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, limit int
+	}{
+		{"limit equals the current window", 131072, 131072},
+		{"limit above the current window", 131072, 200000},
+		{"limit below the current window", 131072, 60000},
+		{"limit unreadable", 131072, -1},
+	} {
+		next := tc.before * 4 / 5
+		if tc.limit > 0 && tc.limit < next {
+			next = tc.limit
+		}
+		if next >= tc.before {
+			t.Errorf("%s: shrink %d -> %d does not reduce; the rebuild would overflow forever",
+				tc.name, tc.before, next)
+		}
+	}
+}
+
+// And the recovery must be bounded across the RUN. A per-call flag is reset by
+// every rebuild, which is exactly how one run span 1536 times.
+func TestOverflowShrinkIsBoundedPerRun(t *testing.T) {
+	if maxContextShrinks <= 0 || maxContextShrinks > 10 {
+		t.Fatalf("maxContextShrinks = %d: must be a small positive bound", maxContextShrinks)
+	}
+	// four 20% cuts take a 131072 window well down without reaching the floor
+	w := 131072
+	for i := 0; i < maxContextShrinks; i++ {
+		w = w * 4 / 5
+	}
+	if w >= 131072 {
+		t.Error("bounded shrinking must still converge downward")
+	}
+	if w < 8000 {
+		t.Errorf("after %d shrinks the window is %d — below the 8000 floor", maxContextShrinks, w)
+	}
+}

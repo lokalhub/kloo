@@ -123,6 +123,9 @@ type Loop struct {
 	// 0 ⇒ DefaultExploreTotalCap.
 	ExploreTotalCap int
 
+	// ctxShrinks counts overflow recoveries performed this run.
+	ctxShrinks int
+
 	// EditFailLimit is how many consecutive failed edit_file attempts (no successful
 	// edit between) before the run halts as churn. 0 ⇒ DefaultEditFailLimit.
 	EditFailLimit int
@@ -262,6 +265,10 @@ const (
 	// DefaultExploreTotalCap bounds TOTAL consecutive read-only turns. 16 distinct
 	// reads is normal on a real repo; 40 without a single edit is a spiral.
 	DefaultExploreTotalCap = 40
+	// maxContextShrinks bounds overflow recovery ACROSS the run. The per-call flag
+	// alone was not enough: each rebuild is a fresh call, so it reset every time and
+	// a non-converging shrink span 1536 times.
+	maxContextShrinks = 4
 )
 
 // DefaultEditFailLimit bounds the failed-edit rail: after this many CONSECUTIVE
@@ -1987,14 +1994,24 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		// help, and the server says so. But it hands us the real limit, so shrink to
 		// it and rebuild rather than ending the run. Only once per call: if the
 		// shrunk prompt still overflows, something else is wrong.
-		if lim := contextOverflowLimit(err); lim != 0 && !shrunk {
+		if lim := contextOverflowLimit(err); lim != 0 && !shrunk && l.ctxShrinks < maxContextShrinks {
 			shrunk = true
+			l.ctxShrinks++
 			before := l.ContextTokens
-			if lim > 0 {
-				l.ContextTokens = lim
-			} else {
-				l.ContextTokens = before * 4 / 5 // limit unreadable: back off 20%
+			// The shrink must STRICTLY REDUCE. Setting the window to the server's
+			// stated limit looks right and can be a no-op: --ctx was already 131072
+			// and the request still totalled 132449, because the prompt budget is not
+			// the whole request — tool schemas and the completion reserve sit on top.
+			// The window then never changed, the step was rebuilt, it overflowed
+			// again, and because the rebuild refunds the step it never ran out of
+			// budget: 1536 identical retries in one run, at zero backoff, hammering
+			// the endpoint. A recovery that does not converge is worse than the
+			// failure it replaces.
+			next := before * 4 / 5 // always at least a 20% cut
+			if lim > 0 && lim < next {
+				next = lim
 			}
+			l.ContextTokens = next
 			// Floor it. A server that keeps rejecting is a different problem, and a
 			// window driven toward zero would turn one bad response into an unusable
 			// agent rather than a clear failure.
