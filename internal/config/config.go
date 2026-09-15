@@ -63,7 +63,7 @@ const (
 	// 0/absent in the profile ⇒ this default; small enough to protect a small
 	// model's tool-selection quality (master plan §5).
 	DefaultMCPMaxExposedTools = 16
-	DefaultLLMMaxRetries      = 2
+	DefaultLLMMaxRetries      = 5
 	DefaultLLMRetryBaseDelay  = 2 * time.Second
 	DefaultLLMRetryMaxDelay   = 30 * time.Second
 	DefaultLLMColdLoadTimeout = 120 * time.Second
