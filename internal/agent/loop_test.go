@@ -918,3 +918,34 @@ func TestLoopShortReasoningFallbackRemainsAnswered(t *testing.T) {
 		t.Fatalf("short reasoning fallback should remain answered, got %q/%v", rep.Reason, rep.Err)
 	}
 }
+
+// An HTTP/2 stream that dies mid-transfer leaves no APIError to match on — the
+// request already returned 200 — and none of the connection-level substrings
+// appear. Measured on kloo-bench at ctx 131072: two of kloo's eight losses to
+// grok were exactly this, with no retry attempted.
+func TestHTTP2StreamFaultsAreRetryable(t *testing.T) {
+	retryable := []string{
+		"llm: read stream: stream error: stream ID 11; INTERNAL_ERROR; received from peer",
+		"llm: read stream: stream error: stream ID 37; INTERNAL_ERROR; received from peer",
+		"http2: server sent GOAWAY and closed the connection",
+		"stream error: stream ID 5; REFUSED_STREAM",
+		"stream error: ENHANCE_YOUR_CALM",
+	}
+	for _, msg := range retryable {
+		if !retryableLLMError(errors.New(msg), nil) {
+			t.Errorf("must retry a server-side stream fault: %q", msg)
+		}
+	}
+
+	// A malformed request repeats identically. Retrying it is a loop, not a
+	// recovery, so these must NOT be retried.
+	permanent := []string{
+		"stream error: stream ID 3; PROTOCOL_ERROR",
+		"stream error: stream ID 9; FRAME_SIZE_ERROR",
+	}
+	for _, msg := range permanent {
+		if retryableLLMError(errors.New(msg), nil) {
+			t.Errorf("must NOT retry a client-side protocol fault: %q", msg)
+		}
+	}
+}
