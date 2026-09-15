@@ -1345,8 +1345,36 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 
 	if perr != nil || len(calls) == 0 {
 		if perr == nil {
-			if err := runawayThinkingError(msg); err != nil {
-				return tools.Call{}, nil, usage, msg, err
+			if terr := runawayThinkingError(msg); terr != nil {
+				// The model burned its whole output budget and returned NOTHING. kloo's
+				// own message names the remedy — "disable thinking" — and then never
+				// applied it: it retried the identical request, got the identical
+				// nothing, and ended the run. Measured on kloo-bench A06: five retries,
+				// five empty turns, run over at step 7.
+				//
+				// Retrying blind cannot work here; the request is deterministic in the
+				// way that matters. Apply the remedy instead, ONCE, then give up with
+				// the original message if it still produces nothing.
+				if !l.NoThink {
+					noThink := req
+					noThink.ReasoningEffort = "none"
+					if resp2, err2 := l.complete(ctx, noThink); err2 == nil {
+						msg2 := assistantMessage(resp2)
+						if calls2, perr2 := l.Adapter.ParseAll(msg2); perr2 == nil && len(calls2) > 0 {
+							usage2 := estimateUsage(resp2.Usage, msgs, msg2)
+							return calls2[0], calls2[1:], usage2, msg2, nil
+						} else if perr2 == nil && runawayThinkingError(msg2) == nil {
+							// content but no tool call: fall through to the normal
+							// corrective path with the better message in hand
+							msg, usage, calls, perr = msg2, estimateUsage(resp2.Usage, msgs, msg2), calls2, perr2
+						}
+					}
+				}
+				if len(calls) == 0 && perr == nil {
+					if terr2 := runawayThinkingError(msg); terr2 != nil {
+						return tools.Call{}, nil, usage, msg, terr2
+					}
+				}
 			}
 		}
 		// One corrective re-prompt (the anti-spiral rail, mirrored from P02).
@@ -2179,8 +2207,8 @@ func runawayThinkingError(msg llm.Message) error {
 	}
 	reasoningChars := len([]rune(rawReasoning))
 	if reasoningChars >= runawayReasoningChars || msg.FinishReason == "length" {
-		return fmt.Errorf("%w: %d reasoning chars; if it repeats, disable thinking (--no-think) or raise the output budget: %w",
-			ErrNoUsableContent, reasoningChars, ErrNoUsableContent)
+		return fmt.Errorf("%w (%d reasoning chars); kloo already retried with thinking disabled — raise the output budget or try a different model",
+			ErrNoUsableContent, reasoningChars)
 	}
 	return nil
 }

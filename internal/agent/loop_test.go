@@ -1011,3 +1011,40 @@ func TestContextOverflowLimitIsReadFromTheServer(t *testing.T) {
 		}
 	}
 }
+
+// An empty turn is DETERMINISTIC in the way that matters: the model burned its
+// output budget on reasoning and returned nothing, and the identical request does
+// it again. kloo's own message names the remedy ("disable thinking") and it never
+// applied it — kloo-bench A06 died at step 7 after five identical empty retries.
+//
+// The recovery must be ADAPTIVE: re-ask once with thinking off.
+func TestEmptyTurnRetriesWithThinkingDisabled(t *testing.T) {
+	// first call: empty + length. second (thinking off): a real tool call.
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: `{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"length"}]}`},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "a.go"}})},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	loop, calls := newLoop(t, srv, nil, &stubBudget{tripAt: 50}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Reason == ReasonError {
+		t.Fatalf("an empty turn ended the run; it must be re-asked with thinking off: %v", rep.Err)
+	}
+	if len(*calls) == 0 {
+		t.Fatal("no tool call dispatched; the thinking-off retry did not take effect")
+	}
+	// and the retry must actually have asked with reasoning disabled
+	var sawNoThink bool
+	for _, raw := range srv.ModelCalls() {
+		if strings.Contains(string(raw), `"reasoning_effort":"none"`) {
+			sawNoThink = true
+		}
+	}
+	if !sawNoThink {
+		t.Error("the retry must set reasoning_effort=none — that is the remedy kloo's own error names")
+	}
+}
