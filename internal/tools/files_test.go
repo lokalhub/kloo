@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -299,4 +300,62 @@ func TestReadFileEmptyReturnsMarker(t *testing.T) {
 	if res.Output != "hello" {
 		t.Errorf("non-empty file = %q, want verbatim", res.Output)
 	}
+}
+
+// A whole-file dump can exceed the model's entire working budget. Real files in a
+// production repo run to 34-41k TOKENS each against a hot budget of ~51k at ctx
+// 131072, so ONE read consumed 80% of it, the next push crossed the compaction
+// trigger, the file was shed, and the model read it again. Measured on kloo-bench:
+// C07 made 46 reads, 18 of them repeats, and never edited anything.
+func TestReadFileIsBoundedAndSaysSo(t *testing.T) {
+	ws, dir := wsAt(t)
+	var b strings.Builder
+	for i := 1; i <= 1000; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.ts"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := readFileTool{ws: ws}.Invoke(context.Background(), Call{
+		Name: NameReadFile, Args: map[string]any{"path": "big.ts"},
+	})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	got := strings.Count(res.Output, "\n")
+	if got > DefaultReadLineLimit+5 { // +marker lines
+		t.Errorf("returned %d lines, want <= %d: one read must not swallow the window", got, DefaultReadLineLimit)
+	}
+	// Silent truncation is a correctness hazard — the marker is as important as the clamp.
+	if !strings.Contains(res.Output, "of 1001") {
+		t.Errorf("must say how much was withheld: %q", tail(res.Output))
+	}
+	if !strings.Contains(res.Output, "offset=") {
+		t.Errorf("must say how to get the rest: %q", tail(res.Output))
+	}
+}
+
+// A small file must come back whole, with no marker at all.
+func TestSmallFileIsUnchanged(t *testing.T) {
+	ws, dir := wsAt(t)
+	if err := os.WriteFile(filepath.Join(dir, "small.ts"), []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := readFileTool{ws: ws}.Invoke(context.Background(), Call{
+		Name: NameReadFile, Args: map[string]any{"path": "small.ts"},
+	})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if strings.Contains(res.Output, "showing lines") {
+		t.Errorf("a file under the limit must not be marked truncated: %q", res.Output)
+	}
+}
+
+func tail(s string) string {
+	if len(s) > 160 {
+		return s[len(s)-160:]
+	}
+	return s
 }
