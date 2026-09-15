@@ -218,7 +218,12 @@ const DefaultStallRounds = 3
 // run. We retry a couple of times with exponential backoff before surfacing the
 // error. See [[kloo-completion-termination]].
 const (
-	DefaultLLMRetries     = 2
+	// DefaultLLMRetries is deliberately patient. The cost is ASYMMETRIC: a retry
+	// costs seconds of backoff, while giving up discards the whole run — minutes
+	// of work and every edit already made. Measured on kloo-bench, one loss was a
+	// 502 that exhausted 2 retries (~6s of patience) on a gateway that recovers in
+	// tens of seconds. With the 2s/30s backoff this is roughly a minute.
+	DefaultLLMRetries     = 5
 	DefaultRetryBaseDelay = 2 * time.Second
 )
 
@@ -2002,6 +2007,11 @@ func retryableLLMError(err error, retryCodes []int) bool {
 		errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	// An empty turn is a hiccup, not a config fault — retry it. If the model does
+	// it every time the retries exhaust and the message still names the remedy.
+	if errors.Is(err, ErrNoUsableContent) {
+		return true
+	}
 	// Transport-level i/o timeouts.
 	var nerr net.Error
 	if errors.As(err, &nerr) && nerr.Timeout() {
@@ -2061,6 +2071,13 @@ func assistantMessage(resp llm.ChatResponse) llm.Message {
 
 const runawayReasoningChars = 2000
 
+// ErrNoUsableContent is a turn that produced no tool call, no content and no
+// reasoning worth keeping. It is a MODEL HICCUP, not a configuration fault: the
+// same request usually succeeds on the next attempt. Measured on kloo-bench at
+// ctx 131072, one of kloo's eight losses to grok was a single such turn ending
+// the whole run ("0 reasoning chars but no usable content", finish_reason=length).
+var ErrNoUsableContent = errors.New("model produced no usable content")
+
 func runawayThinkingError(msg llm.Message) error {
 	if len(msg.ToolCalls) > 0 {
 		return nil
@@ -2078,7 +2095,8 @@ func runawayThinkingError(msg llm.Message) error {
 	}
 	reasoningChars := len([]rune(rawReasoning))
 	if reasoningChars >= runawayReasoningChars || msg.FinishReason == "length" {
-		return fmt.Errorf("model produced %d reasoning chars but no usable content; disable thinking (--no-think) or raise the output budget", reasoningChars)
+		return fmt.Errorf("%w: %d reasoning chars; if it repeats, disable thinking (--no-think) or raise the output budget: %w",
+			ErrNoUsableContent, reasoningChars, ErrNoUsableContent)
 	}
 	return nil
 }

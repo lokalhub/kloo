@@ -949,3 +949,34 @@ func TestHTTP2StreamFaultsAreRetryable(t *testing.T) {
 		}
 	}
 }
+
+// A turn that produced nothing — no tool call, no content, no reasoning — is a
+// model hiccup, not a configuration fault. Ending the whole run on one such turn
+// discards every edit already made. Measured on kloo-bench at ctx 131072: one of
+// kloo's eight losses to grok was exactly this, on the FIRST occurrence.
+func TestEmptyModelTurnIsRetryable(t *testing.T) {
+	err := runawayThinkingError(llm.Message{FinishReason: "length"})
+	if err == nil {
+		t.Fatal("an empty turn truncated by length must still be reported")
+	}
+	if !errors.Is(err, ErrNoUsableContent) {
+		t.Fatalf("error must wrap ErrNoUsableContent so it can be classified: %v", err)
+	}
+	if !retryableLLMError(err, nil) {
+		t.Error("an empty turn must be retried; the same request usually succeeds next attempt")
+	}
+	// the remedy must survive into the message for when retries DO exhaust
+	if !strings.Contains(err.Error(), "--no-think") {
+		t.Errorf("the message must still name the remedy: %v", err)
+	}
+}
+
+// A turn that DID produce usable content is not an error at all.
+func TestUsefulTurnIsNotAnError(t *testing.T) {
+	if err := runawayThinkingError(llm.Message{Content: "here is the fix"}); err != nil {
+		t.Errorf("a turn with content must not error: %v", err)
+	}
+	if err := runawayThinkingError(llm.Message{ToolCalls: []llm.ToolCall{{ID: "1"}}}); err != nil {
+		t.Errorf("a turn with a tool call must not error: %v", err)
+	}
+}
