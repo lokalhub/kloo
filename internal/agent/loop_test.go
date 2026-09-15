@@ -980,3 +980,34 @@ func TestUsefulTurnIsNotAnError(t *testing.T) {
 		t.Errorf("a turn with a tool call must not error: %v", err)
 	}
 }
+
+// The server states its real limit AND says retrying will not help. kloo ignored
+// both and ended the run. Measured on kloo-bench at ctx 131072: two cases died on
+//
+//	"this request needs ~132449 tokens, above the ... per-request limit of 131072.
+//	 Retrying will not help; shorten the prompt or lower max_tokens."
+func TestContextOverflowLimitIsReadFromTheServer(t *testing.T) {
+	body := `{"error":{"message":"this request needs ~132449 tokens, above the glimmer-tp2-179 per-request limit of 131072. Retrying will not help; shorten the prompt or lower max_tokens."}}`
+	err := &llm.APIError{StatusCode: 400, Body: body}
+	if got := contextOverflowLimit(err); got != 131072 {
+		t.Fatalf("limit = %d, want 131072 read from the server's own message", got)
+	}
+
+	// An overflow whose limit we cannot parse still reports AS an overflow (-1), so
+	// the caller backs off rather than treating it as an ordinary 400.
+	vague := &llm.APIError{StatusCode: 400, Body: `{"error":"prompt too long, exceeds maximum context"}`}
+	if got := contextOverflowLimit(vague); got != -1 {
+		t.Errorf("unparseable overflow = %d, want -1", got)
+	}
+
+	// Ordinary 400s and other statuses must NOT be mistaken for overflows —
+	// shrinking the window would hide the real fault.
+	for _, e := range []*llm.APIError{
+		{StatusCode: 400, Body: `{"error":"invalid tool schema"}`},
+		{StatusCode: 500, Body: "tokens above limit of 131072"},
+	} {
+		if got := contextOverflowLimit(e); got != 0 {
+			t.Errorf("status %d body %q classified as overflow (%d)", e.StatusCode, e.Body, got)
+		}
+	}
+}
