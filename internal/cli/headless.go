@@ -78,31 +78,33 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
 	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
-	systemPrompt := defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
+	systemPrompt := SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
 	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
-		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
-		Adapter:              adapter,
-		Registry:             reg,
-		Verifier:             buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
-		Linter:               buildLinter(ws, lintCmd, lintPerFile),
-		Budget:               agent.NewBudget(cfg, nil),
-		Churn:                agent.NewChurnDetector(cfg.ChurnRounds),
-		Checkpoint:           agent.NewGitCheckpointer(cwd),
-		Root:                 ws.Root(),
-		ContextTokens:        cfg.MaxContextTokens,
-		CuratorTokens:        cfg.CuratorBudgetTokens,
-		MapPosition:          cfg.MapPosition,
-		Tokens:               tokenCalibrator(cwd, cfg.Model),
-		Memory:               agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:               systemPrompt,
-		StopOn:               agentStopPolicy(cfg.StopOn),
-		StallRounds:          cfg.ChurnRounds,
-		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
-		ExploreNudgeRounds:   cfg.ExploreNudgeRounds,
-		ExploreAbortRounds:   cfg.ExploreAbortRounds,
-		ExploreTotalCap:      cfg.ExploreTotalCap,
+		Client:             llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
+		Adapter:            adapter,
+		Registry:           reg,
+		Verifier:           buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Linter:             buildLinter(ws, lintCmd, lintPerFile),
+		Budget:             agent.NewBudget(cfg, nil),
+		Churn:              agent.NewChurnDetector(cfg.ChurnRounds),
+		Checkpoint:         agent.NewGitCheckpointer(cwd),
+		Root:               ws.Root(),
+		ContextTokens:      cfg.MaxContextTokens,
+		CuratorTokens:      cfg.CuratorBudgetTokens,
+		MapPosition:        cfg.MapPosition,
+		Tokens:             tokenCalibrator(cwd, cfg.Model),
+		Memory:             agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
+		System:             systemPrompt,
+		StopOn:             agentStopPolicy(cfg.StopOn),
+		StallRounds:        cfg.ChurnRounds,
+		RepeatNudgeRounds:  cfg.RepeatNudgeRounds,
+		ExploreNudgeRounds: cfg.ExploreNudgeRounds,
+		ExploreAbortRounds: cfg.ExploreAbortRounds,
+		ExploreTotalCap:    cfg.ExploreTotalCap,
+		// Subagents: opt-in, so the default tool vocabulary is unchanged.
+		EnableSubagents:      subagentsEnabled(),
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,

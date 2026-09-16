@@ -108,15 +108,17 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		MapPosition:   cfg.MapPosition,
 		Tokens:        tokenCalibrator(cwd, cfg.Model),
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:        defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
+		System:        SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
-		StopOn:               agentStopPolicy(cfg.StopOn),
-		StallRounds:          cfg.ChurnRounds,
-		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
-		ExploreNudgeRounds:   cfg.ExploreNudgeRounds,
-		ExploreAbortRounds:   cfg.ExploreAbortRounds,
-		ExploreTotalCap:      cfg.ExploreTotalCap,
+		StopOn:             agentStopPolicy(cfg.StopOn),
+		StallRounds:        cfg.ChurnRounds,
+		RepeatNudgeRounds:  cfg.RepeatNudgeRounds,
+		ExploreNudgeRounds: cfg.ExploreNudgeRounds,
+		ExploreAbortRounds: cfg.ExploreAbortRounds,
+		ExploreTotalCap:    cfg.ExploreTotalCap,
+		// Subagents: opt-in, so the default tool vocabulary is unchanged.
+		EnableSubagents:      subagentsEnabled(),
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,
