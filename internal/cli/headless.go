@@ -104,7 +104,17 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ExploreAbortRounds: cfg.ExploreAbortRounds,
 		ExploreTotalCap:    cfg.ExploreTotalCap,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
-		EnableSubagents:      subagentsEnabled(),
+		EnableSubagents:  subagentsEnabled(),
+		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
+		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
+		// The CLI owns the credentials, so it builds the routed child's client.
+		NewSubagentClient: func(ep, model string) llm.LLMClient {
+			return llm.New(ep, model,
+				llm.WithAPIKey(cfg.APIKey),
+				llm.WithTimeout(cfg.LLMColdLoadTimeout),
+				llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout),
+				llm.WithLogf(writerLogf(out)))
+		},
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,

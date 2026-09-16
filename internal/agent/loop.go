@@ -76,6 +76,22 @@ type Loop struct {
 	EnableSubagents bool
 	SubagentDepth   int
 	SubagentLimit   int
+	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model
+	// than the parent loop. Empty ⇒ the child uses the parent's.
+	//
+	// Measured on kloo-bench: of the 9 cases kloo loses to grok on glimmer, kloo
+	// passes 5 on qwen with the identical harness (A06 A22 A29 C65 C66). The
+	// harness can solve them; the model will not act. Routing the delegated subtask
+	// to a model that does act is the honest use of that finding — a cheap model
+	// drives the loop, a capable one does the work that needs doing.
+	SubagentModel    string
+	SubagentEndpoint string
+	// NewSubagentClient builds the child's client when routing to another model.
+	// Injected by the CLI, which owns the API key and timeout options — the agent
+	// package must not have to know about credentials. Nil ⇒ routing is skipped
+	// and the child shares the parent's client, so a misconfiguration degrades to
+	// current behaviour instead of producing an unauthenticated child.
+	NewSubagentClient func(endpoint, model string) llm.LLMClient
 	// subagentDepth is THIS loop's own nesting level, set when a parent builds a
 	// child. Unexported: callers configure the limit, not the position. Without
 	// it a child re-registered the task tool at depth 0 on its own Run and could

@@ -146,6 +146,20 @@ func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (
 	child.Churn = NewChurnDetector(config.DefaultChurnRounds)
 	child.Budget = l.subagentBudget()
 	child.Registry = l.registryForDepth(depth)
+	// Model routing: a delegated subtask may run on a different model than the
+	// parent. The child gets its own client so the parent's endpoint, key and
+	// model stay untouched.
+	if m := strings.TrimSpace(l.SubagentModel); m != "" && l.NewSubagentClient != nil {
+		ep := strings.TrimSpace(l.SubagentEndpoint)
+		if ep == "" {
+			ep = l.Endpoint
+		}
+		if c := l.NewSubagentClient(ep, m); c != nil {
+			child.Model = m
+			child.Endpoint = ep
+			child.Client = c
+		}
+	}
 	child.subagentDepth = depth
 	child.subagentSpawns = l.subagentSpawns // the cap is run-wide, not per level
 
