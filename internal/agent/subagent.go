@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/llm"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -230,5 +231,42 @@ func (b *stepBudget) Stats() BudgetStats {
 	return BudgetStats{Steps: b.steps, MaxSteps: b.maxSteps, Tokens: b.tokens}
 }
 func (b *stepBudget) Reset() { b.steps, b.tokens = 0, 0 }
+
+// autoDelegateCorrective is what the parent sees after kloo delegates FOR it.
+func autoDelegateCorrective(report string) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: "You have been reading without making a change, so I " +
+		"sent a subagent to do the investigation for you. Here is everything it found:\n\n" + report +
+		"\n\nUse this. Go straight to the file it names and make the edit THIS turn. " +
+		"Do not re-read the files it already examined."}
+}
+
+// autoDelegateInstruction is the standalone brief handed to the investigator. It
+// must be self-contained: the child cannot see the parent's conversation.
+func autoDelegateInstruction(task string) string {
+	return "INVESTIGATE ONLY — do not edit any file.\n\n" +
+		"Another agent is working on this task and is stuck reading without making progress:\n\n" +
+		task + "\n\n" +
+		"Find the code that must change. Then call finish with a summary that names: " +
+		"(1) the exact file path(s) to edit, (2) the function or symbol inside them, " +
+		"(3) precisely what must change and why, quoting the current code. " +
+		"If a test defines the expected behaviour, quote the assertion that fails. " +
+		"Be specific enough that someone who has read NOTHING can make the edit from your summary alone."
+}
+
+// autoDelegate runs the investigator and returns its report for injection.
+//
+// Why kloo delegates instead of letting the model choose: measured on
+// kloo-bench, glimmer is OFFERED the task tool (it appears in its own tool list)
+// and never calls it — 0 delegations across 36 calls on a case it then lost to
+// explore-stop. That matches every other result on this model: it does not change
+// strategy when offered a better one, or when told to. So the harness has to
+// drive the decomposition rather than suggest it.
+func (l *Loop) autoDelegate(ctx context.Context, task string) (llm.Message, bool) {
+	res, err := l.runSubagent(ctx, autoDelegateInstruction(task), 1)
+	if err != nil || strings.TrimSpace(res.Output) == "" {
+		return llm.Message{}, false
+	}
+	return autoDelegateCorrective(res.Output), true
+}
 
 var _ = time.Second

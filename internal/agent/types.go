@@ -236,7 +236,11 @@ type ToolCounters struct {
 	FailedEdits      int
 	NoOpEdits        int
 	VerifyAttempts   int
-	ToolErrors       int
+	// AutoDelegations counts investigations kloo spawned on the model's behalf
+	// when it was reading without acting. Ships WITH the feature so an inert
+	// experiment is distinguishable from a failed one.
+	AutoDelegations int
+	ToolErrors      int
 	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
 	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
 	// that hit a read-only file specifically (A2).
@@ -413,8 +417,8 @@ type ChurnEvidence struct {
 // Report is the structured outcome of a run — the source of truth the CLI/TUI
 // renders. The human rendering (report.go) is derived from this struct.
 type Report struct {
-	Reason      Reason
-	Steps       int
+	Reason Reason
+	Steps  int
 	// Summary is the text the model passed to the finish tool, when it called it.
 	// Empty for runs a rail ended. Subagent delegation returns this to the parent —
 	// it is the ONLY thing a parent sees of a child's work.

@@ -579,6 +579,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// finishSummary is what the model passed to finish, surfaced on the Report so
 		// a parent agent can read a delegated child's result without its transcript.
 		finishSummary string
+		// autoDelegated makes the investigator one-shot per run.
+		autoDelegated bool
 		counters      ToolCounters
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
@@ -1214,6 +1216,25 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		case exploreTotal > 0 && exploreTotal%l.exploreNudgeRounds() == 0 && exploreNudgedAt != exploreTotal:
 			exploreNudgedAt = exploreTotal
 			recordRail(RailExplore)
+			// AUTO-DELEGATION. On the FIRST explore nudge, kloo delegates the
+			// investigation itself instead of asking the model to stop reading.
+			//
+			// The model is offered the task tool and does not use it: measured on
+			// kloo-bench, glimmer lists `task` among its own tools and called it 0
+			// times across 36 calls on a case it then lost to explore-stop. That
+			// matches every other result on this model — it does not adopt a better
+			// strategy when offered one, or when told to. So the harness drives the
+			// decomposition rather than suggesting it.
+			//
+			// One-shot: a second investigation would be the same spin one level down.
+			if l.EnableSubagents && !autoDelegated && !everActed {
+				autoDelegated = true
+				if msg, ok := l.autoDelegate(ctx, task); ok {
+					counters.AutoDelegations++
+					convo = append(convo, msg)
+					break
+				}
+			}
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
