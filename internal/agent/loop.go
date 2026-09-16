@@ -82,9 +82,11 @@ type Loop struct {
 	// 29-step explore-stop and A04 from 12 to 25, both with zero delegations. With
 	// AutoDelegate alone, a run that never delegates is identical to the default,
 	// so any difference is attributable to delegation.
-	AutoDelegate  bool
-	SubagentDepth int
-	SubagentLimit int
+	AutoDelegate bool
+	// SubagentMaxSteps caps a delegated child's steps (0 ⇒ half the parent's).
+	SubagentMaxSteps int
+	SubagentDepth    int
+	SubagentLimit    int
 	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model
 	// than the parent loop. Empty ⇒ the child uses the parent's.
 	//
@@ -1259,7 +1261,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// so running a command no longer forfeits the handoff.
 			if (l.EnableSubagents || l.AutoDelegate) && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
 				autoDelegated = true
-				if msg, ok := l.autoDelegate(ctx, task); ok {
+				msg, childSteps, ok := l.autoDelegate(ctx, task)
+				counters.SubagentSteps += childSteps
+				if ok {
 					counters.AutoDelegations++
 					convo = append(convo, msg)
 					break

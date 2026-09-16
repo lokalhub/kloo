@@ -106,6 +106,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
 		EnableSubagents:  subagentsEnabled(),
 		AutoDelegate:     envOn("KLOO_AUTO_DELEGATE"),
+		SubagentMaxSteps: envInt("KLOO_SUBAGENT_STEPS"),
 		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
 		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
 		// The CLI owns the credentials, so it builds the routed child's client.
@@ -321,6 +322,7 @@ type toolCountersSummary struct {
 	NoOpEdits        int `json:"no_op_edits"`
 	VerifyAttempts   int `json:"verify_attempts"`
 	AutoDelegations  int `json:"auto_delegations"`
+	SubagentSteps    int `json:"subagent_steps"`
 	ToolErrors       int `json:"tool_errors"`
 	OffScopeEdits    int `json:"off_scope_edits"`
 	ReadOnlyEdits    int `json:"read_only_edits"`
@@ -436,6 +438,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				NoOpEdits:        tc.NoOpEdits,
 				VerifyAttempts:   tc.VerifyAttempts,
 				AutoDelegations:  tc.AutoDelegations,
+				SubagentSteps:    tc.SubagentSteps,
 				ToolErrors:       tc.ToolErrors,
 				OffScopeEdits:    tc.OffScopeEdits,
 				ReadOnlyEdits:    tc.ReadOnlyEdits,
@@ -769,6 +772,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("no_op_edits", c.NoOpEdits)
 	add("verify_attempts", c.VerifyAttempts)
 	add("auto_delegations", c.AutoDelegations)
+	add("subagent_steps", c.SubagentSteps)
 	add("tool_errors", c.ToolErrors)
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)

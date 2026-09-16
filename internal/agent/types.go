@@ -240,7 +240,11 @@ type ToolCounters struct {
 	// when it was reading without acting. Ships WITH the feature so an inert
 	// experiment is distinguishable from a failed one.
 	AutoDelegations int
-	ToolErrors      int
+	// SubagentSteps is the total steps delegated children consumed. Without it
+	// there was no way to tell whether a slow delegated case was the child's work
+	// or the parent's — and the child budget could not be sized from evidence.
+	SubagentSteps int
+	ToolErrors    int
 	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
 	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
 	// that hit a read-only file specifically (A2).

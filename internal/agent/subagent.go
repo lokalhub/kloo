@@ -108,7 +108,8 @@ func (t taskTool) Invoke(ctx context.Context, c tools.Call) (tools.Result, error
 	if t.spawns != nil {
 		*t.spawns++
 	}
-	return t.parent.runSubagent(ctx, instruction, t.depth+1)
+	res, _, err := t.parent.runSubagent(ctx, instruction, t.depth+1)
+	return res, err
 }
 
 func (l *Loop) maxSubagentDepth() int {
@@ -137,7 +138,7 @@ func (l *Loop) maxSubagents() int {
 //   - the budget (its own ceiling, so one child cannot consume the whole run)
 //   - working memory and churn state (fresh, or the parent's compaction history
 //     would be attributed to the child's turns)
-func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (tools.Result, error) {
+func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (tools.Result, int, error) {
 	child := *l // copy configuration, then override everything that must not be shared
 	child.Verifier = nil
 	child.Memory = nil
@@ -175,9 +176,9 @@ func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (
 
 	rep, err := child.Run(ctx, instruction)
 	if err != nil {
-		return tools.Result{}, fmt.Errorf("task: subagent failed: %w", err)
+		return tools.Result{}, 0, fmt.Errorf("task: subagent failed: %w", err)
 	}
-	return tools.Result{Output: subagentReport(rep)}, nil
+	return tools.Result{Output: subagentReport(rep)}, rep.Steps, nil
 }
 
 // subagentBudget gives the child its own ceiling, derived from the parent's.
@@ -190,6 +191,13 @@ func (l *Loop) subagentBudget() Budget {
 		steps = 30
 	}
 	n := int(float64(steps) * DefaultSubagentStepFrac)
+	// An explicit cap wins. Measured on kloo-bench, the default (half of a 60-step
+	// parent = 30) let delegated cases run to 2381s and 2400s against a 2400s
+	// ceiling: a pass 19 seconds from the wire is a coin flip, and the time spent
+	// also desynchronised a paired control/experiment run by 3x.
+	if l.SubagentMaxSteps > 0 {
+		n = l.SubagentMaxSteps
+	}
 	if n < 4 {
 		n = 4
 	}
@@ -287,12 +295,12 @@ func autoDelegateInstruction(task string) string {
 // explore-stop. That matches every other result on this model: it does not change
 // strategy when offered a better one, or when told to. So the harness has to
 // drive the decomposition rather than suggest it.
-func (l *Loop) autoDelegate(ctx context.Context, task string) (llm.Message, bool) {
-	res, err := l.runSubagent(ctx, autoDelegateInstruction(task), 1)
+func (l *Loop) autoDelegate(ctx context.Context, task string) (llm.Message, int, bool) {
+	res, steps, err := l.runSubagent(ctx, autoDelegateInstruction(task), 1)
 	if err != nil || strings.TrimSpace(res.Output) == "" {
-		return llm.Message{}, false
+		return llm.Message{}, steps, false
 	}
-	return autoDelegateCorrective(res.Output), true
+	return autoDelegateCorrective(res.Output), steps, true
 }
 
 // delegateUntilEdit widens auto-delegation from "nothing acted on yet" to "nothing

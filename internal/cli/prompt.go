@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -85,4 +86,13 @@ func envOn(name string) bool {
 		return true
 	}
 	return false
+}
+
+// envInt reads a non-negative integer experiment setting; unset or invalid ⇒ 0.
+func envInt(name string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

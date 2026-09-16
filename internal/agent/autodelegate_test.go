@@ -140,3 +140,27 @@ func TestAutoDelegateAloneIsInvisibleToTheModel(t *testing.T) {
 		t.Error("the delegated report never reached the parent")
 	}
 }
+
+// TestSubagentStepsCountedAndCapped: the child's steps must be recorded, and an
+// explicit cap must bound them. The default budget let delegated cases reach 2381s
+// and 2400s against a 2400s ceiling, and nothing recorded how many steps the child
+// took, so the budget could not be sized from evidence.
+func TestSubagentStepsCountedAndCapped(t *testing.T) {
+	mocks := readSpin(t, 6)                   // parent reaches the nudge
+	mocks = append(mocks, readSpin(t, 30)...) // child spins well past any sane cap
+	srv := llmtest.Sequence(t, mocks...)
+	loop, _ := newLoop(t, srv, nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.SubagentMaxSteps = 5
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.ToolCounters.SubagentSteps == 0 {
+		t.Fatal("SubagentSteps = 0: the child's work was not recorded")
+	}
+	if rep.ToolCounters.SubagentSteps > 5 {
+		t.Errorf("SubagentSteps = %d, want <= 5: the cap did not bind", rep.ToolCounters.SubagentSteps)
+	}
+}
