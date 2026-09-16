@@ -1243,7 +1243,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// decomposition rather than suggesting it.
 			//
 			// One-shot: a second investigation would be the same spin one level down.
-			if l.EnableSubagents && !autoDelegated && !everActed {
+			// The gate is !everActed by default. Measured on kloo-bench C66, that is
+			// too strict: the model ran the failing test early (a healthy move), which
+			// set everActed and disabled delegation for the rest of the run; it then
+			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
+			// so running a command no longer forfeits the handoff.
+			if l.EnableSubagents && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
 				autoDelegated = true
 				if msg, ok := l.autoDelegate(ctx, task); ok {
 					counters.AutoDelegations++

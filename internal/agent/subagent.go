@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -292,6 +293,30 @@ func (l *Loop) autoDelegate(ctx context.Context, task string) (llm.Message, bool
 		return llm.Message{}, false
 	}
 	return autoDelegateCorrective(res.Output), true
+}
+
+// delegateUntilEdit widens auto-delegation from "nothing acted on yet" to "nothing
+// edited yet" (KLOO_DELEGATE_UNTIL_EDIT=1). Off by default so the measured
+// behaviour of KLOO_SUBAGENTS is unchanged.
+func delegateUntilEdit() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_DELEGATE_UNTIL_EDIT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// delegationBlocked decides whether auto-delegation may still fire.
+//
+// Default: blocked once the model has taken ANY action. With untilEdit: blocked
+// only once it has EDITED. Measured on kloo-bench C66, the default is too strict —
+// the model ran the failing test early (a healthy move), which disabled delegation
+// for the rest of the run, and it then spun 35 steps.
+func delegationBlocked(everActed, edited, untilEdit bool) bool {
+	if untilEdit {
+		return edited
+	}
+	return everActed
 }
 
 var _ = time.Second

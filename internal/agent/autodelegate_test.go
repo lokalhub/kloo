@@ -90,3 +90,26 @@ func TestAutoDelegateOffWhenSubagentsDisabled(t *testing.T) {
 		t.Errorf("AutoDelegations = %d with subagents off, want 0", rep.ToolCounters.AutoDelegations)
 	}
 }
+
+// TestDelegationGate pins the decision directly. An integration test could not
+// represent it: in the unit harness run_command errors, and an errored call never
+// sets everActed, so a "command then spin" scenario silently tested nothing.
+func TestDelegationGate(t *testing.T) {
+	cases := []struct {
+		name                       string
+		everActed, edited, untilEd bool
+		wantBlocked                bool
+	}{
+		{"default: nothing done", false, false, false, false},
+		{"default: ran a command (C66) blocks", true, false, false, true},
+		{"default: edited blocks", true, true, false, true},
+		{"untilEdit: ran a command does NOT block", true, false, true, false},
+		{"untilEdit: edited blocks", true, true, true, true},
+		{"untilEdit: nothing done", false, false, true, false},
+	}
+	for _, c := range cases {
+		if got := delegationBlocked(c.everActed, c.edited, c.untilEd); got != c.wantBlocked {
+			t.Errorf("%s: blocked=%v, want %v", c.name, got, c.wantBlocked)
+		}
+	}
+}
