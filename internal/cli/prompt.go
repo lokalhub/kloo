@@ -77,3 +77,12 @@ func SystemPrompt() string {
 	}
 	return defaultSystemPrompt
 }
+
+// envOn reports whether a boolean experiment flag is set.
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}

@@ -113,3 +113,30 @@ func TestDelegationGate(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoDelegateAloneIsInvisibleToTheModel: with AutoDelegate but not
+// EnableSubagents, kloo can still delegate, but the task tool is NOT offered.
+// Advertising it coincided with A28 going from a 6-step success to a 29-step
+// explore-stop with zero delegations; glimmer never called it voluntarily anyway.
+func TestAutoDelegateAloneIsInvisibleToTheModel(t *testing.T) {
+	mocks := readSpin(t, 6)
+	mocks = append(mocks,
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "HARNESS-DELEGATED"}})})
+	mocks = append(mocks, readSpin(t, 8)...)
+	loop, _ := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := loop.Registry.Lookup(NameTask); ok {
+		t.Error("the task tool was offered to the model under AutoDelegate alone")
+	}
+	if rep.ToolCounters.AutoDelegations != 1 {
+		t.Errorf("AutoDelegations = %d, want 1", rep.ToolCounters.AutoDelegations)
+	}
+	if !msgWithAll(rep.Transcript, "HARNESS-DELEGATED") {
+		t.Error("the delegated report never reached the parent")
+	}
+}

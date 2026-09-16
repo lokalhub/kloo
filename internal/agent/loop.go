@@ -74,8 +74,17 @@ type Loop struct {
 	// EnableSubagents registers the task tool at all; without it the vocabulary is
 	// unchanged, so the default path is byte-identical.
 	EnableSubagents bool
-	SubagentDepth   int
-	SubagentLimit   int
+	// AutoDelegate lets kloo hand work to a subagent ITSELF, without offering the
+	// task tool to the model or changing the prompt. Measured on kloo-bench,
+	// glimmer never calls the task tool when offered it (0 of 36 calls), so every
+	// useful delegation was kloo-initiated anyway — while advertising the tool and
+	// its prompt directive coincided with A28 going from a 6-step success to a
+	// 29-step explore-stop and A04 from 12 to 25, both with zero delegations. With
+	// AutoDelegate alone, a run that never delegates is identical to the default,
+	// so any difference is attributable to delegation.
+	AutoDelegate  bool
+	SubagentDepth int
+	SubagentLimit int
 	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model
 	// than the parent loop. Empty ⇒ the child uses the parent's.
 	//
@@ -1248,7 +1257,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// set everActed and disabled delegation for the rest of the run; it then
 			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
 			// so running a command no longer forfeits the handoff.
-			if l.EnableSubagents && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
+			if (l.EnableSubagents || l.AutoDelegate) && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
 				autoDelegated = true
 				if msg, ok := l.autoDelegate(ctx, task); ok {
 					counters.AutoDelegations++

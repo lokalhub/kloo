@@ -105,6 +105,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ExploreTotalCap:    cfg.ExploreTotalCap,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
 		EnableSubagents:  subagentsEnabled(),
+		AutoDelegate:     envOn("KLOO_AUTO_DELEGATE"),
 		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
 		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
 		// The CLI owns the credentials, so it builds the routed child's client.
