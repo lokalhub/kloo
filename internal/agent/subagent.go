@@ -234,26 +234,37 @@ func (b *stepBudget) Reset() { b.steps, b.tokens = 0, 0 }
 
 // autoDelegateCorrective is what the parent sees after kloo delegates FOR it.
 func autoDelegateCorrective(report string) llm.Message {
-	return llm.Message{Role: llm.RoleUser, Content: "You have been reading without making a change, so I " +
-		"sent a subagent to do the investigation for you. Here is everything it found:\n\n" + report +
-		"\n\nUse this. Go straight to the file it names and make the edit THIS turn. " +
-		"Do not re-read the files it already examined."}
+	return llm.Message{Role: llm.RoleUser, Content: "You were reading without making a change, so a " +
+		"subagent has done the work for you. Its report:\n\n" + report +
+		"\n\nThe edits it describes are ALREADY APPLIED to the working tree. Do not redo them and do " +
+		"not re-read those files. Verify the result with run_command, fix anything it got wrong, " +
+		"and call finish when the task is done."}
 }
 
-// autoDelegateInstruction is the standalone brief handed to the investigator. It
-// must be self-contained: the child cannot see the parent's conversation.
+// autoDelegateInstruction is the standalone brief handed to the delegate. It must
+// be self-contained: the child cannot see the parent's conversation.
+//
+// It delegates the WORK, not an investigation. Measured on kloo-bench, an
+// investigate-only brief fired correctly, returned a report, and changed nothing:
+// the parent read for 34 more steps and never acted. That is the third time
+// injected information has been ignored by this model (the failing test at the
+// explore nudge, the same test before the run started, and now a specific
+// investigation report). Injecting context does not move it.
+//
+// What DOES work is a fresh context with a focused instruction: the investigator
+// child completed its own task and returned a usable report while the parent was
+// re-reading one file 12 times in a row. So the child is given the edit to make.
 func autoDelegateInstruction(task string) string {
-	return "INVESTIGATE ONLY — do not edit any file.\n\n" +
-		"Another agent is working on this task and is stuck reading without making progress:\n\n" +
+	return "Make this change yourself. Read only what you need, then EDIT the source.\n\n" +
 		task + "\n\n" +
-		"Find the code that must change. Then call finish with a summary that names: " +
-		"(1) the exact file path(s) to edit, (2) the function or symbol inside them, " +
-		"(3) precisely what must change and why, quoting the current code. " +
-		"If a test defines the expected behaviour, quote the assertion that fails. " +
-		"Be specific enough that someone who has read NOTHING can make the edit from your summary alone."
+		"Rules: do NOT modify any test file — the tests define the expected behaviour and are " +
+		"already correct. Change the SOURCE so the tests pass. When you are done, call finish with " +
+		"a summary naming every file you edited and what you changed in each. " +
+		"If you could not make the change, say so plainly and name what blocked you — " +
+		"a wrong summary is worse than an honest failure."
 }
 
-// autoDelegate runs the investigator and returns its report for injection.
+// autoDelegate runs the delegate and returns its report for injection.
 //
 // Why kloo delegates instead of letting the model choose: measured on
 // kloo-bench, glimmer is OFFERED the task tool (it appears in its own tool list)
