@@ -415,6 +415,10 @@ type ChurnEvidence struct {
 type Report struct {
 	Reason      Reason
 	Steps       int
+	// Summary is the text the model passed to the finish tool, when it called it.
+	// Empty for runs a rail ended. Subagent delegation returns this to the parent —
+	// it is the ONLY thing a parent sees of a child's work.
+	Summary     string
 	FinalVerify VerifyResult // the last real verify signal
 	Budget      *BudgetEvidence
 	Churn       *ChurnEvidence

@@ -67,7 +67,24 @@ type Loop struct {
 	Model       string
 	Temperature float64
 	NoThink     bool
-	Now         func() time.Time // injectable clock (defaults to time.Now)
+
+	// Subagents. SubagentDepth is how many levels may delegate (0 ⇒
+	// DefaultMaxSubagentDepth = 1: the top level delegates, children may not).
+	// SubagentLimit caps TOTAL children per run (0 ⇒ DefaultMaxSubagents).
+	// EnableSubagents registers the task tool at all; without it the vocabulary is
+	// unchanged, so the default path is byte-identical.
+	EnableSubagents bool
+	SubagentDepth   int
+	SubagentLimit   int
+	// subagentDepth is THIS loop's own nesting level, set when a parent builds a
+	// child. Unexported: callers configure the limit, not the position. Without
+	// it a child re-registered the task tool at depth 0 on its own Run and could
+	// delegate forever — the depth limit was cosmetic.
+	subagentDepth int
+	// subagentSpawns is the run-wide child counter, shared with children so the
+	// limit counts TOTAL descendants rather than resetting per level.
+	subagentSpawns *int
+	Now            func() time.Time // injectable clock (defaults to time.Now)
 	// SessionHistory is the conversation from PRIOR runs in the same session (the
 	// TUI reuses one Loop across submissions). It is seeded into working memory as
 	// the oldest tail, so a follow-up ("what's the issue?", "now do the other
@@ -457,6 +474,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
 	l.toolCharsCache = 0
 
+	// Subagents: register the delegation tool for THIS run. Opt-in, so a loop that
+	// does not enable it has a byte-identical vocabulary to before. spawned is
+	// shared by every taskTool in the run so the cap counts total children, not
+	// children per call site.
+	if l.EnableSubagents && l.Registry != nil && l.subagentDepth < l.maxSubagentDepth() {
+		if l.subagentSpawns == nil {
+			n := 0
+			l.subagentSpawns = &n
+		}
+		l.Registry.Register(taskTool{parent: l, depth: l.subagentDepth, spawns: l.subagentSpawns})
+	}
+
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
 		snap        Snapshot
@@ -547,7 +576,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// into Report.RailFires at finish (nil when empty). Makes self-corrections
 		// observable in the summary/JSON. recordRail bumps a name's count.
 		railFires = map[string]int{}
-		counters  ToolCounters
+		// finishSummary is what the model passed to finish, surfaced on the Report so
+		// a parent agent can read a delegated child's result without its transcript.
+		finishSummary string
+		counters      ToolCounters
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
@@ -576,6 +608,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Ignored:            ignoredAll,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 			ToolCounters:       counters,
+			Summary:            finishSummary,
 		}
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
@@ -703,7 +736,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// run one final verify — Success when it passes, else Answered (the model's
 		// summary stands, but nothing was verified).
 		if call.Name == tools.NameFinish {
-			convo = append(convo, observation(call, tools.Result{Output: str(call.Args["summary"])}, nil))
+			finishSummary = str(call.Args["summary"])
+			convo = append(convo, observation(call, tools.Result{Output: finishSummary}, nil))
 			if l.Verifier == nil {
 				// Unverified mode: no command to prove the change works. Honour finish
 				// as a calm terminal stop, but label it UNVERIFIED — distinct from
