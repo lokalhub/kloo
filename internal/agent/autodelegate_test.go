@@ -191,3 +191,52 @@ func TestOnSubagentFiresOnceWithChildSteps(t *testing.T) {
 		t.Errorf("OnSubagent steps=%d, counter=%d — must match and be non-zero", fired[0], rep.ToolCounters.SubagentSteps)
 	}
 }
+
+// TestDelegateAfterReadsWaitsForTheThreshold: with a threshold of 10, the legacy
+// first-nudge trigger (6 reads) must NOT fire, and delegation must happen once 10
+// read-only turns have passed without an edit. At 6 the trigger fired on 92% of
+// runs glimmer already solves; on A06 it handed off three reads before glimmer's
+// own edit and turned a ~200s pass into a timeout.
+func TestDelegateAfterReadsWaitsForTheThreshold(t *testing.T) {
+	mocks := readSpin(t, 10) // parent: reads 1..10; delegation fires on the 10th
+	mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "AFTER-TEN"}})})
+	mocks = append(mocks, readSpin(t, 8)...)
+	loop, calls := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.DelegateAfterReads = 10
+
+	var delegatedAt int
+	loop.OnSubagent = func(int, Reason) { delegatedAt = len(*calls) }
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.ToolCounters.AutoDelegations != 1 {
+		t.Fatalf("AutoDelegations = %d, want 1", rep.ToolCounters.AutoDelegations)
+	}
+	if delegatedAt < 10 {
+		t.Errorf("delegated after %d parent reads, want >= 10 (the legacy 6-read trigger fired)", delegatedAt)
+	}
+	if !msgWithAll(rep.Transcript, "AFTER-TEN") {
+		t.Error("the delegated report never reached the parent")
+	}
+}
+
+// TestDelegateAfterReadsDoesNotFireBelowThreshold: a run that stays under the
+// threshold must never hand off — that is what protects the runs glimmer solves.
+func TestDelegateAfterReadsDoesNotFireBelowThreshold(t *testing.T) {
+	mocks := readSpin(t, 9)
+	mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, finishCall)})
+	loop, _ := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.DelegateAfterReads = 10
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.ToolCounters.AutoDelegations != 0 {
+		t.Errorf("AutoDelegations = %d below the threshold, want 0", rep.ToolCounters.AutoDelegations)
+	}
+}

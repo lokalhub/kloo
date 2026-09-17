@@ -104,9 +104,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ExploreAbortRounds: cfg.ExploreAbortRounds,
 		ExploreTotalCap:    cfg.ExploreTotalCap,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
-		EnableSubagents:  subagentsEnabled(),
-		AutoDelegate:     envOn("KLOO_AUTO_DELEGATE"),
-		SubagentMaxSteps: envInt("KLOO_SUBAGENT_STEPS"),
+		EnableSubagents:    subagentsEnabled(),
+		AutoDelegate:       envOn("KLOO_AUTO_DELEGATE"),
+		SubagentMaxSteps:   envInt("KLOO_SUBAGENT_STEPS"),
+		DelegateAfterReads: envInt("KLOO_DELEGATE_AFTER_READS"),
 		OnSubagent: func(steps int, reason agent.Reason) {
 			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s\n", steps, reason)
 		},

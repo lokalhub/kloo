@@ -85,6 +85,13 @@ type Loop struct {
 	AutoDelegate bool
 	// SubagentMaxSteps caps a delegated child's steps (0 ⇒ half the parent's).
 	SubagentMaxSteps int
+	// DelegateAfterReads hands off to a subagent once the model has made this many
+	// read-only turns without an edit (0 ⇒ the legacy trigger: the first explore
+	// nudge, 6 turns). Sized from kloo-bench glimmer-only runs: passing runs read a
+	// median of 12 before their first edit, failing runs 26. A trigger at 6 fired on
+	// 92% of runs glimmer ALREADY solves — on A06 it handed off at read 6 when
+	// glimmer edits at read 9 and passes in ~200s, and the handoff then timed out.
+	DelegateAfterReads int
 	// OnSubagent fires as soon as a delegated child finishes, with its step count
 	// and terminal reason. Written to the log immediately so it survives a hard
 	// kill: the bench harness SIGTERMs kloo at its 2400s ceiling, kloo has no signal
@@ -614,7 +621,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		finishSummary string
 		// autoDelegated makes the investigator one-shot per run.
 		autoDelegated bool
-		counters      ToolCounters
+		// readsSinceEdit counts read-only turns since the last successful edit; unlike
+		// exploreTotal it is NOT reset by running a command.
+		readsSinceEdit int
+		counters       ToolCounters
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
@@ -1212,7 +1222,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		//
 		// A repeat of something already seen still climbs the streak, so the weak-model
 		// spin the rail was built for is still caught.
+		if isEditTool(call.Name) && derr == nil {
+			readsSinceEdit = 0
+		}
 		if readOnlyTurn {
+			readsSinceEdit++
 			exploreTotal++ // read-only turns since the last action, new ground or not
 			sig := exploreSignature(call)
 			if sig != "" && !seenTargets[sig] {
@@ -1223,6 +1237,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		} else {
 			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+		}
+		if l.DelegateAfterReads > 0 && (l.EnableSubagents || l.AutoDelegate) && !autoDelegated &&
+			!edited && readsSinceEdit >= l.DelegateAfterReads {
+			autoDelegated = true
+			msg, childSteps, ok := l.autoDelegate(ctx, task)
+			counters.SubagentSteps += childSteps
+			if ok {
+				counters.AutoDelegations++
+				convo = append(convo, msg)
+				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0 // fresh start after the handoff
+			}
 		}
 		switch {
 		// A CEILING on total consecutive read-only turns, independent of whether each
@@ -1265,7 +1290,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// set everActed and disabled delegation for the rest of the run; it then
 			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
 			// so running a command no longer forfeits the handoff.
-			if (l.EnableSubagents || l.AutoDelegate) && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
+			if l.DelegateAfterReads == 0 && (l.EnableSubagents || l.AutoDelegate) && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
 				autoDelegated = true
 				msg, childSteps, ok := l.autoDelegate(ctx, task)
 				counters.SubagentSteps += childSteps
