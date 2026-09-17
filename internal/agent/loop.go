@@ -95,12 +95,19 @@ type Loop struct {
 	// 92% of runs glimmer ALREADY solves — on A06 it handed off at read 6 when
 	// glimmer edits at read 9 and passes in ~200s, and the handoff then timed out.
 	DelegateAfterReads int
-	// OnSubagent fires as soon as a delegated child finishes, with its step count
-	// and terminal reason. Written to the log immediately so it survives a hard
-	// kill: the bench harness SIGTERMs kloo at its 2400s ceiling, kloo has no signal
-	// handling, and KLOO_RESULT_JSON is never printed — so subagent_steps was lost
-	// on exactly the timeout cases the child budget needs sizing against.
-	OnSubagent    func(steps int, reason Reason)
+	// OnSubagent fires as soon as a delegated child finishes, with its step count,
+	// terminal reason, and the error that ended it (nil unless reason is
+	// ReasonError). Written to the log immediately so it survives a hard kill: the
+	// bench harness SIGTERMs kloo at its 2400s ceiling, kloo has no signal handling,
+	// and KLOO_RESULT_JSON is never printed — so subagent_steps was lost on exactly
+	// the timeout cases the child budget needs sizing against.
+	//
+	// The error is passed because reason alone is not diagnosable. On kloo-bench a
+	// run of children all died at step 1 with reason=error and no further detail;
+	// the cause (two concurrent arms contending for one GPU, so the routed child's
+	// model could not load) had to be recovered by correlating timestamps across
+	// arms. The reason says a child failed; only the error says why.
+	OnSubagent    func(steps int, reason Reason, err error)
 	SubagentDepth int
 	SubagentLimit int
 	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model

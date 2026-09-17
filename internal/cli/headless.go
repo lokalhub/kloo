@@ -109,8 +109,15 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		SubagentMaxSteps:   envInt("KLOO_SUBAGENT_STEPS"),
 		DelegateAfterReads: envInt("KLOO_DELEGATE_AFTER_READS"),
 		MaxHandoffs:        envInt("KLOO_MAX_HANDOFFS"),
-		OnSubagent: func(steps int, reason agent.Reason) {
-			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s\n", steps, reason)
+		OnSubagent: func(steps int, reason agent.Reason, err error) {
+			// The error is logged, not shown to the model: the parent's view of a
+			// child is deliberately just the report, and widening it is a separate,
+			// measurable change. This line is for whoever reads the run afterwards.
+			detail := ""
+			if err != nil {
+				detail = fmt.Sprintf(" err=%q", clipErr(err.Error(), 300))
+			}
+			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s%s\n", steps, reason, detail)
 		},
 		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
 		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
@@ -924,4 +931,19 @@ func transcriptTail(msgs []llm.Message, maxBytes int) string {
 		s = "…" + s[len(s)-maxBytes:]
 	}
 	return s
+}
+
+// clipErr bounds a subagent error before it reaches the log. Provider errors can
+// carry a whole HTML error page; the log line has to stay one line and stay
+// greppable. Cuts on a rune boundary so a multi-byte character is never split.
+func clipErr(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ") // collapse newlines: one event, one line
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > max {
+		r = r[:max]
+	}
+	return string(r) + "…"
 }

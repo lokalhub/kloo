@@ -180,7 +180,7 @@ func TestOnSubagentFiresOnceWithChildSteps(t *testing.T) {
 	loop.AutoDelegate = true
 
 	var fired []int
-	loop.OnSubagent = func(steps int, _ Reason) { fired = append(fired, steps) }
+	loop.OnSubagent = func(steps int, _ Reason, _ error) { fired = append(fired, steps) }
 
 	rep, err := loop.Run(context.Background(), "fix it")
 	if err != nil {
@@ -213,7 +213,7 @@ func TestDelegateAfterReadsWaitsForTheThreshold(t *testing.T) {
 	// trigger re-enabled. OnTool is nilled on the child, so it sees the parent alone.
 	parentCalls, delegatedAt := 0, -1
 	loop.OnTool = func(tools.Call, tools.Result, error) { parentCalls++ }
-	loop.OnSubagent = func(int, Reason) {
+	loop.OnSubagent = func(int, Reason, error) {
 		if delegatedAt < 0 {
 			delegatedAt = parentCalls
 		}
@@ -268,7 +268,7 @@ func TestAutoDelegationDoesNotNest(t *testing.T) {
 	loop.SubagentMaxSteps = 6
 
 	finished := 0
-	loop.OnSubagent = func(int, Reason) { finished++ }
+	loop.OnSubagent = func(int, Reason, error) { finished++ }
 
 	// Bounded: if nesting regresses the recursion never ends, and an unbounded test
 	// would HANG CI instead of failing it. A correct run takes ~10ms.
@@ -312,7 +312,7 @@ func TestSequentialHandoffsAreBoundedAndNotNested(t *testing.T) {
 	loop.MaxHandoffs = 2
 
 	depths := 0
-	loop.OnSubagent = func(int, Reason) { depths++ }
+	loop.OnSubagent = func(int, Reason, error) { depths++ }
 	rep, err := loop.Run(context.Background(), "fix it")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
