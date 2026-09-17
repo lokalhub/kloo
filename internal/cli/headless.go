@@ -108,6 +108,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		AutoDelegate:       envOn("KLOO_AUTO_DELEGATE"),
 		SubagentMaxSteps:   envInt("KLOO_SUBAGENT_STEPS"),
 		DelegateAfterReads: envInt("KLOO_DELEGATE_AFTER_READS"),
+		MaxHandoffs:        envInt("KLOO_MAX_HANDOFFS"),
 		OnSubagent: func(steps int, reason agent.Reason) {
 			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s\n", steps, reason)
 		},

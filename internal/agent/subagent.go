@@ -112,6 +112,13 @@ func (t taskTool) Invoke(ctx context.Context, c tools.Call) (tools.Result, error
 	return res, err
 }
 
+func (l *Loop) maxHandoffs() int {
+	if l.MaxHandoffs > 0 {
+		return l.MaxHandoffs
+	}
+	return 1
+}
+
 func (l *Loop) maxSubagentDepth() int {
 	if l.SubagentDepth > 0 {
 		return l.SubagentDepth

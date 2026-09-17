@@ -291,3 +291,58 @@ func TestAutoDelegationDoesNotNest(t *testing.T) {
 		t.Errorf("subagents finished = %d, want exactly 1 — a child delegated again (unbounded nesting)", finished)
 	}
 }
+
+// TestSequentialHandoffsAreBoundedAndNotNested: MaxHandoffs allows a SECOND child
+// after the first returns and the model is stuck again — sequentially, never
+// nested. The one-per-run limit was a choice, not a measurement: the nesting bug
+// accidentally showed C17 passing with ~65 child steps across three children and
+// failing with a single 25-step child.
+func TestSequentialHandoffsAreBoundedAndNotNested(t *testing.T) {
+	// Parent reads to the threshold, child finishes, parent reads to it again,
+	// second child finishes, then the parent keeps reading.
+	var m []llmtest.Mock
+	m = append(m, readSpin(t, 3)...)
+	m = append(m, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "CHILD-ONE"}})})
+	m = append(m, readSpin(t, 3)...)
+	m = append(m, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "CHILD-TWO"}})})
+	m = append(m, readSpin(t, 20)...)
+	loop, _ := newLoop(t, llmtest.Sequence(t, m...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.DelegateAfterReads = 3
+	loop.MaxHandoffs = 2
+
+	depths := 0
+	loop.OnSubagent = func(int, Reason) { depths++ }
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.ToolCounters.AutoDelegations != 2 {
+		t.Fatalf("AutoDelegations = %d, want exactly 2", rep.ToolCounters.AutoDelegations)
+	}
+	if depths != 2 {
+		t.Errorf("subagent completions = %d, want 2", depths)
+	}
+	if !msgWithAll(rep.Transcript, "CHILD-ONE") || !msgWithAll(rep.Transcript, "CHILD-TWO") {
+		t.Error("both children's summaries should reach the parent")
+	}
+}
+
+// TestHandoffsDefaultToOne: unset MaxHandoffs keeps the old one-per-run behaviour.
+func TestHandoffsDefaultToOne(t *testing.T) {
+	var m []llmtest.Mock
+	m = append(m, readSpin(t, 3)...)
+	m = append(m, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "one"}})})
+	m = append(m, readSpin(t, 30)...)
+	loop, _ := newLoop(t, llmtest.Sequence(t, m...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.DelegateAfterReads = 3
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.ToolCounters.AutoDelegations != 1 {
+		t.Errorf("AutoDelegations = %d with MaxHandoffs unset, want 1", rep.ToolCounters.AutoDelegations)
+	}
+}

@@ -85,6 +85,9 @@ type Loop struct {
 	AutoDelegate bool
 	// SubagentMaxSteps caps a delegated child's steps (0 ⇒ half the parent's).
 	SubagentMaxSteps int
+	// MaxHandoffs caps harness-initiated delegations per run (0 ⇒ 1, the old
+	// one-shot behaviour). Children are sequential and never nested.
+	MaxHandoffs int
 	// DelegateAfterReads hands off to a subagent once the model has made this many
 	// read-only turns without an edit (0 ⇒ the legacy trigger: the first explore
 	// nudge, 6 turns). Sized from kloo-bench glimmer-only runs: passing runs read a
@@ -630,7 +633,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// a parent agent can read a delegated child's result without its transcript.
 		finishSummary string
 		// autoDelegated makes the investigator one-shot per run.
-		autoDelegated bool
+		// handoffs counts harness-initiated delegations this run. The limit was one
+		// per run by choice, never measured. The nesting bug accidentally showed the
+		// alternative: C17 passed with ~65 child steps spread over three children and
+		// fails with a single 25-step child. Sequential handoffs are the legitimate
+		// form of that — each child fresh, bounded, and never nested.
+		handoffs int
 		// readsSinceEdit counts read-only turns since the last successful edit; unlike
 		// exploreTotal it is NOT reset by running a command.
 		readsSinceEdit int
@@ -1248,15 +1256,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		} else {
 			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
 		}
-		if l.DelegateAfterReads > 0 && l.canAutoDelegate() && !autoDelegated &&
+		if l.DelegateAfterReads > 0 && l.canAutoDelegate() && handoffs < l.maxHandoffs() &&
 			!edited && readsSinceEdit >= l.DelegateAfterReads {
-			autoDelegated = true
+			handoffs++
 			msg, childSteps, ok := l.autoDelegate(ctx, task)
 			counters.SubagentSteps += childSteps
 			if ok {
 				counters.AutoDelegations++
 				convo = append(convo, msg)
-				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0 // fresh start after the handoff
+				// Reset the read counters so a SECOND handoff needs another full N
+				// read-only turns: the limit is a ceiling, not a schedule.
+				readsSinceEdit = 0
+				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
 			}
 		}
 		// RESCUE HANDOFF (KLOO_DELEGATE_ON_STOP). The explore rail is about to end this
@@ -1273,9 +1284,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// kloo rolls back to it on any non-success exit. Without the re-verify, a
 		// child that fixed the case would be undone the moment the parent was stopped
 		// again — the handoff would look like it fired and do nothing.
-		if delegateOnStop() && l.canAutoDelegate() && !autoDelegated &&
+		if delegateOnStop() && l.canAutoDelegate() && handoffs < l.maxHandoffs() &&
 			(exploreTotal >= l.exploreTotalCap() || exploreStreak >= l.exploreAbortRounds()) {
-			autoDelegated = true
+			handoffs++
 			msg, childSteps, ok := l.autoDelegate(ctx, task)
 			counters.SubagentSteps += childSteps
 			if ok {
@@ -1328,8 +1339,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// set everActed and disabled delegation for the rest of the run; it then
 			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
 			// so running a command no longer forfeits the handoff.
-			if l.DelegateAfterReads == 0 && l.canAutoDelegate() && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
-				autoDelegated = true
+			if l.DelegateAfterReads == 0 && l.canAutoDelegate() && handoffs < l.maxHandoffs() && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
+				handoffs++
 				msg, childSteps, ok := l.autoDelegate(ctx, task)
 				counters.SubagentSteps += childSteps
 				if ok {
