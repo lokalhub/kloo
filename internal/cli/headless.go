@@ -107,6 +107,9 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		EnableSubagents:  subagentsEnabled(),
 		AutoDelegate:     envOn("KLOO_AUTO_DELEGATE"),
 		SubagentMaxSteps: envInt("KLOO_SUBAGENT_STEPS"),
+		OnSubagent: func(steps int, reason agent.Reason) {
+			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s\n", steps, reason)
+		},
 		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
 		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
 		// The CLI owns the credentials, so it builds the routed child's client.

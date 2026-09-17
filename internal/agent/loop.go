@@ -85,8 +85,14 @@ type Loop struct {
 	AutoDelegate bool
 	// SubagentMaxSteps caps a delegated child's steps (0 ⇒ half the parent's).
 	SubagentMaxSteps int
-	SubagentDepth    int
-	SubagentLimit    int
+	// OnSubagent fires as soon as a delegated child finishes, with its step count
+	// and terminal reason. Written to the log immediately so it survives a hard
+	// kill: the bench harness SIGTERMs kloo at its 2400s ceiling, kloo has no signal
+	// handling, and KLOO_RESULT_JSON is never printed — so subagent_steps was lost
+	// on exactly the timeout cases the child budget needs sizing against.
+	OnSubagent    func(steps int, reason Reason)
+	SubagentDepth int
+	SubagentLimit int
 	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model
 	// than the parent loop. Empty ⇒ the child uses the parent's.
 	//

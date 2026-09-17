@@ -164,3 +164,30 @@ func TestSubagentStepsCountedAndCapped(t *testing.T) {
 		t.Errorf("SubagentSteps = %d, want <= 5: the cap did not bind", rep.ToolCounters.SubagentSteps)
 	}
 }
+
+// TestOnSubagentFiresOnceWithChildSteps: the child's step count must reach the log
+// the moment the child finishes, so it survives the harness hard-killing kloo at
+// its ceiling (which suppresses KLOO_RESULT_JSON). Exactly once: the child copies
+// the parent's config, so a double fire would double-count.
+func TestOnSubagentFiresOnceWithChildSteps(t *testing.T) {
+	mocks := readSpin(t, 6)
+	mocks = append(mocks, readSpin(t, 3)...)
+	mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})})
+	mocks = append(mocks, readSpin(t, 8)...)
+	loop, _ := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop.AutoDelegate = true
+
+	var fired []int
+	loop.OnSubagent = func(steps int, _ Reason) { fired = append(fired, steps) }
+
+	rep, err := loop.Run(context.Background(), "fix it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fired) != 1 {
+		t.Fatalf("OnSubagent fired %d times, want exactly 1", len(fired))
+	}
+	if fired[0] != rep.ToolCounters.SubagentSteps || fired[0] == 0 {
+		t.Errorf("OnSubagent steps=%d, counter=%d — must match and be non-zero", fired[0], rep.ToolCounters.SubagentSteps)
+	}
+}

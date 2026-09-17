@@ -178,6 +178,9 @@ func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (
 	if err != nil {
 		return tools.Result{}, 0, fmt.Errorf("task: subagent failed: %w", err)
 	}
+	if l.OnSubagent != nil {
+		l.OnSubagent(rep.Steps, rep.Reason)
+	}
 	return tools.Result{Output: subagentReport(rep)}, rep.Steps, nil
 }
 
