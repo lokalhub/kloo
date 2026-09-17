@@ -34,7 +34,12 @@ type RankInput struct {
 	// RecentlyTouched is the set of recently-edited file paths (the recency
 	// signal). Passed in so ranking stays deterministic and testable.
 	RecentlyTouched map[string]bool
-	// DeprioritiseTests pushes test files below non-test files of equal relevance.
+	// DeprioritiseTests sorts every test file below every non-test file. It is a
+	// PRIMARY key, applied before the relevance score, so a highly-relevant test
+	// still ranks under an irrelevant source file — and under a truncated map
+	// budget, tests drop out of the map entirely rather than merely demoting.
+	// That is deliberate (the tasks name the failing test path in the prompt, so
+	// the model can still read it directly), but it is the aggressive choice.
 	// Measured on kloo-bench: these tasks state "the failing test is already in the
 	// repo ... do not modify the test", yet up to 10 of the top 12 mapped files were
 	// tests — the map spent its budget pointing at files the task forbids changing,

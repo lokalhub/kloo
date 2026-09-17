@@ -26,11 +26,12 @@ func TestDeprioritiseTestsMovesSourceAbove(t *testing.T) {
 	}
 }
 
-// TestDeprioritiseTestsKeepsRelevancePrimary: the option reorders WITHIN the
-// ranking, it must not override task relevance — a highly relevant test still
-// beats an irrelevant source file... no: relevance is primary only among files of
-// the same kind. This pins the deliberate choice: kind is checked FIRST, because
-// these tasks forbid editing tests at all.
+// TestDeprioritiseTestsIsUnconditional pins the deliberate choice that file KIND
+// is checked before task relevance: a test file matching the task by name still
+// sorts below a source file that matches nothing. The weaker reading (demote only
+// among files of EQUAL score) would be near-inert, since scores rarely tie
+// exactly. The cost is that under a truncated map budget tests vanish from the
+// map; the tasks name the failing test path in the prompt, so it stays reachable.
 func TestDeprioritiseTestsIsUnconditional(t *testing.T) {
 	files := []Node{{Path: "src/widget.test.ts"}, {Path: "src/unrelated.ts"}}
 	in := RankInput{
