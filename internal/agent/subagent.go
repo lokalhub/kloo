@@ -361,4 +361,14 @@ func delegateOnStop() bool {
 	return false
 }
 
+// mapDeprioritiseTests pushes test files down the repo map
+// (KLOO_MAP_SKIP_TESTS=1). Off by default.
+func mapDeprioritiseTests() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_MAP_SKIP_TESTS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 var _ = time.Second

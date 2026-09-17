@@ -1727,7 +1727,8 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 		}
 	}
 
-	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents})
+	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents,
+		DeprioritiseTests: mapDeprioritiseTests()})
 	budget := mapBudget
 	if budget <= 0 {
 		budget = 2000
