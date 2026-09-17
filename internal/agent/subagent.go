@@ -173,6 +173,14 @@ func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (
 	child.OnDelta = nil
 	child.OnProgress = nil
 	child.OnBeforeEdit = l.OnBeforeEdit // approval still applies: a child may not bypass it
+	// A delegated child must never delegate again. It copies the parent's config,
+	// including AutoDelegate and DelegateAfterReads, and the depth limit only
+	// guarded task-tool REGISTRATION — so a child reading past the threshold spawned
+	// a grandchild, which could spawn another. Found on kloo-bench C17: three
+	// subagent completions (19, 21, 25 steps) in a run meant to delegate once,
+	// finishing 11s under the ceiling. canAutoDelegate also checks depth, so this is
+	// belt and braces rather than the only guard.
+	child.AutoDelegate = false
 
 	rep, err := child.Run(ctx, instruction)
 	if err != nil {
@@ -328,6 +336,12 @@ func delegationBlocked(everActed, edited, untilEdit bool) bool {
 		return edited
 	}
 	return everActed
+}
+
+// canAutoDelegate reports whether THIS loop may start a harness-initiated handoff:
+// the feature is on, and the loop is above the depth limit.
+func (l *Loop) canAutoDelegate() bool {
+	return (l.EnableSubagents || l.AutoDelegate) && l.subagentDepth < l.maxSubagentDepth()
 }
 
 var _ = time.Second

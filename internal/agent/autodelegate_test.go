@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lokalhub/kloo/internal/llm/llmtest"
 	"github.com/lokalhub/kloo/internal/tools"
@@ -248,5 +249,45 @@ func TestDelegateAfterReadsDoesNotFireBelowThreshold(t *testing.T) {
 	}
 	if rep.ToolCounters.AutoDelegations != 0 {
 		t.Errorf("AutoDelegations = %d below the threshold, want 0", rep.ToolCounters.AutoDelegations)
+	}
+}
+
+// TestAutoDelegationDoesNotNest: a delegated child must never auto-delegate again.
+// The child copies the parent's config, including AutoDelegate and the threshold,
+// and the depth limit only guarded the task TOOL — so a child reading past the
+// threshold spawned a grandchild, which could spawn another. Found on kloo-bench
+// C17: three "subagent finished" lines (19, 21, 25 steps) in one run that was
+// meant to delegate once, finishing 11s under the 2400s ceiling.
+func TestAutoDelegationDoesNotNest(t *testing.T) {
+	// Every response is a read, so the parent AND any child keep reading past the
+	// threshold; only the depth guard can stop the chain.
+	srv := llmtest.Sequence(t, readSpin(t, 200)...)
+	loop, _ := newLoop(t, srv, nil, &stubBudget{tripAt: 40}, &stubChurn{})
+	loop.AutoDelegate = true
+	loop.DelegateAfterReads = 3
+	loop.SubagentMaxSteps = 6
+
+	finished := 0
+	loop.OnSubagent = func(int, Reason) { finished++ }
+
+	// Bounded: if nesting regresses the recursion never ends, and an unbounded test
+	// would HANG CI instead of failing it. A correct run takes ~10ms.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := loop.Run(ctx, "fix it"); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil && ctx.Err() == nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Run did not return: auto-delegation is nesting without bound")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("hit the 5s deadline: auto-delegation is nesting without bound")
+	}
+	if finished != 1 {
+		t.Errorf("subagents finished = %d, want exactly 1 — a child delegated again (unbounded nesting)", finished)
 	}
 }

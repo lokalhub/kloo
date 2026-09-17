@@ -1238,7 +1238,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		} else {
 			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
 		}
-		if l.DelegateAfterReads > 0 && (l.EnableSubagents || l.AutoDelegate) && !autoDelegated &&
+		if l.DelegateAfterReads > 0 && l.canAutoDelegate() && !autoDelegated &&
 			!edited && readsSinceEdit >= l.DelegateAfterReads {
 			autoDelegated = true
 			msg, childSteps, ok := l.autoDelegate(ctx, task)
@@ -1290,7 +1290,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// set everActed and disabled delegation for the rest of the run; it then
 			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
 			// so running a command no longer forfeits the handoff.
-			if l.DelegateAfterReads == 0 && (l.EnableSubagents || l.AutoDelegate) && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
+			if l.DelegateAfterReads == 0 && l.canAutoDelegate() && !autoDelegated && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
 				autoDelegated = true
 				msg, childSteps, ok := l.autoDelegate(ctx, task)
 				counters.SubagentSteps += childSteps
