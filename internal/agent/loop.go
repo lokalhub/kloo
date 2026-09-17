@@ -1259,6 +1259,34 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0 // fresh start after the handoff
 			}
 		}
+		// RESCUE HANDOFF (KLOO_DELEGATE_ON_STOP). The explore rail is about to end this
+		// run as a failure; hand the work to a subagent first.
+		//
+		// Measured on kloo-bench C66: glimmer made an early edit that did not fix the
+		// case, then read 16 more files until the rail stopped it. The read-count
+		// trigger never fired, because it requires "no edit yet" — yet qwen alone
+		// PASSES C66. The rail is the last point at which a handoff can still help,
+		// and firing only here cannot affect a run that would have succeeded.
+		//
+		// After the child, the tree may have changed under the parent, so it must
+		// VERIFY. This is not optional: a run that has edited has a checkpoint, and
+		// kloo rolls back to it on any non-success exit. Without the re-verify, a
+		// child that fixed the case would be undone the moment the parent was stopped
+		// again — the handoff would look like it fired and do nothing.
+		if delegateOnStop() && l.canAutoDelegate() && !autoDelegated &&
+			(exploreTotal >= l.exploreTotalCap() || exploreStreak >= l.exploreAbortRounds()) {
+			autoDelegated = true
+			msg, childSteps, ok := l.autoDelegate(ctx, task)
+			counters.SubagentSteps += childSteps
+			if ok {
+				counters.AutoDelegations++
+				counters.RescueDelegations++
+				convo = append(convo, msg)
+				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+				mutatedSinceVerify = true
+				continue
+			}
+		}
 		switch {
 		// A CEILING on total consecutive read-only turns, independent of whether each
 		// covers new ground. Measured on kloo-bench case C12: a model issued 42

@@ -319,17 +319,18 @@ type failureDetail struct {
 }
 
 type toolCountersSummary struct {
-	InvalidToolCalls int `json:"invalid_tool_calls"`
-	RepeatedReadFile int `json:"repeated_read_file"`
-	RepeatedEdits    int `json:"repeated_edits"`
-	FailedEdits      int `json:"failed_edits"`
-	NoOpEdits        int `json:"no_op_edits"`
-	VerifyAttempts   int `json:"verify_attempts"`
-	AutoDelegations  int `json:"auto_delegations"`
-	SubagentSteps    int `json:"subagent_steps"`
-	ToolErrors       int `json:"tool_errors"`
-	OffScopeEdits    int `json:"off_scope_edits"`
-	ReadOnlyEdits    int `json:"read_only_edits"`
+	InvalidToolCalls  int `json:"invalid_tool_calls"`
+	RepeatedReadFile  int `json:"repeated_read_file"`
+	RepeatedEdits     int `json:"repeated_edits"`
+	FailedEdits       int `json:"failed_edits"`
+	NoOpEdits         int `json:"no_op_edits"`
+	VerifyAttempts    int `json:"verify_attempts"`
+	AutoDelegations   int `json:"auto_delegations"`
+	SubagentSteps     int `json:"subagent_steps"`
+	RescueDelegations int `json:"rescue_delegations"`
+	ToolErrors        int `json:"tool_errors"`
+	OffScopeEdits     int `json:"off_scope_edits"`
+	ReadOnlyEdits     int `json:"read_only_edits"`
 }
 
 type runSummary struct {
@@ -435,17 +436,18 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		if cfg.BenchmarkMode || !toolCountersZero(rep.ToolCounters) {
 			tc := rep.ToolCounters
 			s.ToolCounters = &toolCountersSummary{
-				InvalidToolCalls: tc.InvalidToolCalls,
-				RepeatedReadFile: tc.RepeatedReadFile,
-				RepeatedEdits:    tc.RepeatedEdits,
-				FailedEdits:      tc.FailedEdits,
-				NoOpEdits:        tc.NoOpEdits,
-				VerifyAttempts:   tc.VerifyAttempts,
-				AutoDelegations:  tc.AutoDelegations,
-				SubagentSteps:    tc.SubagentSteps,
-				ToolErrors:       tc.ToolErrors,
-				OffScopeEdits:    tc.OffScopeEdits,
-				ReadOnlyEdits:    tc.ReadOnlyEdits,
+				InvalidToolCalls:  tc.InvalidToolCalls,
+				RepeatedReadFile:  tc.RepeatedReadFile,
+				RepeatedEdits:     tc.RepeatedEdits,
+				FailedEdits:       tc.FailedEdits,
+				NoOpEdits:         tc.NoOpEdits,
+				VerifyAttempts:    tc.VerifyAttempts,
+				AutoDelegations:   tc.AutoDelegations,
+				SubagentSteps:     tc.SubagentSteps,
+				RescueDelegations: tc.RescueDelegations,
+				ToolErrors:        tc.ToolErrors,
+				OffScopeEdits:     tc.OffScopeEdits,
+				ReadOnlyEdits:     tc.ReadOnlyEdits,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
@@ -777,6 +779,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("verify_attempts", c.VerifyAttempts)
 	add("auto_delegations", c.AutoDelegations)
 	add("subagent_steps", c.SubagentSteps)
+	add("rescue_delegations", c.RescueDelegations)
 	add("tool_errors", c.ToolErrors)
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)

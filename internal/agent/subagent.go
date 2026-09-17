@@ -344,4 +344,14 @@ func (l *Loop) canAutoDelegate() bool {
 	return (l.EnableSubagents || l.AutoDelegate) && l.subagentDepth < l.maxSubagentDepth()
 }
 
+// delegateOnStop enables the rescue handoff at the explore rail
+// (KLOO_DELEGATE_ON_STOP=1). Off by default.
+func delegateOnStop() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_DELEGATE_ON_STOP"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 var _ = time.Second

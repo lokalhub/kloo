@@ -244,7 +244,10 @@ type ToolCounters struct {
 	// there was no way to tell whether a slow delegated case was the child's work
 	// or the parent's — and the child budget could not be sized from evidence.
 	SubagentSteps int
-	ToolErrors    int
+	// RescueDelegations counts handoffs made at the explore rail instead of
+	// stopping (KLOO_DELEGATE_ON_STOP). Also included in AutoDelegations.
+	RescueDelegations int
+	ToolErrors        int
 	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
 	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
 	// that hit a read-only file specifically (A2).
