@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/llm/llmtest"
+	"github.com/lokalhub/kloo/internal/tools"
 )
 
 // readSpin returns n read_file mocks on DISTINCT paths, so only the explore
@@ -201,12 +202,21 @@ func TestDelegateAfterReadsWaitsForTheThreshold(t *testing.T) {
 	mocks := readSpin(t, 10) // parent: reads 1..10; delegation fires on the 10th
 	mocks = append(mocks, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "AFTER-TEN"}})})
 	mocks = append(mocks, readSpin(t, 8)...)
-	loop, calls := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
+	loop, _ := newLoop(t, llmtest.Sequence(t, mocks...), nil, &stubBudget{tripAt: 60}, &stubChurn{})
 	loop.AutoDelegate = true
 	loop.DelegateAfterReads = 10
 
-	var delegatedAt int
-	loop.OnSubagent = func(int, Reason) { delegatedAt = len(*calls) }
+	// Count PARENT tool calls only. The child shares the registry, so counting
+	// recorded calls includes the child's reads and cannot tell a handoff at read 6
+	// from one at read 10 — an earlier version of this test passed with the legacy
+	// trigger re-enabled. OnTool is nilled on the child, so it sees the parent alone.
+	parentCalls, delegatedAt := 0, -1
+	loop.OnTool = func(tools.Call, tools.Result, error) { parentCalls++ }
+	loop.OnSubagent = func(int, Reason) {
+		if delegatedAt < 0 {
+			delegatedAt = parentCalls
+		}
+	}
 
 	rep, err := loop.Run(context.Background(), "fix it")
 	if err != nil {
@@ -215,8 +225,8 @@ func TestDelegateAfterReadsWaitsForTheThreshold(t *testing.T) {
 	if rep.ToolCounters.AutoDelegations != 1 {
 		t.Fatalf("AutoDelegations = %d, want 1", rep.ToolCounters.AutoDelegations)
 	}
-	if delegatedAt < 10 {
-		t.Errorf("delegated after %d parent reads, want >= 10 (the legacy 6-read trigger fired)", delegatedAt)
+	if delegatedAt != 10 {
+		t.Errorf("delegated after %d parent reads, want exactly 10 (6 means the legacy nudge trigger fired)", delegatedAt)
 	}
 	if !msgWithAll(rep.Transcript, "AFTER-TEN") {
 		t.Error("the delegated report never reached the parent")
