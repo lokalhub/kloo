@@ -96,3 +96,18 @@ func TestWorkerFailedMidGenerationIsRetried(t *testing.T) {
 		t.Fatalf("reason = %q, want success after retrying the worker failure", rep.Reason)
 	}
 }
+
+// TestWorkerTimedOutMidGenerationIsRetried: the same fault in a different wording.
+// The first fix matched only "worker failed while generating", and a kloo-bench
+// rerun then died at step 9 on "worker timed out while generating the completion"
+// without a single retry.
+func TestWorkerTimedOutMidGenerationIsRetried(t *testing.T) {
+	loop := coldLoop(t,
+		llmtest.Mock{Status: 500, Body: `{"error":"stream error chunk: worker timed out while generating the completion"}`},
+		finishMock(t))
+	loop.RetryableStatusCodes = []int{} // prove the substring match retries it, not the 500
+	rep, _ := loop.Run(context.Background(), "do it")
+	if rep.Reason != ReasonSuccess {
+		t.Fatalf("reason = %q, want success after retrying the worker timeout", rep.Reason)
+	}
+}

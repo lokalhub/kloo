@@ -2307,12 +2307,15 @@ func retryableLLMError(err error, retryCodes []int) bool {
 	// Connection reset/refused/EOF mid-flight — a server that's restarting or a
 	// llama-swap mid model-swap. (no-such-host is a config error, NOT matched.)
 	low := strings.ToLower(err.Error())
-	// "worker failed while generating the completion": the serving worker died
-	// mid-request. Measured on kloo-bench, this ended runs outright (A04 at step 8,
+	// "worker <failed|timed out> while generating the completion": the serving
+	// worker died or stalled mid-request. The gateway uses more than one verb for
+	// the same fault — the first fix matched only "failed", and a rerun then died
+	// on "worker timed out while generating the completion" with no retry at all —
+	// so the match is on the shared suffix. Measured on kloo-bench, this ended runs outright (A04 at step 8,
 	// before any edit). Only retried when no tokens were emitted — the complete()
 	// loop already refuses to retry after output, so a partial answer is never
 	// duplicated.
-	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe", "worker failed while generating"} {
+	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe", "while generating the completion"} {
 		if strings.Contains(low, s) {
 			return true
 		}
