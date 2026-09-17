@@ -228,6 +228,11 @@ type Loop struct {
 	RetryBaseDelay time.Duration
 	// RetryMaxDelay caps exponential retry backoff. 0 ⇒ no cap.
 	RetryMaxDelay time.Duration
+	// ColdStartPatience is how long to keep retrying when the endpoint explicitly
+	// reports it is STARTING ("powering on", "scheduler_busy"), beyond the normal
+	// retry count. 0 ⇒ DefaultColdStartPatience. A generic 503 does not qualify: a
+	// server that is down, not starting, must still exhaust and fail.
+	ColdStartPatience time.Duration
 	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
 	RetryableStatusCodes []int
 
@@ -286,6 +291,11 @@ const (
 	// tens of seconds. With the 2s/30s backoff this is roughly a minute.
 	DefaultLLMRetries     = 5
 	DefaultRetryBaseDelay = 2 * time.Second
+	// DefaultColdStartPatience bounds retrying an endpoint that says it is powering
+	// on. Measured on kloo-bench: a serverless worker cold start rejected requests
+	// for longer than the ~60s normal retry window, and four cases across both arms
+	// of a paired run ended as errors at step 1 without running at all.
+	DefaultColdStartPatience = 10 * time.Minute
 )
 
 // DefaultMaxRepairAttempts is the per-target edit-repair cap when MaxRepairAttempts
@@ -2097,7 +2107,8 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		err    error
 		shrunk bool
 	)
-	for attempt := 1; attempt <= attempts; attempt++ {
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
 		emitted := false
 		if l.OnDelta == nil {
 			resp, err = l.Client.Complete(ctx, req)
@@ -2145,12 +2156,22 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 			}
 			return resp, errContextShrunk
 		}
-		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !l.isRetryableLLMError(err) {
+		// A cold start earns more attempts than the normal budget, bounded by wall
+		// time — but only if retrying is enabled at all (LLMRetries 0 still means
+		// "never retry").
+		coldStart := attempts > 1 && isColdStart(err) && time.Since(start) < l.coldStartPatience()
+		exhausted := attempt >= attempts && !coldStart
+		if err == nil || ctx.Err() != nil || exhausted || emitted || !l.isRetryableLLMError(err) {
 			return resp, l.modelCallError(err)
 		}
-		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
+		// Cap the shift: extended cold-start retries would otherwise overflow the
+		// doubling (2s << 30 is not a wait, it is a bug).
+		wait := l.retryBaseDelay() << min(attempt-1, 10) // 2s, 4s, …
 		if l.RetryMaxDelay > 0 && wait > l.RetryMaxDelay {
 			wait = l.RetryMaxDelay
+		}
+		if coldStart && wait > 30*time.Second {
+			wait = 30 * time.Second
 		}
 		if l.OnRetry != nil {
 			l.OnRetry(attempt, attempts-1, err, wait)
@@ -2161,7 +2182,6 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		case <-time.After(wait):
 		}
 	}
-	return resp, l.modelCallError(err)
 }
 
 func (l *Loop) withThinkingControl(req llm.ChatRequest) llm.ChatRequest {
@@ -2241,6 +2261,29 @@ var overflowLimitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`maximum of (\d+) tokens`),
 }
 
+// isColdStart reports whether an error is the endpoint explicitly saying it is
+// starting up and the request should be resubmitted. Deliberately narrow: only
+// these explicit signals earn the longer patience.
+func isColdStart(err error) bool {
+	if err == nil {
+		return false
+	}
+	low := strings.ToLower(err.Error())
+	for _, s := range []string{"powering on", "scheduler_busy"} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *Loop) coldStartPatience() time.Duration {
+	if l.ColdStartPatience > 0 {
+		return l.ColdStartPatience
+	}
+	return DefaultColdStartPatience
+}
+
 func retryableLLMError(err error, retryCodes []int) bool {
 	if err == nil {
 		return false
@@ -2264,7 +2307,12 @@ func retryableLLMError(err error, retryCodes []int) bool {
 	// Connection reset/refused/EOF mid-flight — a server that's restarting or a
 	// llama-swap mid model-swap. (no-such-host is a config error, NOT matched.)
 	low := strings.ToLower(err.Error())
-	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe"} {
+	// "worker failed while generating the completion": the serving worker died
+	// mid-request. Measured on kloo-bench, this ended runs outright (A04 at step 8,
+	// before any edit). Only retried when no tokens were emitted — the complete()
+	// loop already refuses to retry after output, so a partial answer is never
+	// duplicated.
+	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe", "worker failed while generating"} {
 		if strings.Contains(low, s) {
 			return true
 		}
