@@ -613,6 +613,24 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 		return "answered", detail
 	case agent.ReasonError:
 		return classifyErrorFailure(rep, err, detail)
+	case agent.ReasonExploreStop:
+		// The exploration rail is the single most common way a failing run ends, and
+		// it was falling through to the default below: reported as failure_code
+		// "internal_error" with class "unknown_reason". That is wrong twice over —
+		// it hides the most frequent outcome behind "unknown", and it blames kloo for
+		// an internal fault when a rail made a deliberate decision. Measured across
+		// 386 recorded kloo-bench failures, 228 (59%) were this.
+		//
+		// A verify that ran and failed is the more specific, more useful story, so it
+		// still wins when there is one — the same precedence the answered/unverified
+		// arms use.
+		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
+			return verifyFailure(rep, detail)
+		}
+		detail.Source = "rail"
+		detail.Class = "explore_stop"
+		detail.Message = "the exploration rail ended the run: too many read-only turns without acting"
+		return "exploration_halt", detail
 	default:
 		detail.Class = "unknown_reason"
 		detail.Message = msg
