@@ -173,7 +173,25 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	fmt.Fprintf(out, "task: %s\n\n", task)
 
 	start := time.Now()
-	rep, runErr := loop.Run(ctx, task)
+	// CAP THE FIRST ATTEMPT when a restart is armed (KLOO_RESTART_FIRST_S).
+	//
+	// Measured: the uncapped restart almost never fires. Across 7 armed runs it
+	// fired ONCE, because a restart needs the first attempt to end early and these
+	// runs mostly consume the whole ceiling — 6 of 7 either passed first try or ran
+	// to 2400s with nothing left. The mechanism was starved, not wrong: the one
+	// time it got the chance (A16) it converted a rail-stopped failure into a pass.
+	//
+	// Giving attempt one a budget guarantees attempt two has room. It costs the
+	// first attempt its long tail, which is the trade being measured: kloo's long
+	// runs mostly end at a ceiling anyway, and two independent shorter attempts beat
+	// one long one when the pass probability per attempt is ~45%.
+	runCtx := ctx
+	if restartOnStall() && restartFirstAttempt() > 0 {
+		var cancelFirst context.CancelFunc
+		runCtx, cancelFirst = context.WithTimeout(ctx, restartFirstAttempt())
+		defer cancelFirst()
+	}
+	rep, runErr := loop.Run(runCtx, task)
 	// RESTART ON A NON-CONVERGING RUN (KLOO_RESTART_ON_STALL=1, off by default).
 	//
 	// kloo's failures are not capability failures, they are convergence failures.
@@ -190,7 +208,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	//
 	// Only a RAIL stop restarts: a budget/ceiling stop has no time left, and an
 	// error is not made better by repeating it.
-	if restartOnStall() && runErr == nil && rep != nil && isStallReason(rep.Reason) {
+	// A first attempt stopped by its own cap counts as a stall: the cap is the
+	// harness ending a non-converging run early, not the model failing.
+	cappedOut := restartFirstAttempt() > 0 && ctx.Err() == nil && runCtx.Err() != nil
+	if restartOnStall() && rep != nil && (cappedOut || (runErr == nil && isStallReason(rep.Reason))) {
 		if left := restartBudget() - time.Since(start); left > 0 {
 			fmt.Fprintf(out, "\n⟲ run did not converge (%s) — restarting once with a clean context\n", rep.Reason)
 			rctx, cancel := context.WithTimeout(ctx, left)
@@ -1037,4 +1058,15 @@ func isStallReason(r agent.Reason) bool {
 		return true
 	}
 	return false
+}
+
+// restartFirstAttempt caps the FIRST attempt when a restart is armed
+// (KLOO_RESTART_FIRST_S, 0 ⇒ uncapped). Without it the restart is starved: an
+// attempt that consumes the whole ceiling leaves no budget for a second, and
+// measured over 7 armed runs the restart fired exactly once.
+func restartFirstAttempt() time.Duration {
+	if n := envInt("KLOO_RESTART_FIRST_S"); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 0
 }

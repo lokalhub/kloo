@@ -63,3 +63,17 @@ func TestRestartBudgetDefaultsToTheBenchCeiling(t *testing.T) {
 		t.Errorf("restartBudget() = %s, want %s", got, want)
 	}
 }
+
+// TestRestartFirstAttemptCapIsOffByDefault: the cap changes how long the FIRST
+// attempt may run, which is a real behaviour change even when the restart flag is
+// set, so it is opt-in on its own.
+func TestRestartFirstAttemptCapIsOffByDefault(t *testing.T) {
+	t.Setenv("KLOO_RESTART_FIRST_S", "")
+	if got := restartFirstAttempt(); got != 0 {
+		t.Errorf("restartFirstAttempt() = %s with the flag unset, want 0 (uncapped)", got)
+	}
+	t.Setenv("KLOO_RESTART_FIRST_S", "1000")
+	if got, want := restartFirstAttempt(), 1000*time.Second; got != want {
+		t.Errorf("restartFirstAttempt() = %s, want %s", got, want)
+	}
+}
