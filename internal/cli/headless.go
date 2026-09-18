@@ -174,6 +174,40 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 
 	start := time.Now()
 	rep, runErr := loop.Run(ctx, task)
+	// RESTART ON A NON-CONVERGING RUN (KLOO_RESTART_ON_STALL=1, off by default).
+	//
+	// kloo's failures are not capability failures, they are convergence failures.
+	// Measured on kloo-bench with two matched-load repeats of the same binary and
+	// config: 3 of 7 cases FLIPPED outcome (A06 998s pass → 2400s fail, A16 423s
+	// pass → 1914s fail, A05 the other way). grok, over two runs, flipped 0 of 20.
+	// kloo passes C66 44% of the time, A06 48%, A16 46% — it can do the work, it
+	// just cannot do it twice running.
+	//
+	// A rail-stopped run has already rolled back, so the tree is clean and a second
+	// attempt is independent. Expected value over the 12 non-deterministic cases is
+	// 4.3 → 6.7 passes, and 77% of failures end within half the ceiling so a retry
+	// fits the clock.
+	//
+	// Only a RAIL stop restarts: a budget/ceiling stop has no time left, and an
+	// error is not made better by repeating it.
+	if restartOnStall() && runErr == nil && rep != nil && isStallReason(rep.Reason) {
+		if left := restartBudget() - time.Since(start); left > 0 {
+			fmt.Fprintf(out, "\n⟲ run did not converge (%s) — restarting once with a clean context\n", rep.Reason)
+			rctx, cancel := context.WithTimeout(ctx, left)
+			retry := *loop
+			retry.Budget = agent.NewBudget(cfg, nil)
+			retry.Churn = agent.NewChurnDetector(cfg.ChurnRounds)
+			retry.Memory = agent.NewWorkingMemory()
+			if rep2, err2 := retry.Run(rctx, task); err2 == nil && rep2 != nil {
+				rep2.ToolCounters.Restarts = rep.ToolCounters.Restarts + 1
+				if rep2.Reason == agent.ReasonSuccess {
+					rep2.ToolCounters.RestartRescues++
+				}
+				rep, runErr = rep2, nil
+			}
+			cancel()
+		}
+	}
 	elapsed := time.Since(start)
 	saveTokenCalibration(cwd, cfg.Model, rep)
 	if cfg.JSONOnly {
@@ -964,4 +998,32 @@ func clipErr(s string, max int) string {
 		r = r[:max]
 	}
 	return string(r) + "…"
+}
+
+// restartOnStall gates the one-shot restart of a non-converging run
+// (KLOO_RESTART_ON_STALL=1). Off by default: it changes how long a failing run
+// takes and what it reports, so it earns the default path only by measurement.
+func restartOnStall() bool {
+	return envOn("KLOO_RESTART_ON_STALL")
+}
+
+// restartBudget is the wall-clock the run may spend across BOTH attempts
+// (KLOO_RESTART_BUDGET_S, default 2400s to match the kloo-bench ceiling). The
+// restart only fires if enough of it remains to be worth the attempt.
+func restartBudget() time.Duration {
+	if n := envInt("KLOO_RESTART_BUDGET_S"); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 2400 * time.Second
+}
+
+// isStallReason reports whether a run ended by a RAIL deciding it was going
+// nowhere — the only ending a fresh attempt can plausibly improve. A budget or
+// ceiling stop has no clock left, and an error repeats.
+func isStallReason(r agent.Reason) bool {
+	switch r {
+	case agent.ReasonExploreStop, agent.ReasonChurn:
+		return true
+	}
+	return false
 }

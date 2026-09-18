@@ -247,7 +247,12 @@ type ToolCounters struct {
 	// RescueDelegations counts handoffs made at the explore rail instead of
 	// stopping (KLOO_DELEGATE_ON_STOP). Also included in AutoDelegations.
 	RescueDelegations int
-	ToolErrors        int
+	// Restarts counts whole-run restarts after a rail stopped a non-converging run,
+	// and RestartRescues how many of those second attempts succeeded — so an inert
+	// restart is distinguishable from one that fires and still fails.
+	Restarts       int `json:"restarts"`
+	RestartRescues int `json:"restart_rescues"`
+	ToolErrors     int
 	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
 	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
 	// that hit a read-only file specifically (A2).
