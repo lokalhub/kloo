@@ -1275,6 +1275,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// read-only turns: the limit is a ceiling, not a schedule.
 				readsSinceEdit = 0
 				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+				// The child edits the SAME tree, but its writes never pass through the
+				// parent's dispatch, so mutated() never sees them and the verify gate
+				// stays shut. The parent then cannot know the child's work is wrong.
+				//
+				// Measured on kloo-bench C07: the child edited the correct file, ended
+				// in churn leaving 2 of 6 tests failing, and the parent — with
+				// verify_attempts=1 for the whole 38-step run — read 15 more files and
+				// was stopped by the explore rail. It never once ran the tests over the
+				// child's edit. The rescue handoff already sets this; the read-threshold
+				// handoff is the path production actually uses, and it did not.
+				mutatedSinceVerify = true
 			}
 		}
 		// RESCUE HANDOFF (KLOO_DELEGATE_ON_STOP). The explore rail is about to end this
