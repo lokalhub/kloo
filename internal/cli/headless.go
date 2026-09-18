@@ -370,9 +370,16 @@ type toolCountersSummary struct {
 	AutoDelegations   int `json:"auto_delegations"`
 	SubagentSteps     int `json:"subagent_steps"`
 	RescueDelegations int `json:"rescue_delegations"`
-	ToolErrors        int `json:"tool_errors"`
-	OffScopeEdits     int `json:"off_scope_edits"`
-	ReadOnlyEdits     int `json:"read_only_edits"`
+	// Restarts / RestartRescues: a whole-run restart after a rail stopped a
+	// non-converging run, and how many of those second attempts succeeded. Without
+	// these in the JSON there is no way to tell a restart that never fired from one
+	// that fired and still failed — which is the only thing that makes the
+	// experiment readable.
+	Restarts       int `json:"restarts"`
+	RestartRescues int `json:"restart_rescues"`
+	ToolErrors     int `json:"tool_errors"`
+	OffScopeEdits  int `json:"off_scope_edits"`
+	ReadOnlyEdits  int `json:"read_only_edits"`
 }
 
 type runSummary struct {
@@ -487,6 +494,8 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				AutoDelegations:   tc.AutoDelegations,
 				SubagentSteps:     tc.SubagentSteps,
 				RescueDelegations: tc.RescueDelegations,
+				Restarts:          tc.Restarts,
+				RestartRescues:    tc.RestartRescues,
 				ToolErrors:        tc.ToolErrors,
 				OffScopeEdits:     tc.OffScopeEdits,
 				ReadOnlyEdits:     tc.ReadOnlyEdits,
@@ -840,6 +849,8 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("auto_delegations", c.AutoDelegations)
 	add("subagent_steps", c.SubagentSteps)
 	add("rescue_delegations", c.RescueDelegations)
+	add("restarts", c.Restarts)
+	add("restart_rescues", c.RestartRescues)
 	add("tool_errors", c.ToolErrors)
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)
