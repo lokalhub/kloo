@@ -34,6 +34,19 @@ type RankInput struct {
 	// RecentlyTouched is the set of recently-edited file paths (the recency
 	// signal). Passed in so ranking stays deterministic and testable.
 	RecentlyTouched map[string]bool
+	// DeprioritiseTests sorts every test file below every non-test file. It is a
+	// PRIMARY key, applied before the relevance score, so a highly-relevant test
+	// still ranks under an irrelevant source file — and under a truncated map
+	// budget, tests drop out of the map entirely rather than merely demoting.
+	// That is deliberate (the tasks name the failing test path in the prompt, so
+	// the model can still read it directly), but it is the aggressive choice.
+	// Measured on kloo-bench: these tasks state "the failing test is already in the
+	// repo ... do not modify the test", yet up to 10 of the top 12 mapped files were
+	// tests — the map spent its budget pointing at files the task forbids changing,
+	// and the file that had to change ranked 26th (7th among non-tests) on C07.
+	// Off by default: it reorders the map, so it ships behind a flag like any other
+	// measured change.
+	DeprioritiseTests bool
 	// Contents is the already-read, ≤maxMappedFileBytes content of each file
 	// (path → bytes), used to build the def→ref graph for the PageRank
 	// centrality signal. It is OPTIONAL: when nil/empty there is no graph signal
@@ -77,6 +90,12 @@ func Rank(in RankInput) []RankedFile {
 	// centrality refines ties among equally task-relevant files; path is the
 	// final deterministic tie-break.
 	sort.SliceStable(ranked, func(i, j int) bool {
+		if in.DeprioritiseTests {
+			ti, tj := IsTestPath(ranked[i].Path), IsTestPath(ranked[j].Path)
+			if ti != tj {
+				return tj // a non-test sorts before a test
+			}
+		}
 		if ranked[i].Score != ranked[j].Score {
 			return ranked[i].Score > ranked[j].Score
 		}
@@ -181,4 +200,26 @@ func baseNoExt(path string) string {
 		base = base[:i]
 	}
 	return base
+}
+
+// IsTestPath reports whether a path looks like a test file. Conservative and
+// segment-based: a SEGMENT must be a test directory, or the file name must carry a
+// test suffix. Substring matching was wrong in both directions — it missed a
+// top-level "tests/a.ts" (no leading slash, and the receipts repo keeps its suite
+// exactly there) and would have matched innocent paths like "src/contest/x.ts".
+func IsTestPath(p string) bool {
+	segs := strings.Split(strings.ToLower(p), "/")
+	for _, s := range segs[:max(0, len(segs)-1)] {
+		switch s {
+		case "test", "tests", "__tests__", "spec", "specs", "testdata":
+			return true
+		}
+	}
+	name := segs[len(segs)-1]
+	for _, m := range []string{".test.", ".spec.", "_test."} {
+		if strings.Contains(name, m) {
+			return true
+		}
+	}
+	return false
 }

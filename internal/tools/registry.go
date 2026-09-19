@@ -194,3 +194,30 @@ func argString(args map[string]any, key string) (string, bool) {
 	s, ok := v.(string)
 	return s, ok
 }
+
+// Without returns a copy of r with the named tools removed, preserving order.
+// Used to hand a subagent a vocabulary that omits the delegation tool at the
+// depth limit: a tool the model can see but may never use invites repeated
+// failed calls, which is worse than not offering it. The background manager is
+// shared deliberately — a child's background commands must still be reaped by
+// the parent's StopBackground.
+func Without(r *Registry, names ...string) *Registry {
+	if r == nil {
+		return nil
+	}
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := &Registry{tools: make(map[string]Tool, len(r.tools)), bg: r.bg}
+	for _, n := range r.order {
+		if drop[n] {
+			continue
+		}
+		if t, ok := r.tools[n]; ok {
+			out.order = append(out.order, n)
+			out.tools[n] = t
+		}
+	}
+	return out
+}

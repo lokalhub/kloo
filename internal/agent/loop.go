@@ -67,7 +67,74 @@ type Loop struct {
 	Model       string
 	Temperature float64
 	NoThink     bool
-	Now         func() time.Time // injectable clock (defaults to time.Now)
+
+	// Subagents. SubagentDepth is how many levels may delegate (0 ⇒
+	// DefaultMaxSubagentDepth = 1: the top level delegates, children may not).
+	// SubagentLimit caps TOTAL children per run (0 ⇒ DefaultMaxSubagents).
+	// EnableSubagents registers the task tool at all; without it the vocabulary is
+	// unchanged, so the default path is byte-identical.
+	EnableSubagents bool
+	// AutoDelegate lets kloo hand work to a subagent ITSELF, without offering the
+	// task tool to the model or changing the prompt. Measured on kloo-bench,
+	// glimmer never calls the task tool when offered it (0 of 36 calls), so every
+	// useful delegation was kloo-initiated anyway — while advertising the tool and
+	// its prompt directive coincided with A28 going from a 6-step success to a
+	// 29-step explore-stop and A04 from 12 to 25, both with zero delegations. With
+	// AutoDelegate alone, a run that never delegates is identical to the default,
+	// so any difference is attributable to delegation.
+	AutoDelegate bool
+	// SubagentMaxSteps caps a delegated child's steps (0 ⇒ half the parent's).
+	SubagentMaxSteps int
+	// MaxHandoffs caps harness-initiated delegations per run (0 ⇒ 1, the old
+	// one-shot behaviour). Children are sequential and never nested.
+	MaxHandoffs int
+	// DelegateAfterReads hands off to a subagent once the model has made this many
+	// read-only turns without an edit (0 ⇒ the legacy trigger: the first explore
+	// nudge, 6 turns). Sized from kloo-bench glimmer-only runs: passing runs read a
+	// median of 12 before their first edit, failing runs 26. A trigger at 6 fired on
+	// 92% of runs glimmer ALREADY solves — on A06 it handed off at read 6 when
+	// glimmer edits at read 9 and passes in ~200s, and the handoff then timed out.
+	DelegateAfterReads int
+	// OnSubagent fires as soon as a delegated child finishes, with its step count,
+	// terminal reason, and the error that ended it (nil unless reason is
+	// ReasonError). Written to the log immediately so it survives a hard kill: the
+	// bench harness SIGTERMs kloo at its 2400s ceiling, kloo has no signal handling,
+	// and KLOO_RESULT_JSON is never printed — so subagent_steps was lost on exactly
+	// the timeout cases the child budget needs sizing against.
+	//
+	// The error is passed because reason alone is not diagnosable. On kloo-bench a
+	// run of children all died at step 1 with reason=error and no further detail;
+	// the cause (two concurrent arms contending for one GPU, so the routed child's
+	// model could not load) had to be recovered by correlating timestamps across
+	// arms. The reason says a child failed; only the error says why.
+	OnSubagent    func(steps int, reason Reason, err error)
+	SubagentDepth int
+	SubagentLimit int
+	// SubagentModel / SubagentEndpoint route delegated work to a DIFFERENT model
+	// than the parent loop. Empty ⇒ the child uses the parent's.
+	//
+	// Measured on kloo-bench: of the 9 cases kloo loses to grok on glimmer, kloo
+	// passes 5 on qwen with the identical harness (A06 A22 A29 C65 C66). The
+	// harness can solve them; the model will not act. Routing the delegated subtask
+	// to a model that does act is the honest use of that finding — a cheap model
+	// drives the loop, a capable one does the work that needs doing.
+	SubagentModel    string
+	SubagentEndpoint string
+	// NewSubagentClient builds the child's client when routing to another model.
+	// Injected by the CLI, which owns the API key and timeout options — the agent
+	// package must not have to know about credentials. Nil ⇒ routing is skipped
+	// and the child shares the parent's client, so a misconfiguration degrades to
+	// current behaviour instead of producing an unauthenticated child.
+	NewSubagentClient func(endpoint, model string) llm.LLMClient
+	// subagentDepth is THIS loop's own nesting level, set when a parent builds a
+	// child. Unexported: callers configure the limit, not the position. Without
+	// it a child re-registered the task tool at depth 0 on its own Run and could
+	// delegate forever — the depth limit was cosmetic.
+	subagentDepth int
+	// subagentSpawns is the run-wide child counter, shared with children so the
+	// limit counts TOTAL descendants rather than resetting per level.
+	subagentSpawns *int
+	Now            func() time.Time // injectable clock (defaults to time.Now)
 	// SessionHistory is the conversation from PRIOR runs in the same session (the
 	// TUI reuses one Loop across submissions). It is seeded into working memory as
 	// the oldest tail, so a follow-up ("what's the issue?", "now do the other
@@ -171,6 +238,11 @@ type Loop struct {
 	RetryBaseDelay time.Duration
 	// RetryMaxDelay caps exponential retry backoff. 0 ⇒ no cap.
 	RetryMaxDelay time.Duration
+	// ColdStartPatience is how long to keep retrying when the endpoint explicitly
+	// reports it is STARTING ("powering on", "scheduler_busy"), beyond the normal
+	// retry count. 0 ⇒ DefaultColdStartPatience. A generic 503 does not qualify: a
+	// server that is down, not starting, must still exhaust and fail.
+	ColdStartPatience time.Duration
 	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
 	RetryableStatusCodes []int
 
@@ -229,6 +301,11 @@ const (
 	// tens of seconds. With the 2s/30s backoff this is roughly a minute.
 	DefaultLLMRetries     = 5
 	DefaultRetryBaseDelay = 2 * time.Second
+	// DefaultColdStartPatience bounds retrying an endpoint that says it is powering
+	// on. Measured on kloo-bench: a serverless worker cold start rejected requests
+	// for longer than the ~60s normal retry window, and four cases across both arms
+	// of a paired run ended as errors at step 1 without running at all.
+	DefaultColdStartPatience = 10 * time.Minute
 )
 
 // DefaultMaxRepairAttempts is the per-target edit-repair cap when MaxRepairAttempts
@@ -457,6 +534,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
 	l.toolCharsCache = 0
 
+	// Subagents: register the delegation tool for THIS run. Opt-in, so a loop that
+	// does not enable it has a byte-identical vocabulary to before. spawned is
+	// shared by every taskTool in the run so the cap counts total children, not
+	// children per call site.
+	if l.EnableSubagents && l.Registry != nil && l.subagentDepth < l.maxSubagentDepth() {
+		if l.subagentSpawns == nil {
+			n := 0
+			l.subagentSpawns = &n
+		}
+		l.Registry.Register(taskTool{parent: l, depth: l.subagentDepth, spawns: l.subagentSpawns})
+	}
+
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
 	var (
 		snap        Snapshot
@@ -547,7 +636,20 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// into Report.RailFires at finish (nil when empty). Makes self-corrections
 		// observable in the summary/JSON. recordRail bumps a name's count.
 		railFires = map[string]int{}
-		counters  ToolCounters
+		// finishSummary is what the model passed to finish, surfaced on the Report so
+		// a parent agent can read a delegated child's result without its transcript.
+		finishSummary string
+		// autoDelegated makes the investigator one-shot per run.
+		// handoffs counts harness-initiated delegations this run. The limit was one
+		// per run by choice, never measured. The nesting bug accidentally showed the
+		// alternative: C17 passed with ~65 child steps spread over three children and
+		// fails with a single 25-step child. Sequential handoffs are the legitimate
+		// form of that — each child fresh, bounded, and never nested.
+		handoffs int
+		// readsSinceEdit counts read-only turns since the last successful edit; unlike
+		// exploreTotal it is NOT reset by running a command.
+		readsSinceEdit int
+		counters       ToolCounters
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
@@ -576,6 +678,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Ignored:            ignoredAll,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 			ToolCounters:       counters,
+			Summary:            finishSummary,
 		}
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
@@ -703,7 +806,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// run one final verify — Success when it passes, else Answered (the model's
 		// summary stands, but nothing was verified).
 		if call.Name == tools.NameFinish {
-			convo = append(convo, observation(call, tools.Result{Output: str(call.Args["summary"])}, nil))
+			finishSummary = str(call.Args["summary"])
+			convo = append(convo, observation(call, tools.Result{Output: finishSummary}, nil))
 			if l.Verifier == nil {
 				// Unverified mode: no command to prove the change works. Honour finish
 				// as a calm terminal stop, but label it UNVERIFIED — distinct from
@@ -1143,7 +1247,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		//
 		// A repeat of something already seen still climbs the streak, so the weak-model
 		// spin the rail was built for is still caught.
+		if isEditTool(call.Name) && derr == nil {
+			readsSinceEdit = 0
+		}
 		if readOnlyTurn {
+			readsSinceEdit++
 			exploreTotal++ // read-only turns since the last action, new ground or not
 			sig := exploreSignature(call)
 			if sig != "" && !seenTargets[sig] {
@@ -1154,6 +1262,59 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		} else {
 			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+		}
+		if l.DelegateAfterReads > 0 && l.canAutoDelegate() && handoffs < l.maxHandoffs() &&
+			!edited && readsSinceEdit >= l.DelegateAfterReads {
+			handoffs++
+			msg, childSteps, ok := l.autoDelegate(ctx, task)
+			counters.SubagentSteps += childSteps
+			if ok {
+				counters.AutoDelegations++
+				convo = append(convo, msg)
+				// Reset the read counters so a SECOND handoff needs another full N
+				// read-only turns: the limit is a ceiling, not a schedule.
+				readsSinceEdit = 0
+				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+				// The child edits the SAME tree, but its writes never pass through the
+				// parent's dispatch, so mutated() never sees them and the verify gate
+				// stays shut. The parent then cannot know the child's work is wrong.
+				//
+				// Measured on kloo-bench C07: the child edited the correct file, ended
+				// in churn leaving 2 of 6 tests failing, and the parent — with
+				// verify_attempts=1 for the whole 38-step run — read 15 more files and
+				// was stopped by the explore rail. It never once ran the tests over the
+				// child's edit. The rescue handoff already sets this; the read-threshold
+				// handoff is the path production actually uses, and it did not.
+				mutatedSinceVerify = true
+			}
+		}
+		// RESCUE HANDOFF (KLOO_DELEGATE_ON_STOP). The explore rail is about to end this
+		// run as a failure; hand the work to a subagent first.
+		//
+		// Measured on kloo-bench C66: glimmer made an early edit that did not fix the
+		// case, then read 16 more files until the rail stopped it. The read-count
+		// trigger never fired, because it requires "no edit yet" — yet qwen alone
+		// PASSES C66. The rail is the last point at which a handoff can still help,
+		// and firing only here cannot affect a run that would have succeeded.
+		//
+		// After the child, the tree may have changed under the parent, so it must
+		// VERIFY. This is not optional: a run that has edited has a checkpoint, and
+		// kloo rolls back to it on any non-success exit. Without the re-verify, a
+		// child that fixed the case would be undone the moment the parent was stopped
+		// again — the handoff would look like it fired and do nothing.
+		if delegateOnStop() && l.canAutoDelegate() && handoffs < l.maxHandoffs() &&
+			(exploreTotal >= l.exploreTotalCap() || exploreStreak >= l.exploreAbortRounds()) {
+			handoffs++
+			msg, childSteps, ok := l.autoDelegate(ctx, task)
+			counters.SubagentSteps += childSteps
+			if ok {
+				counters.AutoDelegations++
+				counters.RescueDelegations++
+				convo = append(convo, msg)
+				exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+				mutatedSinceVerify = true
+				continue
+			}
 		}
 		switch {
 		// A CEILING on total consecutive read-only turns, independent of whether each
@@ -1180,6 +1341,32 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		case exploreTotal > 0 && exploreTotal%l.exploreNudgeRounds() == 0 && exploreNudgedAt != exploreTotal:
 			exploreNudgedAt = exploreTotal
 			recordRail(RailExplore)
+			// AUTO-DELEGATION. On the FIRST explore nudge, kloo delegates the
+			// investigation itself instead of asking the model to stop reading.
+			//
+			// The model is offered the task tool and does not use it: measured on
+			// kloo-bench, glimmer lists `task` among its own tools and called it 0
+			// times across 36 calls on a case it then lost to explore-stop. That
+			// matches every other result on this model — it does not adopt a better
+			// strategy when offered one, or when told to. So the harness drives the
+			// decomposition rather than suggesting it.
+			//
+			// One-shot: a second investigation would be the same spin one level down.
+			// The gate is !everActed by default. Measured on kloo-bench C66, that is
+			// too strict: the model ran the failing test early (a healthy move), which
+			// set everActed and disabled delegation for the rest of the run; it then
+			// spun 35 steps. With KLOO_DELEGATE_UNTIL_EDIT the gate is "no edit yet",
+			// so running a command no longer forfeits the handoff.
+			if l.DelegateAfterReads == 0 && l.canAutoDelegate() && handoffs < l.maxHandoffs() && !delegationBlocked(everActed, edited, delegateUntilEdit()) {
+				handoffs++
+				msg, childSteps, ok := l.autoDelegate(ctx, task)
+				counters.SubagentSteps += childSteps
+				if ok {
+					counters.AutoDelegations++
+					convo = append(convo, msg)
+					break
+				}
+			}
 			convo = append(convo, exploreCorrective(exploreStreak))
 		}
 
@@ -1558,7 +1745,8 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 		}
 	}
 
-	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents})
+	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents,
+		DeprioritiseTests: mapDeprioritiseTests()})
 	budget := mapBudget
 	if budget <= 0 {
 		budget = 2000
@@ -1977,7 +2165,8 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		err    error
 		shrunk bool
 	)
-	for attempt := 1; attempt <= attempts; attempt++ {
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
 		emitted := false
 		if l.OnDelta == nil {
 			resp, err = l.Client.Complete(ctx, req)
@@ -2025,12 +2214,22 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 			}
 			return resp, errContextShrunk
 		}
-		if err == nil || ctx.Err() != nil || attempt == attempts || emitted || !l.isRetryableLLMError(err) {
+		// A cold start earns more attempts than the normal budget, bounded by wall
+		// time — but only if retrying is enabled at all (LLMRetries 0 still means
+		// "never retry").
+		coldStart := attempts > 1 && isColdStart(err) && time.Since(start) < l.coldStartPatience()
+		exhausted := attempt >= attempts && !coldStart
+		if err == nil || ctx.Err() != nil || exhausted || emitted || !l.isRetryableLLMError(err) {
 			return resp, l.modelCallError(err)
 		}
-		wait := l.retryBaseDelay() << (attempt - 1) // 2s, 4s, …
+		// Cap the shift: extended cold-start retries would otherwise overflow the
+		// doubling (2s << 30 is not a wait, it is a bug).
+		wait := l.retryBaseDelay() << min(attempt-1, 10) // 2s, 4s, …
 		if l.RetryMaxDelay > 0 && wait > l.RetryMaxDelay {
 			wait = l.RetryMaxDelay
+		}
+		if coldStart && wait > 30*time.Second {
+			wait = 30 * time.Second
 		}
 		if l.OnRetry != nil {
 			l.OnRetry(attempt, attempts-1, err, wait)
@@ -2041,7 +2240,6 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 		case <-time.After(wait):
 		}
 	}
-	return resp, l.modelCallError(err)
 }
 
 func (l *Loop) withThinkingControl(req llm.ChatRequest) llm.ChatRequest {
@@ -2121,6 +2319,29 @@ var overflowLimitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`maximum of (\d+) tokens`),
 }
 
+// isColdStart reports whether an error is the endpoint explicitly saying it is
+// starting up and the request should be resubmitted. Deliberately narrow: only
+// these explicit signals earn the longer patience.
+func isColdStart(err error) bool {
+	if err == nil {
+		return false
+	}
+	low := strings.ToLower(err.Error())
+	for _, s := range []string{"powering on", "scheduler_busy"} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *Loop) coldStartPatience() time.Duration {
+	if l.ColdStartPatience > 0 {
+		return l.ColdStartPatience
+	}
+	return DefaultColdStartPatience
+}
+
 func retryableLLMError(err error, retryCodes []int) bool {
 	if err == nil {
 		return false
@@ -2144,7 +2365,15 @@ func retryableLLMError(err error, retryCodes []int) bool {
 	// Connection reset/refused/EOF mid-flight — a server that's restarting or a
 	// llama-swap mid model-swap. (no-such-host is a config error, NOT matched.)
 	low := strings.ToLower(err.Error())
-	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe"} {
+	// "worker <failed|timed out> while generating the completion": the serving
+	// worker died or stalled mid-request. The gateway uses more than one verb for
+	// the same fault — the first fix matched only "failed", and a rerun then died
+	// on "worker timed out while generating the completion" with no retry at all —
+	// so the match is on the shared suffix. Measured on kloo-bench, this ended runs outright (A04 at step 8,
+	// before any edit). Only retried when no tokens were emitted — the complete()
+	// loop already refuses to retry after output, so a partial answer is never
+	// duplicated.
+	for _, s := range []string{"connection reset", "connection refused", "unexpected eof", "broken pipe", "while generating the completion"} {
 		if strings.Contains(low, s) {
 			return true
 		}

@@ -78,31 +78,57 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
 	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
-	systemPrompt := defaultSystemPrompt + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
+	systemPrompt := SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
 	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
-		Client:               llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
-		Adapter:              adapter,
-		Registry:             reg,
-		Verifier:             buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
-		Linter:               buildLinter(ws, lintCmd, lintPerFile),
-		Budget:               agent.NewBudget(cfg, nil),
-		Churn:                agent.NewChurnDetector(cfg.ChurnRounds),
-		Checkpoint:           agent.NewGitCheckpointer(cwd),
-		Root:                 ws.Root(),
-		ContextTokens:        cfg.MaxContextTokens,
-		CuratorTokens:        cfg.CuratorBudgetTokens,
-		MapPosition:          cfg.MapPosition,
-		Tokens:               tokenCalibrator(cwd, cfg.Model),
-		Memory:               agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
-		System:               systemPrompt,
-		StopOn:               agentStopPolicy(cfg.StopOn),
-		StallRounds:          cfg.ChurnRounds,
-		RepeatNudgeRounds:    cfg.RepeatNudgeRounds,
-		ExploreNudgeRounds:   cfg.ExploreNudgeRounds,
-		ExploreAbortRounds:   cfg.ExploreAbortRounds,
-		ExploreTotalCap:      cfg.ExploreTotalCap,
+		Client:             llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
+		Adapter:            adapter,
+		Registry:           reg,
+		Verifier:           buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Linter:             buildLinter(ws, lintCmd, lintPerFile),
+		Budget:             agent.NewBudget(cfg, nil),
+		Churn:              agent.NewChurnDetector(cfg.ChurnRounds),
+		Checkpoint:         agent.NewGitCheckpointer(cwd),
+		Root:               ws.Root(),
+		ContextTokens:      cfg.MaxContextTokens,
+		CuratorTokens:      cfg.CuratorBudgetTokens,
+		MapPosition:        cfg.MapPosition,
+		Tokens:             tokenCalibrator(cwd, cfg.Model),
+		Memory:             agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
+		System:             systemPrompt,
+		StopOn:             agentStopPolicy(cfg.StopOn),
+		StallRounds:        cfg.ChurnRounds,
+		RepeatNudgeRounds:  cfg.RepeatNudgeRounds,
+		ExploreNudgeRounds: cfg.ExploreNudgeRounds,
+		ExploreAbortRounds: cfg.ExploreAbortRounds,
+		ExploreTotalCap:    cfg.ExploreTotalCap,
+		// Subagents: opt-in, so the default tool vocabulary is unchanged.
+		EnableSubagents:    subagentsEnabled(),
+		AutoDelegate:       envOn("KLOO_AUTO_DELEGATE"),
+		SubagentMaxSteps:   envInt("KLOO_SUBAGENT_STEPS"),
+		DelegateAfterReads: envInt("KLOO_DELEGATE_AFTER_READS"),
+		MaxHandoffs:        envInt("KLOO_MAX_HANDOFFS"),
+		OnSubagent: func(steps int, reason agent.Reason, err error) {
+			// The error is logged, not shown to the model: the parent's view of a
+			// child is deliberately just the report, and widening it is a separate,
+			// measurable change. This line is for whoever reads the run afterwards.
+			detail := ""
+			if err != nil {
+				detail = fmt.Sprintf(" err=%q", clipErr(err.Error(), 300))
+			}
+			fmt.Fprintf(out, "  ↳ subagent finished: steps=%d reason=%s%s\n", steps, reason, detail)
+		},
+		SubagentModel:    strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_MODEL")),
+		SubagentEndpoint: strings.TrimSpace(os.Getenv("KLOO_SUBAGENT_ENDPOINT")),
+		// The CLI owns the credentials, so it builds the routed child's client.
+		NewSubagentClient: func(ep, model string) llm.LLMClient {
+			return llm.New(ep, model,
+				llm.WithAPIKey(cfg.APIKey),
+				llm.WithTimeout(cfg.LLMColdLoadTimeout),
+				llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout),
+				llm.WithLogf(writerLogf(out)))
+		},
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,
@@ -147,7 +173,62 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	fmt.Fprintf(out, "task: %s\n\n", task)
 
 	start := time.Now()
-	rep, runErr := loop.Run(ctx, task)
+	// CAP THE FIRST ATTEMPT when a restart is armed (KLOO_RESTART_FIRST_S).
+	//
+	// Measured: the uncapped restart almost never fires. Across 7 armed runs it
+	// fired ONCE, because a restart needs the first attempt to end early and these
+	// runs mostly consume the whole ceiling — 6 of 7 either passed first try or ran
+	// to 2400s with nothing left. The mechanism was starved, not wrong: the one
+	// time it got the chance (A16) it converted a rail-stopped failure into a pass.
+	//
+	// Giving attempt one a budget guarantees attempt two has room. It costs the
+	// first attempt its long tail, which is the trade being measured: kloo's long
+	// runs mostly end at a ceiling anyway, and two independent shorter attempts beat
+	// one long one when the pass probability per attempt is ~45%.
+	runCtx := ctx
+	if restartOnStall() && restartFirstAttempt() > 0 {
+		var cancelFirst context.CancelFunc
+		runCtx, cancelFirst = context.WithTimeout(ctx, restartFirstAttempt())
+		defer cancelFirst()
+	}
+	rep, runErr := loop.Run(runCtx, task)
+	// RESTART ON A NON-CONVERGING RUN (KLOO_RESTART_ON_STALL=1, off by default).
+	//
+	// kloo's failures are not capability failures, they are convergence failures.
+	// Measured on kloo-bench with two matched-load repeats of the same binary and
+	// config: 3 of 7 cases FLIPPED outcome (A06 998s pass → 2400s fail, A16 423s
+	// pass → 1914s fail, A05 the other way). grok, over two runs, flipped 0 of 20.
+	// kloo passes C66 44% of the time, A06 48%, A16 46% — it can do the work, it
+	// just cannot do it twice running.
+	//
+	// A rail-stopped run has already rolled back, so the tree is clean and a second
+	// attempt is independent. Expected value over the 12 non-deterministic cases is
+	// 4.3 → 6.7 passes, and 77% of failures end within half the ceiling so a retry
+	// fits the clock.
+	//
+	// Only a RAIL stop restarts: a budget/ceiling stop has no time left, and an
+	// error is not made better by repeating it.
+	// A first attempt stopped by its own cap counts as a stall: the cap is the
+	// harness ending a non-converging run early, not the model failing.
+	cappedOut := restartFirstAttempt() > 0 && ctx.Err() == nil && runCtx.Err() != nil
+	if restartOnStall() && rep != nil && (cappedOut || (runErr == nil && isStallReason(rep.Reason))) {
+		if left := restartBudget() - time.Since(start); left > 0 {
+			fmt.Fprintf(out, "\n⟲ run did not converge (%s) — restarting once with a clean context\n", rep.Reason)
+			rctx, cancel := context.WithTimeout(ctx, left)
+			retry := *loop
+			retry.Budget = agent.NewBudget(cfg, nil)
+			retry.Churn = agent.NewChurnDetector(cfg.ChurnRounds)
+			retry.Memory = agent.NewWorkingMemory()
+			if rep2, err2 := retry.Run(rctx, task); err2 == nil && rep2 != nil {
+				rep2.ToolCounters.Restarts = rep.ToolCounters.Restarts + 1
+				if rep2.Reason == agent.ReasonSuccess {
+					rep2.ToolCounters.RestartRescues++
+				}
+				rep, runErr = rep2, nil
+			}
+			cancel()
+		}
+	}
 	elapsed := time.Since(start)
 	saveTokenCalibration(cwd, cfg.Model, rep)
 	if cfg.JSONOnly {
@@ -301,15 +382,25 @@ type failureDetail struct {
 }
 
 type toolCountersSummary struct {
-	InvalidToolCalls int `json:"invalid_tool_calls"`
-	RepeatedReadFile int `json:"repeated_read_file"`
-	RepeatedEdits    int `json:"repeated_edits"`
-	FailedEdits      int `json:"failed_edits"`
-	NoOpEdits        int `json:"no_op_edits"`
-	VerifyAttempts   int `json:"verify_attempts"`
-	ToolErrors       int `json:"tool_errors"`
-	OffScopeEdits    int `json:"off_scope_edits"`
-	ReadOnlyEdits    int `json:"read_only_edits"`
+	InvalidToolCalls  int `json:"invalid_tool_calls"`
+	RepeatedReadFile  int `json:"repeated_read_file"`
+	RepeatedEdits     int `json:"repeated_edits"`
+	FailedEdits       int `json:"failed_edits"`
+	NoOpEdits         int `json:"no_op_edits"`
+	VerifyAttempts    int `json:"verify_attempts"`
+	AutoDelegations   int `json:"auto_delegations"`
+	SubagentSteps     int `json:"subagent_steps"`
+	RescueDelegations int `json:"rescue_delegations"`
+	// Restarts / RestartRescues: a whole-run restart after a rail stopped a
+	// non-converging run, and how many of those second attempts succeeded. Without
+	// these in the JSON there is no way to tell a restart that never fired from one
+	// that fired and still failed — which is the only thing that makes the
+	// experiment readable.
+	Restarts       int `json:"restarts"`
+	RestartRescues int `json:"restart_rescues"`
+	ToolErrors     int `json:"tool_errors"`
+	OffScopeEdits  int `json:"off_scope_edits"`
+	ReadOnlyEdits  int `json:"read_only_edits"`
 }
 
 type runSummary struct {
@@ -415,15 +506,20 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		if cfg.BenchmarkMode || !toolCountersZero(rep.ToolCounters) {
 			tc := rep.ToolCounters
 			s.ToolCounters = &toolCountersSummary{
-				InvalidToolCalls: tc.InvalidToolCalls,
-				RepeatedReadFile: tc.RepeatedReadFile,
-				RepeatedEdits:    tc.RepeatedEdits,
-				FailedEdits:      tc.FailedEdits,
-				NoOpEdits:        tc.NoOpEdits,
-				VerifyAttempts:   tc.VerifyAttempts,
-				ToolErrors:       tc.ToolErrors,
-				OffScopeEdits:    tc.OffScopeEdits,
-				ReadOnlyEdits:    tc.ReadOnlyEdits,
+				InvalidToolCalls:  tc.InvalidToolCalls,
+				RepeatedReadFile:  tc.RepeatedReadFile,
+				RepeatedEdits:     tc.RepeatedEdits,
+				FailedEdits:       tc.FailedEdits,
+				NoOpEdits:         tc.NoOpEdits,
+				VerifyAttempts:    tc.VerifyAttempts,
+				AutoDelegations:   tc.AutoDelegations,
+				SubagentSteps:     tc.SubagentSteps,
+				RescueDelegations: tc.RescueDelegations,
+				Restarts:          tc.Restarts,
+				RestartRescues:    tc.RestartRescues,
+				ToolErrors:        tc.ToolErrors,
+				OffScopeEdits:     tc.OffScopeEdits,
+				ReadOnlyEdits:     tc.ReadOnlyEdits,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
@@ -581,6 +677,24 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 		return "answered", detail
 	case agent.ReasonError:
 		return classifyErrorFailure(rep, err, detail)
+	case agent.ReasonExploreStop:
+		// The exploration rail is the single most common way a failing run ends, and
+		// it was falling through to the default below: reported as failure_code
+		// "internal_error" with class "unknown_reason". That is wrong twice over —
+		// it hides the most frequent outcome behind "unknown", and it blames kloo for
+		// an internal fault when a rail made a deliberate decision. Measured across
+		// 386 recorded kloo-bench failures, 228 (59%) were this.
+		//
+		// A verify that ran and failed is the more specific, more useful story, so it
+		// still wins when there is one — the same precedence the answered/unverified
+		// arms use.
+		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
+			return verifyFailure(rep, detail)
+		}
+		detail.Source = "rail"
+		detail.Class = "explore_stop"
+		detail.Message = "the exploration rail ended the run: too many read-only turns without acting"
+		return "exploration_halt", detail
 	default:
 		detail.Class = "unknown_reason"
 		detail.Message = msg
@@ -753,6 +867,11 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("failed_edits", c.FailedEdits)
 	add("no_op_edits", c.NoOpEdits)
 	add("verify_attempts", c.VerifyAttempts)
+	add("auto_delegations", c.AutoDelegations)
+	add("subagent_steps", c.SubagentSteps)
+	add("rescue_delegations", c.RescueDelegations)
+	add("restarts", c.Restarts)
+	add("restart_rescues", c.RestartRescues)
 	add("tool_errors", c.ToolErrors)
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)
@@ -896,4 +1015,58 @@ func transcriptTail(msgs []llm.Message, maxBytes int) string {
 		s = "…" + s[len(s)-maxBytes:]
 	}
 	return s
+}
+
+// clipErr bounds a subagent error before it reaches the log. Provider errors can
+// carry a whole HTML error page; the log line has to stay one line and stay
+// greppable. Cuts on a rune boundary so a multi-byte character is never split.
+func clipErr(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ") // collapse newlines: one event, one line
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > max {
+		r = r[:max]
+	}
+	return string(r) + "…"
+}
+
+// restartOnStall gates the one-shot restart of a non-converging run
+// (KLOO_RESTART_ON_STALL=1). Off by default: it changes how long a failing run
+// takes and what it reports, so it earns the default path only by measurement.
+func restartOnStall() bool {
+	return envOn("KLOO_RESTART_ON_STALL")
+}
+
+// restartBudget is the wall-clock the run may spend across BOTH attempts
+// (KLOO_RESTART_BUDGET_S, default 2400s to match the kloo-bench ceiling). The
+// restart only fires if enough of it remains to be worth the attempt.
+func restartBudget() time.Duration {
+	if n := envInt("KLOO_RESTART_BUDGET_S"); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 2400 * time.Second
+}
+
+// isStallReason reports whether a run ended by a RAIL deciding it was going
+// nowhere — the only ending a fresh attempt can plausibly improve. A budget or
+// ceiling stop has no clock left, and an error repeats.
+func isStallReason(r agent.Reason) bool {
+	switch r {
+	case agent.ReasonExploreStop, agent.ReasonChurn:
+		return true
+	}
+	return false
+}
+
+// restartFirstAttempt caps the FIRST attempt when a restart is armed
+// (KLOO_RESTART_FIRST_S, 0 ⇒ uncapped). Without it the restart is starved: an
+// attempt that consumes the whole ceiling leaves no budget for a second, and
+// measured over 7 armed runs the restart fired exactly once.
+func restartFirstAttempt() time.Duration {
+	if n := envInt("KLOO_RESTART_FIRST_S"); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 0
 }
