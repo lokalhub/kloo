@@ -372,3 +372,14 @@ func mapDeprioritiseTests() bool {
 }
 
 var _ = time.Second
+
+// noRepoMap drops the repo-map section from every prompt (KLOO_NO_MAP=1). Off by
+// default: the map is a core part of how kloo assembles context, and removing it
+// is a structural change that earns the default path only by measurement.
+func noRepoMap() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_NO_MAP"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}

@@ -1450,7 +1450,19 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	}
 	// Curate the map once, then place it: appended to the system prompt (legacy)
 	// or emitted as a trailing message (default) so the prefix above it can cache.
-	mapSection := repoMapSection(l.assembleContext(task, mapBudget))
+	//
+	// KLOO_NO_MAP=1 drops the map entirely (off by default). This is the one
+	// ARCHITECTURAL difference between kloo and grok on this benchmark: grok has no
+	// repo map at all — it explores with search/grep/list_dir and edits early —
+	// while kloo injects ~18k tokens of map into every prompt at --ctx 131072
+	// (0.30 of the compaction trigger). Measured on kloo-bench, kloo's glimmer
+	// reads 12-44 files and NEVER edits on 7 of 10 runs, where grok's glimmer
+	// passes the same five cases 5/5 at a median 377s. A map that enumerates the
+	// repo may be inviting exactly that reading.
+	mapSection := ""
+	if !noRepoMap() {
+		mapSection = repoMapSection(l.assembleContext(task, mapBudget))
+	}
 	sysContent := l.System
 	var tailMsgs []llm.Message
 	if mapSection != "" {
