@@ -348,6 +348,20 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_RECALL_SCALE` | `1` to **scale the MCP recall (memory) budget with the context window** (~½ the window in bytes) instead of the fixed 4 KB, so a large-context model receives the whole recalled guide rather than a truncation. |
 | `KLOO_TOOL_REPAIR` | `1` to **tolerantly recover a truncated tool call** — auto-close a trailing `</arg>`/`</tool>` the model dropped on a large content/diff block — instead of aborting the run (`tool_call_invalid`). A reliability lift for weak-but-capable models on XML tool format. |
 | `KLOO_EDIT_RECOVER` | `1` to replace the bare "no such file" error when `edit_file` targets a **missing** file with a targeted corrective (use `write_file` to create it), so the model recovers in one turn instead of thrashing. |
+| `KLOO_SUBAGENTS` | `1` to offer the **`task` tool**, letting the model delegate a subtask to a fresh child agent with its own context and budget. Off by default. See [subagents.md](subagents.md). |
+| `KLOO_AUTO_DELEGATE` | `1` to let the **harness** hand off to a child when the model is stuck, without offering the tool or changing the prompt. |
+| `KLOO_DELEGATE_AFTER_READS` | Hand off after this many read-only turns with no edit (`0` ⇒ the legacy trigger, the first explore nudge at 6). Measured best at **18**: at 6 it interrupts runs kloo already solves. |
+| `KLOO_SUBAGENT_STEPS` | Cap a delegated child's steps (`0` ⇒ half the parent's). |
+| `KLOO_SUBAGENT_MODEL` | Run delegated work on a **different model** than the parent. |
+| `KLOO_SUBAGENT_ENDPOINT` | Endpoint for the routed child (defaults to the parent's). |
+| `KLOO_MAX_HANDOFFS` | Ceiling on harness-initiated handoffs per run (`0` ⇒ 1). Children are sequential and never nested. |
+| `KLOO_DELEGATE_ON_STOP` | `1` to hand off at the explore rail instead of stopping. Unproven. |
+| `KLOO_DELEGATE_UNTIL_EDIT` | `1` so running a command no longer forfeits delegation. |
+| `KLOO_MAP_SKIP_TESTS` | `1` to sort test files below every non-test file in the repo map. Measured **negative** on kloo-bench. |
+| `KLOO_NO_MAP` | `1` to drop the repo map from the prompt entirely. Measured **negative**, and the mechanism is inverted — without the map kloo read *more*. |
+| `KLOO_RESTART_ON_STALL` | `1` to restart a rail-stopped run once with a clean context. Measured **negative**. |
+| `KLOO_RESTART_FIRST_S` | Cap the first attempt (seconds) so a restart has room. Measured **negative**: two capped attempts are worth less than one uncapped one. |
+| `KLOO_SIMPLE_EDIT` | `1` to offer a three-field `search_replace` tool (`file_path`/`old_string`/`new_string`) **instead of** `edit_file`'s fenced SEARCH/REPLACE block. Untested on the bench — see the [beat-grok plan](../../../docs/apps/kloo/plans/beat-grok/README.md). |
 
 ## Reliability tuning
 

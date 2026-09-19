@@ -39,7 +39,7 @@ actually shipped. Relaunch the TUI to pick up a new binary.
 
 | Package | Role |
 |---|---|
-| `internal/agent` | The autonomous loop and its safety rails (`loop.go` is the spine; `churn.go`, `verify.go`, `budget.go`, `repair.go`, `memory.go`). |
+| `internal/agent` | The autonomous loop and its safety rails (`loop.go` is the spine; `churn.go`, `verify.go`, `budget.go`, `repair.go`, `memory.go`). Delegation lives in `subagent.go`. |
 | `internal/tools` | Agent-facing tools: files, search, `run_command` (+ background), scope enforcement, tool-call dialect parsing. |
 | `internal/edit` | Deterministic SEARCH/REPLACE edit engine. |
 | `internal/llm` | Hand-rolled OpenAI-compatible client: streaming, retries, cold-load. |
@@ -79,6 +79,26 @@ Most are pinned by tests. Breaking one should fail the build, not a review.
 - **`.kloo/` self-ignores.** Session transcripts can hold sensitive context and
   must never be committed.
 - **Tool names are `snake_case`** and match what the prompt and the parsers expect.
+
+- **Every experiment ships dark, with a counter.** A behavioural change goes behind
+  a `KLOO_*` flag that is off by default, and carries a counter that separates
+  *never fired* from *fired and failed* from *fired and worked*. Without the
+  counter an inert change and a failed change are indistinguishable, and the
+  measurement is unreadable whichever way it lands.
+- **A subagent must never declare success.** The parent owns the verifier and the
+  success gate. A child that could self-certify could make a run "succeed" by
+  weakening a test. A child also may never delegate again — two independent guards
+  (depth gates tool registration, and `AutoDelegate` is cleared on the child),
+  because one guard was cosmetic and produced unbounded nesting.
+- **A rail stop is a rail decision, not an internal error.** Every `Reason` needs an
+  arm in the headless failure classifier. `ReasonExploreStop` had none and fell to
+  `default`, so kloo's single most common failure was reported as
+  `internal_error` / `unknown_reason` — 228 of 386 recorded runs. A new `Reason`
+  without a classifier arm is a silent observability hole.
+- **Report the cause, not just the category.** A failed subagent logged
+  `reason=error` and discarded the error; a dead child was indistinguishable from an
+  idle one, and the real cause had to be recovered by correlating timestamps across
+  runs. Anywhere an error is summarised, carry the message.
 
 ## Testing
 

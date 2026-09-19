@@ -30,6 +30,15 @@ flowchart TD
     Tool <-->|OpenAI-compatible| Model[("your model<br/>llama.cpp · Ollama · OpenAI · OpenRouter")]
 ```
 
+### Subagents (opt-in)
+
+kloo can hand a subtask to a **child agent** with its own context, budget and churn
+state, returning only a summary so the child's reads never enter the parent's
+window. Off by default — `KLOO_SUBAGENTS=1` offers a `task` tool, or
+`KLOO_AUTO_DELEGATE=1` lets the harness hand off when the model has read for many
+turns without editing. The child can run on a **different model**
+(`KLOO_SUBAGENT_MODEL`). See [docs/subagents.md](docs/subagents.md).
+
 A real build/test exit code is the **only** success signal kloo trusts — not the
 model's self-report. kloo auto-detects the project's command (e.g. an Ionic app →
 `npm run build`); `--verify` overrides it, and an unrecognised project runs
