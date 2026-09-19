@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -215,7 +216,15 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r.Register(readFileTool{ws})
 	r.Register(readDirTool{ws})
 	r.Register(searchTool{ws})
-	r.Register(editFileTool{ws})
+	// KLOO_SIMPLE_EDIT=1 offers grok's three-field edit tool INSTEAD of the fenced
+	// SEARCH/REPLACE one. Off by default, so the default tool vocabulary is
+	// unchanged. Instead of, not alongside: two edit tools would confound the
+	// measurement, since the question is whether the FORMAT suppresses editing.
+	if simpleEdit() {
+		r.Register(searchReplaceTool{ws})
+	} else {
+		r.Register(editFileTool{ws})
+	}
 	r.Register(writeFileTool{ws})
 	r.Register(listDirTool{ws})
 	if ws.ModelShellDisabled() {
@@ -228,4 +237,64 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r.Register(commandOutputTool{bg}) // read/stop background commands
 	r.Register(finishTool{})          // explicit terminator; the loop intercepts it
 	return r
+}
+
+// simpleEdit swaps kloo's fenced SEARCH/REPLACE edit tool for grok's three-field
+// one (KLOO_SIMPLE_EDIT=1). Off by default.
+func simpleEdit() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_SIMPLE_EDIT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// searchReplaceTool is an edit tool with grok's ergonomics: three plain string
+// fields instead of one string carrying fenced marker lines.
+//
+// Captured from grok through a logging proxy, running the SAME glimmer model on
+// the same bench cases, its edit tool is:
+//
+//	{file_path, old_string, new_string, replace_all}
+//
+// kloo's edit_file instead asks the model to emit, inside a JSON string, a block
+// with three marker lines in exact order (<<<<<<< SEARCH / ======= / >>>>>>>
+// REPLACE). kloo's own schema text is long and defensive about that format, which
+// is a tell.
+//
+// The measured problem this targets: kloo's glimmer reads 12-44 files and never
+// edits on roughly half of runs, while grok's glimmer passes the same five cases
+// 5/5. Only 4% of kloo runs record a FAILED edit, so the format is not breaking
+// attempts — the hypothesis is that it suppresses them.
+type searchReplaceTool struct{ ws Workspace }
+
+func (t searchReplaceTool) Name() string { return "search_replace" }
+func (t searchReplaceTool) Description() string {
+	return "Replace an exact string in a file. old_string must match the file exactly and appear exactly once; add surrounding lines to make it unique. To create a new file, set old_string to an empty string."
+}
+func (t searchReplaceTool) Schema() ParamSchema {
+	return ParamSchema{
+		Properties: map[string]Property{
+			"file_path":  {Type: "string", Description: "Workspace-relative path to the file to modify."},
+			"old_string": {Type: "string", Description: "The exact text to replace. It must appear exactly once; add surrounding lines to make it unique."},
+			"new_string": {Type: "string", Description: "The text to replace it with (must differ from old_string)."},
+		},
+		Required: []string{"file_path", "old_string", "new_string"},
+	}
+}
+func (t searchReplaceTool) Invoke(ctx context.Context, c Call) (Result, error) {
+	path, _ := argString(c.Args, "file_path")
+	oldS, _ := argString(c.Args, "old_string")
+	newS, _ := argString(c.Args, "new_string")
+	// No replace_all: grok's schema has one, but kloo's SEARCH/REPLACE engine
+	// replaces a single unique match and adding a flag the engine ignores would be
+	// a schema that lies to the model — the exact failure class this tool exists to
+	// remove.
+	// Reuse the engine so scope policy, clobber guards and edit accounting behave
+	// exactly as they do for edit_file.
+	marker := "<<<<<<< SEARCH\n" + oldS + "\n=======\n" + newS + "\n>>>>>>> REPLACE"
+	if err := EditFile(t.ws, path, path+"\n"+marker); err != nil {
+		return Result{}, err
+	}
+	return Result{Output: "edited " + path}, nil
 }

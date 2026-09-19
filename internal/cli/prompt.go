@@ -1,5 +1,11 @@
 package cli
 
+import (
+	"os"
+	"strconv"
+	"strings"
+)
+
 // defaultSystemPrompt is the system prompt shared by the interactive (tui.go) and
 // headless (headless.go) entry points, kept in one place so the two can't drift.
 //
@@ -39,3 +45,54 @@ const chatGateSystemPrompt = "You are kloo, a coding assistant in an ongoing ses
 	"instead reply to the user directly, briefly (1-3 sentences) and helpfully. Do not start or describe " +
 	"new work, and do not repeat a task that is already done.\n\n" +
 	"Output EITHER the single word TASK, OR your short conversational reply — never both, never tools."
+
+// subagentsEnabled reports whether the `task` delegation tool is offered.
+//
+// Off by default (KLOO_SUBAGENTS=1 to enable) while the feature is measured
+// against the bench: it changes the tool vocabulary the model sees, which is not
+// a change to make silently on a released binary.
+// subagentDirective is appended when delegation is available. The default prompt
+// says "read, edit, or run a command" and never mentions delegating; a weak model
+// will not infer the strategy from a tool schema alone, and an unused tool is the
+// same as no tool.
+const subagentDirective = " You also have a task tool: it hands ONE self-contained piece of work to a " +
+	"subagent with its own fresh context and returns only its summary. Use it when a step needs a lot " +
+	"of reading that the rest of the task does not depend on — for example locating where something is " +
+	"defined across many files — so that reading never enters your context. Give it a complete, " +
+	"standalone instruction naming the files and the acceptance condition, because it cannot see this " +
+	"conversation. Do the actual edit yourself unless the whole sub-task is self-contained."
+
+func subagentsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_SUBAGENTS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// SystemPrompt returns the prompt for this run: the default guidance, plus the
+// subagent directive when delegation is actually offered.
+func SystemPrompt() string {
+	if subagentsEnabled() {
+		return defaultSystemPrompt + subagentDirective
+	}
+	return defaultSystemPrompt
+}
+
+// envOn reports whether a boolean experiment flag is set.
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// envInt reads a non-negative integer experiment setting; unset or invalid ⇒ 0.
+func envInt(name string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}

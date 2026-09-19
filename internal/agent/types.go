@@ -236,7 +236,23 @@ type ToolCounters struct {
 	FailedEdits      int
 	NoOpEdits        int
 	VerifyAttempts   int
-	ToolErrors       int
+	// AutoDelegations counts investigations kloo spawned on the model's behalf
+	// when it was reading without acting. Ships WITH the feature so an inert
+	// experiment is distinguishable from a failed one.
+	AutoDelegations int
+	// SubagentSteps is the total steps delegated children consumed. Without it
+	// there was no way to tell whether a slow delegated case was the child's work
+	// or the parent's — and the child budget could not be sized from evidence.
+	SubagentSteps int
+	// RescueDelegations counts handoffs made at the explore rail instead of
+	// stopping (KLOO_DELEGATE_ON_STOP). Also included in AutoDelegations.
+	RescueDelegations int
+	// Restarts counts whole-run restarts after a rail stopped a non-converging run,
+	// and RestartRescues how many of those second attempts succeeded — so an inert
+	// restart is distinguishable from one that fires and still fails.
+	Restarts       int `json:"restarts"`
+	RestartRescues int `json:"restart_rescues"`
+	ToolErrors     int
 	// OffScopeEdits counts model writes (edit_file/write_file) and scoped run_command
 	// calls the scope policy rejected this run (A1/A2/B3). ReadOnlyEdits is the subset
 	// that hit a read-only file specifically (A2).
@@ -413,8 +429,12 @@ type ChurnEvidence struct {
 // Report is the structured outcome of a run — the source of truth the CLI/TUI
 // renders. The human rendering (report.go) is derived from this struct.
 type Report struct {
-	Reason      Reason
-	Steps       int
+	Reason Reason
+	Steps  int
+	// Summary is the text the model passed to the finish tool, when it called it.
+	// Empty for runs a rail ended. Subagent delegation returns this to the parent —
+	// it is the ONLY thing a parent sees of a child's work.
+	Summary     string
 	FinalVerify VerifyResult // the last real verify signal
 	Budget      *BudgetEvidence
 	Churn       *ChurnEvidence
