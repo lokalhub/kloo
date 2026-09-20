@@ -85,6 +85,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		Client:             llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
 		Adapter:            adapter,
 		Registry:           reg,
+		VerifyCmd:          verifyCmd,
 		Verifier:           buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
 		Linter:             buildLinter(ws, lintCmd, lintPerFile),
 		Budget:             agent.NewBudget(cfg, nil),

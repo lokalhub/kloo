@@ -157,6 +157,37 @@ func (r *Registry) Tools() []Tool {
 	return out
 }
 
+// EditOnlyView returns a registry that DISPATCHES exactly as this one does but
+// ADVERTISES only the tools that change the tree, plus finish.
+//
+// Why a vocabulary change and not another nudge: on kloo-bench C66 the explore
+// rail nudged a reading model four times in one run, in plain imperative English,
+// and the run still ended with 26 consecutive read_file calls and an untouched
+// tree. A request the model can decline is not a mechanism. Withholding the read
+// tools for a single turn leaves it nothing to call except an edit — and the
+// underlying tools stay dispatchable, so a model that calls a withheld tool
+// anyway still gets its normal result rather than an unknown-tool error.
+// allowFinish must be false whenever the run's verify is RED. finish with a
+// failing verify ends the run as "answered" — a failure — so offering it on a
+// forced-edit turn would hand the model a one-call escape from the only rail that
+// makes it act.
+func (r *Registry) EditOnlyView(allowFinish bool) *Registry {
+	if r == nil {
+		return nil
+	}
+	keep := map[string]bool{NameEditFile: true, NameWriteFile: true, "search_replace": true}
+	if allowFinish {
+		keep[NameFinish] = true
+	}
+	out := &Registry{tools: r.tools, bg: r.bg}
+	for _, name := range r.order {
+		if keep[name] {
+			out.order = append(out.order, name)
+		}
+	}
+	return out
+}
+
 // Dispatch routes a parsed Call to its tool after validating required args.
 // An unknown tool name returns ErrUnknownTool; a missing required arg returns
 // ErrInvalidArgs. The tool's own Invoke error (or success) is returned otherwise.
