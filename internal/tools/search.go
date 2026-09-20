@@ -19,7 +19,25 @@ const (
 	searchMaxMatches = 200       // cap matches per call so output can't flood the window
 	searchMaxOutput  = 64 * 1024 // 64 KiB total
 	searchMaxLineLen = 400       // truncate a long matched line (e.g. a minified bundle)
+
+	// KLOO_TIGHT_SEARCH bounds. 64 KiB is ~16k tokens — roughly a THIRD of the hot
+	// budget at ctx 131072 — spent on one navigation call. Measured on kloo-bench
+	// C66: consecutive `search` turns grew the conversation ~19k tokens each, which
+	// is what drives the run into compaction, sheds the file it just read, and
+	// produces the re-read loop. grok's captured `grep` bounds its output by a
+	// head_limit instead and its runs are ~5x shorter.
+	tightSearchMaxMatches = 60
+	tightSearchMaxOutput  = 8 * 1024
+	tightSearchMaxLineLen = 240
 )
+
+// searchBounds returns the per-call output bounds for this run.
+func searchBounds() (maxMatches, maxOutput, maxLineLen int) {
+	if envOn("KLOO_TIGHT_SEARCH") {
+		return tightSearchMaxMatches, tightSearchMaxOutput, tightSearchMaxLineLen
+	}
+	return searchMaxMatches, searchMaxOutput, searchMaxLineLen
+}
 
 // searchTool is the search tool: it scans the workspace for a regular expression
 // and returns bounded `file:line: matched line` results. It reuses repomap.Walk, so
@@ -35,8 +53,9 @@ func (t searchTool) Description() string {
 func (t searchTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
-			"query": {Type: "string", Description: "Regular expression to search for (use (?i) prefix for case-insensitive)."},
-			"path":  {Type: "string", Description: "Optional workspace-relative folder or file to limit the search to (default: the whole workspace)."},
+			"query":      {Type: "string", Description: "Regular expression to search for (use (?i) prefix for case-insensitive)."},
+			"path":       {Type: "string", Description: "Optional workspace-relative folder or file to limit the search to (default: the whole workspace)."},
+			"head_limit": {Type: "integer", Description: "Optional maximum number of matching lines to return, like piping to head -N."},
 		},
 		Required: []string{"query"},
 	}
@@ -87,6 +106,12 @@ func (t searchTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	}
 
 	var body strings.Builder
+	maxMatches, maxOutput, maxLineLen := searchBounds()
+	// head_limit caps matches for this call only (grok's grep has the same knob);
+	// it can tighten the default but never raise it past the bound above.
+	if hl := argInt(c.Args, "head_limit"); hl > 0 && hl < maxMatches {
+		maxMatches = hl
+	}
 	matches, filesHit, truncated := 0, 0, false
 	for _, cd := range cands {
 		content, rerr := ReadFile(t.ws, cd.relToWs)
@@ -99,13 +124,13 @@ func (t searchTool) Invoke(ctx context.Context, c Call) (Result, error) {
 				continue
 			}
 			shown := strings.TrimRight(line, "\r")
-			if len(shown) > searchMaxLineLen {
-				shown = shown[:searchMaxLineLen] + "…"
+			if len(shown) > maxLineLen {
+				shown = shown[:maxLineLen] + "…"
 			}
 			fmt.Fprintf(&body, "%s:%d: %s\n", cd.relToWs, i+1, strings.TrimSpace(shown))
 			matches++
 			fileHadMatch = true
-			if matches >= searchMaxMatches || body.Len() >= searchMaxOutput {
+			if matches >= maxMatches || body.Len() >= maxOutput {
 				truncated = true
 				break
 			}

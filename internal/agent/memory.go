@@ -198,8 +198,8 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	} else {
 		w.prevVerify = ""
 	}
-	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify)
-	fp, hasFile := filePin(in.EditPath, in.FreshFile)
+	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify, in.Exercises)
+	fp, hasFile := filePin(in.EditPath, in.FreshFile, in.EditAnchor)
 
 	// Recent tail: prior-session turns (oldest) followed by this run's transcript
 	// after the task, verbatim — nothing is removed retroactively (see recentTail).
@@ -395,7 +395,7 @@ func tokensOf(msgs []llm.Message) int {
 // pass/fail + exit code, and (on failure) the failing output verbatim — the one
 // signal the loop trusts, kept whole so the model sees exactly what failed.
 // Returns false when there is no verify signal yet.
-func verifyPin(v VerifyResult, repeated bool) (llm.Message, bool) {
+func verifyPin(v VerifyResult, repeated bool, exercises []string) (llm.Message, bool) {
 	if v.Command == "" {
 		return llm.Message{}, false
 	}
@@ -406,6 +406,18 @@ func verifyPin(v VerifyResult, repeated bool) (llm.Message, bool) {
 			// #4: the failure is IDENTICAL to last turn — the model's change had no
 			// effect. Steer it off the repeat loop toward a different diagnosis.
 			b.WriteString("\n⚠️ This is the SAME verify failure as your previous attempt — your last change did NOT fix it. Do not repeat the same edit; read the exact error below, inspect the relevant file/schema, and try a DIFFERENT fix.")
+			// Name the OTHER files the failing test exercises. Measured on kloo-bench
+			// A16 and A33, both lost the same way: kloo kept editing the file it was
+			// already in (A16: service.ts five times, two of them identical, three
+			// no-ops) while the change the test actually needed lived elsewhere — a
+			// SQL join in A16, a resolver in A33. grok passed both with a three-file
+			// change. "Try a different fix" is the wrong advice when what is needed is
+			// a different FILE.
+			if len(exercises) > 0 {
+				b.WriteString("\nIf the same assertion keeps failing after you edit the same file, the cause is " +
+					"probably NOT in that file. The failing test also exercises:\n  - " +
+					strings.Join(exercises, "\n  - "))
+			}
 		}
 		if out := strings.TrimSpace(v.Stdout + "\n" + v.Stderr); out != "" {
 			b.WriteString("\n")
@@ -419,14 +431,79 @@ func verifyPin(v VerifyResult, repeated bool) (llm.Message, bool) {
 // (re-read this turn through the jail), never the stale transcript copy. Returns
 // false when no file is under edit. The body is re-read next turn, so truncating
 // it under budget pressure is recoverable (§2.4 shed order, step 4).
-func filePin(path, fresh string) (llm.Message, bool) {
+func filePin(path, fresh, anchor string) (llm.Message, bool) {
 	if path == "" || fresh == "" {
 		return llm.Message{}, false
 	}
+	body := fresh
+	note := ""
+	if w, n, windowed := pinWindowOf(fresh, anchor); windowed {
+		body, note = w, n
+	}
 	return llm.Message{
 		Role:    llm.RoleUser,
-		Content: "Current file under edit (re-read fresh from disk): " + path + "\n" + fresh,
+		Content: "Current file under edit (re-read fresh from disk): " + path + note + "\n" + body,
 	}, true
+}
+
+// pinMaxLines bounds the file pin when KLOO_PIN_WINDOW is on.
+//
+// The pin is re-sent in FULL on every single turn, so its size is a per-turn tax
+// for the rest of the run. Measured on kloo-bench C66, whose file under edit is
+// ~1,770 lines: the per-step prompt sat at 22-24k tokens from the moment that file
+// came under edit, and the run's cumulative total passed 900k by step 30. That is
+// the most likely explanation for kloo running ~2x longer than grok on cases both
+// pass, and on a case that dies to the clock it is the difference itself.
+const pinMaxLines = 600
+
+// pinWindowOf returns the slice of a long file worth pinning: a window centred on
+// the most recent edit, since that is the region the model is working in. Without
+// an anchor it keeps the head, which is where imports and declarations live.
+//
+// It always reports what it withheld. A silently truncated file is a correctness
+// hazard — the model would believe it had seen the whole thing and write an edit
+// against a function it never read.
+func pinWindowOf(fresh, anchor string) (body, note string, windowed bool) {
+	if !envOnAgent("KLOO_PIN_WINDOW") {
+		return "", "", false
+	}
+	lines := strings.Split(fresh, "\n")
+	if len(lines) <= pinMaxLines {
+		return "", "", false
+	}
+	centre := 0
+	if a := firstAnchorLine(lines, anchor); a >= 0 {
+		centre = a
+	}
+	start := centre - pinMaxLines/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + pinMaxLines
+	if end > len(lines) {
+		end, start = len(lines), len(lines)-pinMaxLines
+	}
+	return strings.Join(lines[start:end], "\n"),
+		fmt.Sprintf(" — showing lines %d-%d of %d (the region around your last edit; read_file with an offset for the rest)",
+			start+1, end, len(lines)), true
+}
+
+// firstAnchorLine locates the most recent edit inside the re-read file. The anchor
+// is matched one line at a time so a multi-line SEARCH block still finds its spot
+// after the replacement changed the surrounding text. -1 when it cannot be placed.
+func firstAnchorLine(lines []string, anchor string) int {
+	for _, a := range strings.Split(anchor, "\n") {
+		a = strings.TrimSpace(a)
+		if len(a) < 12 { // too short to identify a location
+			continue
+		}
+		for i, l := range lines {
+			if strings.Contains(l, a) {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // recentTail returns the transcript after the task message, verbatim and in order.

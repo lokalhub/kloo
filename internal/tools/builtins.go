@@ -47,9 +47,19 @@ func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	// Returning a bounded window with an explicit marker fixes the cause rather
 	// than the symptom: the model can still reach any part of the file, but no
 	// single call can swallow the window.
+	first := argInt(c.Args, "offset")
+	if first < 1 {
+		first = 1
+	}
 	if body, note, truncated := clampLines(content, argInt(c.Args, "offset"), argInt(c.Args, "limit")); truncated {
+		if lineAnchors() {
+			body = anchorLines(body, first)
+		}
 		return Result{Output: body + "\n" + note}, nil
 	} else {
+		if lineAnchors() {
+			body = anchorLines(body, first)
+		}
 		content = body
 	}
 	// An empty (or whitespace-only) file would otherwise return a BLANK observation,
@@ -60,6 +70,37 @@ func (t readFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 		return Result{Output: "(file exists but is empty — 0 meaningful bytes)"}, nil
 	}
 	return Result{Output: content}, nil
+}
+
+// lineAnchors reports whether read_file annotates its output with grok's
+// "LINE_NUMBER→" anchors (KLOO_LINE_ANCHORS=1). Off by default.
+func lineAnchors() bool { return envOn("KLOO_LINE_ANCHORS") }
+
+// envOn reports whether a boolean experiment flag is set.
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// anchorLines prefixes the first line and every tenth line with "N→", the scheme
+// grok's captured read_file uses ("Line numbers (1-based) appear as anchors in the
+// format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th
+// line of the file; the lines in between show content only").
+//
+// Sparse rather than per-line on purpose: it orients the model in a long file
+// without putting a prefix on every line the edit tool will later have to match.
+func anchorLines(body string, firstLine int) string {
+	lines := strings.Split(body, "\n")
+	for i := range lines {
+		n := firstLine + i
+		if i == 0 || n%10 == 0 {
+			lines[i] = strconv.Itoa(n) + "\u2192" + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // DefaultReadLineLimit bounds a single read_file result. Chosen so that even a
@@ -183,7 +224,7 @@ func (t editFileTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
 			"path": {Type: "string", Description: "Workspace-relative path to edit."},
-			"diff": {Type: "string", Description: "A SEARCH/REPLACE block with ALL THREE marker lines, each on its own line, in this EXACT order — the ======= divider line between the two sections is REQUIRED (do not omit it or replace it with >>>>>>> REPLACE):\n<<<<<<< SEARCH\n<exact lines to find>\n=======\n<replacement lines>\n>>>>>>> REPLACE\nThe SEARCH text must match the file byte-for-byte. To create a new file, leave the SEARCH section empty. The ``` fence is optional."},
+			"diff": {Type: "string", Description: "A SEARCH/REPLACE block with ALL THREE marker lines, each on its own line, in this EXACT order — the ======= divider line between the two sections is REQUIRED (do not omit it or replace it with >>>>>>> REPLACE):\n<<<<<<< SEARCH\n<exact lines to find>\n=======\n<replacement lines>\n>>>>>>> REPLACE\nThe SEARCH text must match the file byte-for-byte. To create a new file, leave the SEARCH section empty. The ``` fence is optional." + anchorNote()},
 		},
 		Required: []string{"path", "diff"},
 	}
@@ -270,7 +311,18 @@ type searchReplaceTool struct{ ws Workspace }
 
 func (t searchReplaceTool) Name() string { return "search_replace" }
 func (t searchReplaceTool) Description() string {
-	return "Replace an exact string in a file. old_string must match the file exactly and appear exactly once; add surrounding lines to make it unique. To create a new file, set old_string to an empty string."
+	return "Replace an exact string in a file. old_string must match the file exactly and appear exactly once; add surrounding lines to make it unique. To create a new file, set old_string to an empty string." + anchorNote()
+}
+
+// anchorNote warns that read_file's "N\u2192" anchors are not part of the file, so an
+// edit must match only what follows the arrow. Without it the anchors would turn
+// every copied-out excerpt into a guaranteed no-match. grok's own search_replace
+// description carries the same warning.
+func anchorNote() string {
+	if !lineAnchors() {
+		return ""
+	}
+	return " read_file prefixes the first line and every tenth line with \"LINE_NUMBER\u2192\". That prefix is NOT part of the file: match only what comes after the \u2192, with its exact indentation."
 }
 func (t searchReplaceTool) Schema() ParamSchema {
 	return ParamSchema{

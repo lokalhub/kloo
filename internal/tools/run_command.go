@@ -167,10 +167,12 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 
 	runErr := cmd.Run()
 
+	so, sTrunc := boundForModel(stdout.String())
+	se, eTrunc := boundForModel(stderr.String())
 	res := Result{
-		Output:    stdout.String(),
-		Stderr:    stderr.String(),
-		Truncated: stdout.truncated || stderr.truncated,
+		Output:    so,
+		Stderr:    se,
+		Truncated: stdout.truncated || stderr.truncated || sTrunc || eTrunc,
 	}
 
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
@@ -192,6 +194,30 @@ func (t RunCommandTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// modelOutputCap bounds what ONE command puts into the model's context, in bytes.
+//
+// The capture cap above (64 KiB per stream) exists to bound MEMORY; this bounds
+// the WINDOW, which is a different budget. Measured on kloo-bench A06: a single
+// vitest run grew the next prompt by ~69,700 tokens, the run averaged 36k tokens
+// of prompt per step at 171 SECONDS per step, and it died on the 2400s wall clock
+// after 14 steps having never edited anything. grok passed the same case in 891s.
+// grok's own run_terminal_command caps model-visible output at 40,000 characters.
+const modelOutputCap = 40 * 1000
+
+// boundForModel keeps the beginning AND the end of an oversize output, dropping
+// the middle. Both ends matter and for different reasons: a test runner puts its
+// summary at the end and the first failure at the top, so head-only truncation
+// hides the verdict and tail-only hides the cause.
+func boundForModel(s string) (string, bool) {
+	if !envOn("KLOO_BOUND_CMD_OUTPUT") || len(s) <= modelOutputCap {
+		return s, false
+	}
+	half := modelOutputCap / 2
+	head, tail := s[:half], s[len(s)-half:]
+	return head + fmt.Sprintf("\n\n… [%d bytes of the middle omitted — re-run a narrower command, "+
+		"or grep the output, if you need what is missing] …\n\n", len(s)-2*half) + tail, true
 }
 
 // nonInteractiveEnv signals automated/non-interactive mode to common toolchains so

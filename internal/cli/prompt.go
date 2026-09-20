@@ -28,6 +28,47 @@ const defaultSystemPrompt = "You are kloo, an autonomous coding assistant. Each 
 	"A fast lint may report style/syntax issues on the file you just edited — use it to " +
 	"fix obvious mistakes, but it does NOT decide success; only the verify command does."
 
+// grokAlignedSystemPrompt is the action-first prompt (KLOO_GROK_PROMPT=1).
+//
+// Captured from grok through a logging proxy (docs/apps/kloo/plans/beat-grok/
+// capture/), running the SAME glimmer model on the same bench cases, grok's
+// 5,604-char prompt opens with "complete the task", devotes a <work_policy>
+// section to acting, and states outright: "For clear, reversible local work, do
+// it in the current turn instead of asking permission." kloo's default prompt
+// above is the opposite shape — after one clause about making a tool call, every
+// remaining sentence is a prohibition (do NOT invent, NEVER undo, say so and
+// stop). On kloo-bench that is the measured failure: across 62 glimmer runs, 30
+// never called an edit tool at all.
+//
+// This keeps kloo's guardrails — they encode real incidents — but subordinates
+// them to the instruction to act, and states the finish condition in terms of the
+// work rather than in terms of stopping.
+const grokAlignedSystemPrompt = "You are kloo, an autonomous coding agent. There is no human operator in this " +
+	"session: complete the user's request yourself.\n\n" +
+	"WORK POLICY\n" +
+	"- Keep every explicit requirement of the request in view until it is done, superseded, or genuinely " +
+	"blocked. If something is blocked, say so plainly rather than quietly dropping it.\n" +
+	"- For clear, reversible local work, DO IT in the current turn. Do not ask permission and do not end a " +
+	"turn describing an edit you have not made.\n" +
+	"- Reading is not progress. Read only what you need to make the next change, then make it. If you have " +
+	"read the relevant file, the next call should be an edit.\n" +
+	"- Claim that something is done, fixed, or tested only when tool output supports the claim. Otherwise " +
+	"state what you did not verify and why.\n" +
+	"- Keep changes scoped to what was asked. Never modify a test to make it pass.\n\n" +
+	"TOOL CALLING\n" +
+	"- Make exactly one tool call per turn.\n" +
+	"- Prefer the dedicated file tools over shell equivalents: read_file rather than cat/head, the edit tool " +
+	"rather than sed/awk. Reserve run_command for commands that genuinely need a shell, such as running tests.\n" +
+	"- Edit in place with targeted replacements; never rewrite a whole file you have not read.\n\n" +
+	"COMPLETION\n" +
+	"- The verify command checks your work; it is a signal, not the goal. Do not invent unrequested changes " +
+	"to turn it green, and never undo or redo something the user explicitly asked for (for example recreating " +
+	"files they told you to delete). If the request legitimately makes verify fail, say so and stop.\n" +
+	"- A fast lint may report style or syntax issues on the file you just edited. Use it to fix obvious " +
+	"mistakes; it does not decide success.\n" +
+	"- When the work is complete, or the message is a question, a thanks, or other conversational reply, call " +
+	"the finish tool with a short summary instead of running more commands."
+
 // chatGateSystemPrompt drives the no-tools conversational gate (loop.go chatGate):
 // a single model call, BEFORE the agent loop, that decides whether the user's
 // latest message is actionable work or just conversation. A weak model handed a
@@ -73,10 +114,14 @@ func subagentsEnabled() bool {
 // SystemPrompt returns the prompt for this run: the default guidance, plus the
 // subagent directive when delegation is actually offered.
 func SystemPrompt() string {
-	if subagentsEnabled() {
-		return defaultSystemPrompt + subagentDirective
+	base := defaultSystemPrompt
+	if envOn("KLOO_GROK_PROMPT") {
+		base = grokAlignedSystemPrompt
 	}
-	return defaultSystemPrompt
+	if subagentsEnabled() {
+		return base + subagentDirective
+	}
+	return base
 }
 
 // envOn reports whether a boolean experiment flag is set.

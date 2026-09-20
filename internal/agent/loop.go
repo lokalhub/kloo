@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -259,6 +260,19 @@ type Loop struct {
 	// reuses one Loop across submissions). Unexported: the Report is the contract.
 	promptTokens       int
 	cachedPromptTokens int
+	// VerifyCmd is the verify command as configured, used to identify the files
+	// that are the SPECIFICATION for this run (see protectedByVerify). Kept
+	// separate from VerifyResult.Command because protection must work before the
+	// first verify has ever run.
+	VerifyCmd string
+	// curEditAnchor is the text the most recent edit targeted; the file pin centres
+	// its window on it (KLOO_PIN_WINDOW).
+	curEditAnchor string
+	// editOnlyLeft is the force-edit rail's remaining budget: while it is > 0, act()
+	// advertises only the tree-changing tools AND the loop refuses any other call
+	// instead of dispatching it. An edit releases it immediately; otherwise it
+	// decays, so a model that will not edit can never be trapped. See forceEdit().
+	editOnlyLeft int
 	// lastPromptChars is the character count of the request act() just built,
 	// paired with the prompt_tokens the provider reports back to calibrate the
 	// estimator. Consumed (and cleared) by observeUsage, so a turn whose chars we
@@ -597,6 +611,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// The turn count at which the nudge last fired, so it re-arms at every
 		// multiple instead of once per run: one nudge at turn 6 is easy to ignore.
 		exploreNudgedAt int
+		// exploreNudges counts no-edit explore nudges this run, so the force-edit
+		// rail can hold back on the first one.
+		exploreNudges int
+		// emptyTurns counts empty completions this run has already recovered from.
+		emptyTurns int
 		// Read targets already visited this run. Revisiting one is not new ground.
 		seenTargets  = map[string]bool{}
 		exploreTotal int
@@ -686,7 +705,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		rep.Safety = safetyEv
 		rep.LastScopeDenial = lastScopeDenial
 		rep.PatchOnlyReject = patchOnlyReject
-		if reason != ReasonSuccess && snap.Taken && l.Checkpoint != nil {
+		if l.shouldRollback(reason, lastVerify) && snap.Taken && l.Checkpoint != nil {
 			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
 				rep.RolledBack = true
 			}
@@ -748,6 +767,24 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if errors.Is(err, errContextShrunk) {
 				l.observeUsage(usage)
 				step-- // no work happened; a forced rebuild must not eat the step budget
+				continue
+			}
+			// EXHAUSTED EMPTY TURNS. The retry classifier already treats an empty
+			// completion as a hiccup and retries it; when those retries are spent, the
+			// run used to die as internal_error. Measured on kloo-bench C62: that threw
+			// away 14 good steps AND rolled back a legitimate source edit with 45 steps
+			// still on the budget, on an endpoint that answered normally minutes later.
+			// One blank response from a local model is not a reason to lose the work.
+			//
+			// Bounded, because a model that returns nothing FOREVER must still stop:
+			// after emptyTurnRecoveries the error is fatal exactly as before.
+			if errors.Is(err, ErrNoUsableContent) && emptyTurnRecovery() && emptyTurns < maxEmptyTurnRecoveries {
+				emptyTurns++
+				l.observeUsage(usage)
+				convo = append(convo, llm.Message{Role: llm.RoleUser, Content: "Your last turn came back empty — " +
+					"no tool call and no message. That is a transport hiccup, not a problem with the task. " +
+					"Continue from where you were and emit your next tool call."})
+				step-- // nothing happened; a blank turn must not eat the step budget
 				continue
 			}
 			if errors.Is(err, ErrNoToolCall) {
@@ -835,6 +872,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// (working memory) instead of trusting the stale transcript copy.
 		if isEditTool(call.Name) {
 			curEditPath = str(call.Args["path"])
+			// Remember WHAT was edited, not just where: the pin window centres on it
+			// so a long file's pin follows the model to the region it is working in.
+			l.curEditAnchor = editAnchorOf(call)
 		}
 
 		// Lazy checkpoint before the first edit (read-only runs take none).
@@ -858,6 +898,25 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			before, beforeOK = l.currentFileContents(str(call.Args["path"]))
 		}
 		switch {
+		case isEditTool(call.Name) && l.protectedByVerify(str(call.Args["path"])) ||
+			isEditTool(call.Name) && l.protectedByVerify(str(call.Args["file_path"])):
+			// The files the verify command NAMES are the specification the work is
+			// checked against. Editing them is how an agent "passes" by moving the
+			// goalposts. Measured on kloo-bench C30: the model edited
+			// undertime-overbreak-grace.test.ts three times (every one a no-op) and
+			// never touched a source file, and the run churned to a repetition halt.
+			// The force-edit rail makes this MORE likely, not less — told to edit
+			// something, a stuck model reaches for the file it has most recently read,
+			// which is the failing test.
+			derr = errProtectedPath
+		case l.editOnlyLeft > 0 && !isEditTool(call.Name) && !(call.Name == tools.NameFinish && lastVerify.Passed):
+			// FORCE-EDIT RAIL. Withheld tools stay dispatchable so a stray call is
+			// never an unrecoverable unknown-tool error — but "dispatchable" must not
+			// mean "executed", or the restriction has no teeth at all. Measured on
+			// kloo-bench C66: the narrowed tool list alone changed nothing, because
+			// the model kept emitting read_file from the vocabulary it had already
+			// seen and the loop kept running it. Refuse, say why, and hold.
+			derr = errEditOnlyTurn
 		case isEditTool(call.Name) && l.OnBeforeEdit != nil && !l.OnBeforeEdit(call):
 			// approve-each rejected this edit: skip the apply, record it.
 			derr = errEditRejected
@@ -1011,6 +1070,46 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				correctableEdit = true
 			}
 		}
+		if l.editOnlyLeft > 0 {
+			// Only a SUCCESSFUL edit satisfies the rail. Releasing on the call alone
+			// would let a refused or failed edit buy the model its read tools back,
+			// which is the behaviour the rail exists to prevent.
+			if isEditTool(call.Name) && derr == nil {
+				l.editOnlyLeft = 0
+			} else {
+				l.editOnlyLeft--
+			}
+		}
+		if w := l.subsetTestWarning(call, result, derr); w != "" {
+			convo = append(convo, obs)
+			obs = llm.Message{Role: llm.RoleUser, Content: w}
+		}
+		if errors.Is(derr, errProtectedPath) {
+			target := str(call.Args["path"])
+			if target == "" {
+				target = str(call.Args["file_path"])
+			}
+			msg := "That file is part of the verification command — it is the specification your work is " +
+				"checked against, not something to change. Editing it cannot make the task correct. " +
+				"Change the SOURCE code the test exercises instead."
+			// Name the files that test actually imports. Measured on kloo-bench A33:
+			// the model tried to edit the statutory test — so it had located the right
+			// AREA — then spent the rest of the run editing payroll files while the red
+			// assertion was about statutory dedup. It knew where the problem was and
+			// could not find the code behind it. A refusal that only says "no" leaves
+			// it exactly where it was.
+			if imps := l.importsOf(target); len(imps) > 0 {
+				msg += " That test imports these, and the fix is most likely in one of them:\n  - " +
+					strings.Join(imps, "\n  - ")
+			}
+			obs = llm.Message{Role: llm.RoleUser, Content: msg}
+		}
+		if errors.Is(derr, errEditOnlyTurn) {
+			obs = llm.Message{Role: llm.RoleUser, Content: "That tool is unavailable on this turn. " +
+				"You have read enough and the code still does not pass its test: the only thing that can " +
+				"move this task forward now is a change to the source. Call the edit tool with your best " +
+				"attempt at the fix. If it is wrong, the test will say so and you can revise it."}
+		}
 		if call.Name == tools.NameWriteFile && errors.Is(derr, errWriteClobber) {
 			// Replace the bare error with a guidance nudge: read the file first, then make
 			// a surgical edit_file — or write_file again only to truly replace all of it.
@@ -1081,6 +1180,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					return finish(ReasonInterrupted, nil, nil, nil)
 				}
 				return finish(ReasonError, fmt.Errorf("verify: %w", lastVerify.Err), nil, nil)
+			}
+
+			// BUILD BREAK. A test that ran and failed is information; a build that no
+			// longer compiles is damage, it hides every other signal, and on kloo-bench
+			// A05 the model never repaired it — it read sixteen more times and stopped.
+			// Say so in plain terms, quote the error, and arm the force-edit rail NOW
+			// rather than after another six read-only turns.
+			if buildBreakGuard() && !lastVerify.Passed {
+				if broken, detail := buildBreak(failingOutput(lastVerify)); broken {
+					convo = append(convo, llm.Message{Role: llm.RoleUser, Content: "YOUR LAST EDIT BROKE THE BUILD. " +
+						"This is not a failing test — the file no longer compiles, so nothing can run at all:\n" + detail +
+						"\nFix THIS first, in the file you just edited, before anything else. If you added code that " +
+						"already existed, remove the duplicate you introduced rather than adding more."})
+					if forceEdit() {
+						l.editOnlyLeft = editOnlyBudget
+					}
+				}
 			}
 
 			// A7 repeated-verify stop: count CONSECUTIVE identical verifier failures
@@ -1367,7 +1483,34 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					break
 				}
 			}
-			convo = append(convo, exploreCorrective(exploreStreak))
+			if editRail() {
+				// NOT gated on "the run has never edited". Measured on kloo-bench C66:
+				// gating on that let a run make ONE early edit (2 failing tests -> 1),
+				// which disarmed the rail for the rest of the run, and the model then
+				// read 16 more times and was stopped with the case still red. Every
+				// counter that drives this nudge resets on an edit, so a nudge firing
+				// at all already means a long read-only streak with nothing changed —
+				// which is the condition the corrective is for, first edit or tenth.
+				//
+				// Arm the vocabulary restriction only from the SECOND nudge of the
+				// streak: the first is a fair warning, and a model that acts on it
+				// should never see a narrowed tool list.
+				// Armed from the run's SECOND no-edit nudge, counted across the whole
+				// run rather than the current streak. Measured on kloo-bench C66: with
+				// a per-streak counter a run was nudged, edited, then read 21 more
+				// times in a fresh streak whose nudges restarted at one — so the rail
+				// never armed and the run was stopped with the file broken. A model
+				// that has already ignored one nudge this run does not get another
+				// free pass.
+				if forceEdit() && exploreNudges > 0 {
+					l.editOnlyLeft = editOnlyBudget
+				}
+				exploreNudges++
+				convo = append(convo, editCorrective(exploreStreak, edited,
+					failingAssertions(failingOutput(lastVerify)), l.verifyTestImports()))
+			} else {
+				convo = append(convo, exploreCorrective(exploreStreak))
+			}
 		}
 
 		// Stall backstop: a no-progress counter, ORTHOGONAL to MaxSteps. It engages
@@ -1507,6 +1650,8 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			LastVerify:   lastVerify,
 			EditPath:     curEditPath,
 			FreshFile:    l.reread(curEditPath),
+			EditAnchor:   l.curEditAnchor,
+			Exercises:    l.verifyTestImports(),
 			WindowTokens: win,
 			SystemTokens: nonHistoryTokens,
 			MapBudget:    mapBudget,
@@ -1534,7 +1679,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		Model:       l.Model,
 		Messages:    msgs,
 		Temperature: l.Temperature,
-	}, l.Registry))
+	}, l.turnRegistry(lastVerify.Passed)))
 	// Measure what we actually SEND: messages PLUS the tool schemas, which the
 	// provider also counts in prompt_tokens. Counting message text alone made the
 	// measured ratio collapse to the clamp floor on short conversations, where the
@@ -1945,6 +2090,91 @@ func exploreCorrective(n int) llm.Message {
 			"reply with ONE short question and no tool call.", n)}
 }
 
+// editCorrective is the KLOO_EDIT_RAIL form of the explore nudge, used when the
+// run has made NO edit yet.
+//
+// The general corrective above offers three ways out, two of which (run a
+// command, call finish) a reading model can take without ever changing the code —
+// and on kloo-bench it does: the explore rail fires 4-6 times in a typical failing
+// run and the run still ends with an untouched tree. When nothing has been edited,
+// the only useful next call is an edit, so ask for exactly that and say what the
+// task requires.
+func editCorrective(n int, edited bool, failing, exercises []string) llm.Message {
+	lead := fmt.Sprintf("You have inspected %d files without changing a single line. ", n)
+	if edited {
+		lead = fmt.Sprintf("You made an edit earlier, and you have now inspected %d more files "+
+			"without changing anything further. The test is still failing, so that edit was not "+
+			"the whole fix. ", n)
+	}
+	if len(failing) > 0 {
+		lead += "Still failing:\n  - " + strings.Join(failing, "\n  - ") +
+			"\nThe remaining fix may be in a DIFFERENT file from the one you already changed — a " +
+			"single behaviour often spans the query, the resolver and the helper that both use. "
+	}
+	if len(exercises) > 0 {
+		lead += "The failing test exercises these files directly:\n  - " + strings.Join(exercises, "\n  - ") +
+			"\nIf you have been editing the same file without the test going green, the change probably " +
+			"belongs in one of these instead. "
+	}
+	return llm.Message{Role: llm.RoleUser, Content: lead +
+		"Reading more will not complete this task: the code must change for the failing test to pass. " +
+		"This turn, make your best edit to the source file you believe is wrong. " +
+		"Do not read, do not search, do not run a command, do not call finish. " +
+		"If you are not certain the edit is right, make it anyway and let the test tell you — " +
+		"an edit that turns out wrong is progress and can be revised; another read is not."}
+}
+
+// editRail reports whether the no-edit explore nudge demands an edit
+// (KLOO_EDIT_RAIL=1). Off by default.
+func editRail() bool { return envOnAgent("KLOO_EDIT_RAIL") }
+
+// forceEdit reports whether a repeated no-edit explore nudge also WITHHOLDS the
+// read tools for that turn (KLOO_FORCE_EDIT=1). Off by default.
+func forceEdit() bool { return envOnAgent("KLOO_FORCE_EDIT") }
+
+// turnRegistry is the vocabulary advertised for the turn being built: the full
+// registry, or the edit-only view when the force-edit rail armed it. One turn
+// only — act() clears the flag, so a model that edits (or refuses to) is back to
+// the full vocabulary immediately.
+func (l *Loop) turnRegistry(verifyPassed bool) *tools.Registry {
+	if l.editOnlyLeft > 0 {
+		return l.Registry.EditOnlyView(verifyPassed)
+	}
+	return l.Registry
+}
+
+// editOnlyBudget is how many consecutive turns the force-edit rail holds the
+// vocabulary down. Three: enough that a model which merely ignored the narrowed
+// list once still meets it again, few enough that a run which genuinely has
+// nothing to edit is not held hostage.
+const editOnlyBudget = 3
+
+// envOnDefault reports whether a DEFAULT-ON behaviour is still enabled: the
+// opt-OUT twin of envOnAgent, active unless the variable is explicitly falsy.
+//
+// Unused for now, deliberately. Flipping the seven validated fixes to default-on
+// breaks kloo's EXISTING tests — TestIntegrationRollbackCleanRepo,
+// TestIntegrationChurn and the explore-rail tests all pin the current semantics,
+// above all "a non-success run rolls back the tree". That is a deliberate safety
+// decision, and a benchmark result is not grounds to overwrite it silently. The
+// default flip belongs in its own reviewed change; this helper is what it will
+// use.
+func envOnDefault(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+func envOnAgent(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // promiseToActCorrective is the one-shot nudge for the promised-but-didn't-act rail.
 // When lastFailed, the model gave up in prose right after a FAILING action — tell it
 // the failure is not "done" and to recover. Otherwise it merely narrated a next step
@@ -2046,6 +2276,374 @@ var errEditRejected = errors.New("agent: edit rejected (approve-each)")
 // errWriteClobber marks a write_file the clobber guard refused: it would shrink a
 // substantial existing file the model never read this run (a blind overwrite).
 var errWriteClobber = errors.New("agent: write_file would clobber an unread file")
+
+// editAnchorOf extracts the text an edit call targeted, for the pin window to
+// centre on. search_replace carries it plainly; edit_file's SEARCH/REPLACE block
+// carries it between the markers. write_file has no target region, so it yields
+// nothing and the pin falls back to the head of the file.
+func editAnchorOf(call tools.Call) string {
+	if s := str(call.Args["old_string"]); s != "" {
+		return s
+	}
+	d := str(call.Args["diff"])
+	if d == "" {
+		return ""
+	}
+	if i := strings.Index(d, "<<<<<<< SEARCH"); i >= 0 {
+		d = d[i+len("<<<<<<< SEARCH"):]
+	}
+	if j := strings.Index(d, "======="); j >= 0 {
+		d = d[:j]
+	}
+	return strings.TrimSpace(d)
+}
+
+// subsetTestWarning returns the observation for a model that ran a NARROWER test
+// command than the verify command, got a pass, and is about to believe the task is
+// finished. Empty when that is not what happened.
+//
+// Measured on kloo-bench C62: the verify command names two test files; the model
+// ran ONE of them four times, saw exit 0 every time, never ran the other, never
+// edited anything, and the run ended "answered" with the case red. Refusing tools
+// cannot fix this — the model is not stuck exploring, it believes it is done. The
+// only thing that helps is telling it, at the moment it happens, that the green it
+// is looking at is not the green it is graded on.
+func (l *Loop) subsetTestWarning(call tools.Call, res tools.Result, derr error) string {
+	if !envOnAgent("KLOO_VERIFY_AUTHORITY") || derr != nil || res.ExitCode != 0 {
+		return ""
+	}
+	if call.Name != tools.NameRunCommand || strings.TrimSpace(l.VerifyCmd) == "" {
+		return ""
+	}
+	ran := pathTokens(str(call.Args["command"]))
+	want := pathTokens(l.VerifyCmd)
+	if len(ran) == 0 || len(want) == 0 {
+		return ""
+	}
+	var missing []string
+	for _, w := range want {
+		found := false
+		for _, r := range ran {
+			if r == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, w)
+		}
+	}
+	// Every file the gate covers was run: the pass is a real pass, say nothing.
+	if len(missing) == 0 {
+		return ""
+	}
+	// The command must at least overlap the gate, or this is an unrelated command.
+	if len(missing) == len(want) {
+		return ""
+	}
+	return "That command passed, but it is NOT the check this task is graded on. It left out: " +
+		strings.Join(missing, ", ") + ". The full verification command is:\n  " + l.VerifyCmd +
+		"\nRun that command, not a narrower one. The task is not complete until IT passes."
+}
+
+// pathTokens picks the file-like arguments out of a command line: tokens that are
+// not flags and contain a dot, compared on the file name so a path relative to the
+// gate's working directory still matches one relative to the workspace root.
+func pathTokens(cmd string) []string {
+	var out []string
+	for _, tok := range strings.Fields(cmd) {
+		tok = strings.Trim(tok, "\"'")
+		if tok == "" || strings.HasPrefix(tok, "-") || !strings.Contains(tok, ".") {
+			continue
+		}
+		// Config files are arguments to the runner, not part of the covered set.
+		if strings.Contains(tok, "config") {
+			continue
+		}
+		base := tok
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		out = append(out, base)
+	}
+	return out
+}
+
+// shouldRollback decides whether a finished run's edits are discarded.
+//
+// kloo rolls back to its checkpoint on ANY non-success exit. Measured on
+// kloo-bench C62, that is how kloo loses a case it has already solved: the verify
+// command names two test files, one of which is a Playwright spec that cannot
+// resolve node:os under vitest — unfixable, failing in BOTH arms. kloo made the
+// correct fix to the other file (its own summary describes it accurately), verify
+// stayed red because of the broken spec, the run ended "answered" rather than
+// success, and the fix was ERASED. The independent gate then measured unfixed
+// code and scored 1f. grok, which has no rollback, kept its edit and passed.
+//
+// A developer whose agent ran out of steps wants the diff, not an empty tree —
+// discarding real work because a verify could not go green is the wrong default
+// even away from this bench. So with KLOO_KEEP_WORK_ON_FAIL the rollback is
+// narrowed to the outcomes where the tree itself is untrustworthy: an internal
+// error, an interrupt, or a safety stop. A run that simply did not finish keeps
+// what it wrote.
+func (l *Loop) shouldRollback(reason Reason, last VerifyResult) bool {
+	if reason == ReasonSuccess {
+		return false
+	}
+	if !envOnAgent("KLOO_KEEP_WORK_ON_FAIL") {
+		return true // stock behaviour: any non-success exit rolls back
+	}
+	switch reason {
+	case ReasonError, ReasonInterrupted, ReasonSafetyStop:
+		return true
+	}
+	// Keeping partial work is right; keeping a tree that no longer BUILDS is not.
+	// Measured on kloo-bench A05: a duplicate-declaration edit left the file
+	// untransformable and the gate collected zero tests, which is strictly worse
+	// than the state the run started in. Hand back a tree that at least compiles.
+	if buildBreakGuard() && !last.Passed {
+		if broken, _ := buildBreak(failingOutput(last)); broken {
+			return true
+		}
+	}
+	return false
+}
+
+// buildBreakSignatures are the verify outputs that mean the code no longer
+// COMPILES or COLLECTS, as opposed to tests that ran and failed. The distinction
+// matters: a failing test is information, while a broken build is damage the agent
+// itself just did, and it hides every other signal behind it.
+var buildBreakSignatures = []string{
+	"transform failed",
+	"has already been declared",
+	"syntaxerror",
+	"parse error",
+	"cannot find module",
+	"failed to load",
+	"unexpected token",
+}
+
+// buildBreak reports whether a verify output shows a broken build, and returns the
+// offending lines to quote back at the model.
+//
+// Measured on kloo-bench A05: an edit introduced duplicate `restDay` / `isHoliday`
+// declarations, vitest could no longer transform the file, and the gate collected
+// ZERO tests. The model then read sixteen more times — six of them refused by the
+// force-edit rail — and never repaired what it had broken.
+func buildBreak(out string) (bool, string) {
+	low := strings.ToLower(out)
+	hit := false
+	for _, sig := range buildBreakSignatures {
+		if strings.Contains(low, sig) {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return false, ""
+	}
+	var keep []string
+	for _, line := range strings.Split(out, "\n") {
+		ll := strings.ToLower(line)
+		for _, sig := range buildBreakSignatures {
+			if strings.Contains(ll, sig) {
+				keep = append(keep, strings.TrimSpace(line))
+				break
+			}
+		}
+		if len(keep) >= 6 {
+			break
+		}
+	}
+	return true, strings.Join(keep, "\n")
+}
+
+// buildBreakGuard reports whether kloo treats a broken build as urgent
+// (KLOO_BUILD_BREAK_GUARD=1): it demands an immediate repair edit, and it refuses
+// to leave the tree unbuildable at the end of a failed run.
+func buildBreakGuard() bool { return envOnAgent("KLOO_BUILD_BREAK_GUARD") }
+
+// verifyTestImports lists the source files the verify command's test files import.
+//
+// Measured on kloo-bench A33: kloo edited `thirteenth-month.ts` four times, twice
+// identically, and churned out with one assertion red. grok passed by changing
+// THREE files — the computation, the repository query, and the resolver that
+// passes the group id. kloo never edited a resolver in any run. Telling it what
+// the failing test actually pulls in is the difference between "edit something"
+// and "edit the right thing".
+func (l *Loop) verifyTestImports() []string {
+	// Its OWN flag, not KLOO_VERIFY_AUTHORITY's. Measured: it helped A16 on one rep
+	// of two and did nothing for A33, the case it was designed from. That is not a
+	// result, and folding an unproven change into a proven flag would make both
+	// unmeasurable later.
+	if !envOnAgent("KLOO_SAME_FAILURE_REDIRECT") || strings.TrimSpace(l.VerifyCmd) == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, tok := range strings.Fields(l.VerifyCmd) {
+		tok = strings.Trim(tok, "\"'")
+		if tok == "" || strings.HasPrefix(tok, "-") || !strings.Contains(tok, ".") ||
+			strings.Contains(tok, "config") {
+			continue
+		}
+		for _, f := range l.importsOf(tok) {
+			if !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
+		}
+		if len(out) >= 10 {
+			break
+		}
+	}
+	return out
+}
+
+// importsOf returns the workspace files a test file imports, so a refused edit can
+// point at the code instead of just saying no. Best-effort: anything it cannot
+// resolve to a real file is dropped rather than guessed at.
+func (l *Loop) importsOf(rel string) []string {
+	if rel == "" || l.Root == "" {
+		return nil
+	}
+	ws, err := tools.NewWorkspace(l.Root)
+	if err != nil {
+		return nil
+	}
+	src, err := tools.ReadFile(ws, rel)
+	if err != nil {
+		return nil
+	}
+	dir := path.Dir(rel)
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range importPattern.FindAllStringSubmatch(src, -1) {
+		spec := m[1]
+		if spec == "" || !strings.HasPrefix(spec, ".") {
+			continue // a package, not a file in this repo
+		}
+		base := path.Clean(path.Join(dir, spec))
+		for _, ext := range []string{"", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.js"} {
+			cand := base + ext
+			if seen[cand] {
+				break
+			}
+			if _, rerr := tools.ReadFile(ws, cand); rerr == nil {
+				seen[cand] = true
+				out = append(out, cand)
+				break
+			}
+		}
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
+// importPattern matches `from '…'` and `require('…')` specifiers.
+var importPattern = regexp.MustCompile(`(?:from|require\()\s*['"]([^'"]+)['"]`)
+
+// failingAssertions pulls the names of the tests that are still failing out of a
+// verify output, for the edit corrective to aim the model at.
+//
+// Measured on kloo-bench A33: kloo made ONE edit, then read sixteen more times
+// against a rail that refused every one of them, and stopped with a single
+// assertion still red. grok passed the same case with a THREE-file change. The
+// rail was pushing as hard as it could; what it never did was say WHAT was still
+// broken. "Make your best edit to the file you believe is wrong" is no help to a
+// model that does not know which file that is.
+func failingAssertions(out string) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		l := strings.TrimSpace(stripANSI(line))
+		// vitest marks failures with × / ✕ / "FAIL"; take the test name that follows.
+		var name string
+		switch {
+		case strings.HasPrefix(l, "×"), strings.HasPrefix(l, "✕"):
+			name = strings.TrimSpace(strings.TrimLeft(l, "×✕ "))
+		case strings.HasPrefix(l, "FAIL"):
+			name = strings.TrimSpace(strings.TrimPrefix(l, "FAIL"))
+		default:
+			continue
+		}
+		if i := strings.Index(name, " "); i > 0 && strings.Contains(name[:i], "/") {
+			name = strings.TrimSpace(name[i:]) // drop a leading file path
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if names = append(names, name); len(names) >= 4 {
+			break
+		}
+	}
+	return names
+}
+
+// stripANSI removes the colour escapes vitest writes, so assertion names match.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// maxEmptyTurnRecoveries bounds how many exhausted-retry empty completions a run
+// will absorb before the error becomes fatal. Small: a genuinely broken model
+// must still stop, and each recovery costs one round-trip.
+const maxEmptyTurnRecoveries = 3
+
+// emptyTurnRecovery reports whether an exhausted empty completion is recoverable
+// (KLOO_EMPTY_TURN_RECOVERY=1) rather than fatal.
+func emptyTurnRecovery() bool { return envOnAgent("KLOO_EMPTY_TURN_RECOVERY") }
+
+// errProtectedPath marks an edit aimed at a file the verify command names.
+var errProtectedPath = errors.New("agent: file is part of the verify command")
+
+// protectedByVerify reports whether path is one of the files the verify command
+// names. Gated on KLOO_PROTECT_VERIFY_PATHS so the released behaviour is unchanged
+// until measured; a task that legitimately asks for a change to a file its own
+// verify command names would otherwise be blocked.
+func (l *Loop) protectedByVerify(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || !envOnAgent("KLOO_PROTECT_VERIFY_PATHS") {
+		return false
+	}
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	for _, tok := range strings.Fields(l.VerifyCmd) {
+		tok = strings.Trim(tok, "\"'")
+		if tok == "" || strings.HasPrefix(tok, "-") {
+			continue
+		}
+		// Compare on the file name, because the verify command's paths are relative
+		// to the gate's working directory and the edit's are relative to the
+		// workspace root; on this bench those two differ by a leading component.
+		tb := tok
+		if i := strings.LastIndex(tb, "/"); i >= 0 {
+			tb = tb[i+1:]
+		}
+		if tb == base && strings.Contains(tok, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// errEditOnlyTurn marks a non-edit call the force-edit rail refused to dispatch.
+var errEditOnlyTurn = errors.New("agent: tool withheld on a forced-edit turn")
 
 // clobberMinBytes is the size at/above which an existing file is "substantial" enough
 // to guard from a blind shrinking overwrite. Below it, a file is cheap to recreate and
