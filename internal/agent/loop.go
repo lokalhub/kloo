@@ -909,7 +909,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// something, a stuck model reaches for the file it has most recently read,
 			// which is the failing test.
 			derr = errProtectedPath
-		case l.editOnlyLeft > 0 && !isEditTool(call.Name) && !(call.Name == tools.NameFinish && lastVerify.Passed):
+		case l.editOnlyLeft > 0 && !isEditTool(call.Name) &&
+			!(call.Name == tools.NameFinish && lastVerify.Passed) &&
+			!coversNewGround(call, seenTargets):
+			// NOT refused when the call covers NEW GROUND. kloo learned this the hard
+			// way in v0.17.1: an over-eager explore rail stopped runs at 16 read-only
+			// steps with nothing written, and reading a file not yet seen is
+			// exploration working, not spinning (TestExploreRailAllowsManyDistinctReads
+			// pins it). The spin worth refusing is RE-reading what the model has
+			// already seen, which is what every trace behind this rail actually shows:
+			// C66 re-read one file until a rail killed the run; A05 logged 10 repeated
+			// reads.
+			//
 			// FORCE-EDIT RAIL. Withheld tools stay dispatchable so a stray call is
 			// never an unrecoverable unknown-tool error — but "dispatchable" must not
 			// mean "executed", or the restriction has no teeth at all. Measured on
@@ -2126,11 +2137,11 @@ func editCorrective(n int, edited bool, failing, exercises []string) llm.Message
 
 // editRail reports whether the no-edit explore nudge demands an edit
 // (KLOO_EDIT_RAIL=1). Off by default.
-func editRail() bool { return envOnAgent("KLOO_EDIT_RAIL") }
+func editRail() bool { return envOnDefault("KLOO_EDIT_RAIL") }
 
 // forceEdit reports whether a repeated no-edit explore nudge also WITHHOLDS the
 // read tools for that turn (KLOO_FORCE_EDIT=1). Off by default.
-func forceEdit() bool { return envOnAgent("KLOO_FORCE_EDIT") }
+func forceEdit() bool { return envOnDefault("KLOO_FORCE_EDIT") }
 
 // turnRegistry is the vocabulary advertised for the turn being built: the full
 // registry, or the edit-only view when the force-edit rail armed it. One turn
@@ -2152,13 +2163,9 @@ const editOnlyBudget = 3
 // envOnDefault reports whether a DEFAULT-ON behaviour is still enabled: the
 // opt-OUT twin of envOnAgent, active unless the variable is explicitly falsy.
 //
-// Unused for now, deliberately. Flipping the seven validated fixes to default-on
-// breaks kloo's EXISTING tests — TestIntegrationRollbackCleanRepo,
-// TestIntegrationChurn and the explore-rail tests all pin the current semantics,
-// above all "a non-success run rolls back the tree". That is a deliberate safety
-// decision, and a benchmark result is not grounds to overwrite it silently. The
-// default flip belongs in its own reviewed change; this helper is what it will
-// use.
+// Used by the seven convergence rails (v0.22.0). They ship ON: each one removes a
+// way kloo lost work or refused to act, and shipping them off was shipping the
+// defect. `KLOO_<NAME>=0` restores the previous behaviour for any of them.
 func envOnDefault(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "0", "false", "no", "off":
@@ -2309,7 +2316,7 @@ func editAnchorOf(call tools.Call) string {
 // only thing that helps is telling it, at the moment it happens, that the green it
 // is looking at is not the green it is graded on.
 func (l *Loop) subsetTestWarning(call tools.Call, res tools.Result, derr error) string {
-	if !envOnAgent("KLOO_VERIFY_AUTHORITY") || derr != nil || res.ExitCode != 0 {
+	if !envOnDefault("KLOO_VERIFY_AUTHORITY") || derr != nil || res.ExitCode != 0 {
 		return ""
 	}
 	if call.Name != tools.NameRunCommand || strings.TrimSpace(l.VerifyCmd) == "" {
@@ -2390,7 +2397,7 @@ func (l *Loop) shouldRollback(reason Reason, last VerifyResult) bool {
 	if reason == ReasonSuccess {
 		return false
 	}
-	if !envOnAgent("KLOO_KEEP_WORK_ON_FAIL") {
+	if !envOnDefault("KLOO_KEEP_WORK_ON_FAIL") {
 		return true // stock behaviour: any non-success exit rolls back
 	}
 	switch reason {
@@ -2461,7 +2468,7 @@ func buildBreak(out string) (bool, string) {
 // buildBreakGuard reports whether kloo treats a broken build as urgent
 // (KLOO_BUILD_BREAK_GUARD=1): it demands an immediate repair edit, and it refuses
 // to leave the tree unbuildable at the end of a failed run.
-func buildBreakGuard() bool { return envOnAgent("KLOO_BUILD_BREAK_GUARD") }
+func buildBreakGuard() bool { return envOnDefault("KLOO_BUILD_BREAK_GUARD") }
 
 // verifyTestImports lists the source files the verify command's test files import.
 //
@@ -2605,7 +2612,7 @@ const maxEmptyTurnRecoveries = 3
 
 // emptyTurnRecovery reports whether an exhausted empty completion is recoverable
 // (KLOO_EMPTY_TURN_RECOVERY=1) rather than fatal.
-func emptyTurnRecovery() bool { return envOnAgent("KLOO_EMPTY_TURN_RECOVERY") }
+func emptyTurnRecovery() bool { return envOnDefault("KLOO_EMPTY_TURN_RECOVERY") }
 
 // errProtectedPath marks an edit aimed at a file the verify command names.
 var errProtectedPath = errors.New("agent: file is part of the verify command")
@@ -2616,7 +2623,7 @@ var errProtectedPath = errors.New("agent: file is part of the verify command")
 // verify command names would otherwise be blocked.
 func (l *Loop) protectedByVerify(path string) bool {
 	path = strings.TrimSpace(path)
-	if path == "" || !envOnAgent("KLOO_PROTECT_VERIFY_PATHS") {
+	if path == "" || !envOnDefault("KLOO_PROTECT_VERIFY_PATHS") {
 		return false
 	}
 	base := path
@@ -2635,11 +2642,42 @@ func (l *Loop) protectedByVerify(path string) bool {
 		if i := strings.LastIndex(tb, "/"); i >= 0 {
 			tb = tb[i+1:]
 		}
-		if tb == base && strings.Contains(tok, ".") {
+		if tb == base && strings.Contains(tok, ".") && looksLikeTestFile(tok) {
 			return true
 		}
 	}
 	return false
+}
+
+// coversNewGround reports whether a read-only call targets something this run has
+// not seen. The force-edit rail lets those through: refusing them would punish
+// legitimate exploration, which is the failure mode that made kloo relax this rail
+// in the first place.
+func coversNewGround(call tools.Call, seen map[string]bool) bool {
+	sig := exploreSignature(call)
+	return sig != "" && !seen[sig]
+}
+
+// looksLikeTestFile reports whether a path named by the verify command is a TEST,
+// as opposed to a file the task is supposed to produce.
+//
+// The protection exists to stop an agent editing the spec it is graded against. It
+// must NOT stop it writing a deliverable that the verify command happens to
+// mention: a verify of `grep -qx right answer.txt` names answer.txt, which is
+// exactly the file the task must create. Measured by kloo's own suite —
+// TestHeadlessWiresMCPNonFatal and four others churned to a halt with every
+// write_file refused, because the guard matched the goal file.
+func looksLikeTestFile(path string) bool {
+	p := strings.ToLower(path)
+	for _, marker := range []string{
+		".test.", ".spec.", "_test.go", "_test.py", "test_",
+		"/tests/", "/test/", "/__tests__/", "/spec/",
+	} {
+		if strings.Contains(p, marker) {
+			return true
+		}
+	}
+	return strings.HasPrefix(p, "tests/") || strings.HasPrefix(p, "test/") || strings.HasPrefix(p, "spec/")
 }
 
 // errEditOnlyTurn marks a non-edit call the force-edit rail refused to dispatch.

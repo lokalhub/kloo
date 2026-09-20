@@ -22,20 +22,24 @@ func TestVerifyNamedFilesAreProtected(t *testing.T) {
 	if l.protectedByVerify("src/modules-v2/payroll/payroll-engine.ts") {
 		t.Fatal("a source file was protected — the run could never make progress")
 	}
-	// The config file is named in the command too and is not a place to fix code,
-	// but it IS named, so protecting it is correct and harmless.
-	if !l.protectedByVerify("vitest.config.ts") {
-		t.Fatal("a named config file was not protected")
+	// A config file is NOT a test, and protecting it was over-reach: the guard must
+	// only shield the spec being graded against.
+	if l.protectedByVerify("vitest.config.ts") {
+		t.Fatal("a config file was protected — it is not a spec")
 	}
 }
 
 // TestProtectionIsOptIn: a task may legitimately ask for a change to a file its
 // own verify command names, so the released behaviour must be unchanged.
-func TestProtectionIsOptIn(t *testing.T) {
+func TestProtectionIsOptOut(t *testing.T) {
 	t.Setenv("KLOO_PROTECT_VERIFY_PATHS", "")
 	l := &Loop{VerifyCmd: "go test ./foo_test.go"}
+	if !l.protectedByVerify("foo_test.go") {
+		t.Fatal("protection should be ON by default (v0.22.0)")
+	}
+	t.Setenv("KLOO_PROTECT_VERIFY_PATHS", "0")
 	if l.protectedByVerify("foo_test.go") {
-		t.Fatal("protection active with the flag off")
+		t.Fatal("KLOO_PROTECT_VERIFY_PATHS=0 must restore the previous behaviour")
 	}
 }
 
@@ -47,6 +51,42 @@ func TestFlagsAndSwitchesAreNotPaths(t *testing.T) {
 	for _, notAPath := range []string{"run", "--config", "npx", "vitest"} {
 		if l.protectedByVerify(notAPath) {
 			t.Fatalf("%q was treated as a protected path", notAPath)
+		}
+	}
+}
+
+// TestDeliverableNamedByVerifyIsNotProtected: the bug this guard shipped with.
+// kloo's own suite (TestHeadlessWiresMCPNonFatal and four others) churned to a
+// halt with EVERY write_file refused, because the verify command was
+// `grep -qx right answer.txt` and the guard matched answer.txt — the very file the
+// task had to create. A verify command naming a file does not make that file a
+// spec.
+func TestDeliverableNamedByVerifyIsNotProtected(t *testing.T) {
+	t.Setenv("KLOO_PROTECT_VERIFY_PATHS", "1")
+	l := &Loop{VerifyCmd: "grep -qx right answer.txt"}
+	if l.protectedByVerify("answer.txt") {
+		t.Fatal("the deliverable was protected — the run can never succeed")
+	}
+	for _, notATest := range []string{"README.md", "src/main.go", "dist/out.js", "vitest.config.ts"} {
+		if l.protectedByVerify(notATest) {
+			t.Fatalf("%q was protected", notATest)
+		}
+	}
+}
+
+// TestTestFileShapesRecognised: the shapes that ARE specs, across ecosystems.
+func TestTestFileShapesRecognised(t *testing.T) {
+	for _, p := range []string{
+		"tests/a.test.ts", "src/x.spec.ts", "pkg/thing_test.go",
+		"app/__tests__/y.ts", "spec/z.rb", "test/legacy.js", "tests/deep/nested.test.tsx",
+	} {
+		if !looksLikeTestFile(p) {
+			t.Fatalf("%q not recognised as a test file", p)
+		}
+	}
+	for _, p := range []string{"answer.txt", "src/service.ts", "vitest.config.ts", "latest.json"} {
+		if looksLikeTestFile(p) {
+			t.Fatalf("%q wrongly recognised as a test file", p)
 		}
 	}
 }

@@ -44,7 +44,12 @@ func TestLoopExplorationRailStopsTheSpin(t *testing.T) {
 	}
 	var nudged bool
 	for _, m := range rep.Transcript {
-		if strings.Contains(m.Content, "without making any change") {
+		// The edit rail (default ON from v0.22.0) words this as "without changing a
+		// single line"; the pre-rail wording was "without making any change". Either
+		// satisfies what this test is actually about: the model is nudged to act
+		// before the rail aborts.
+		if strings.Contains(m.Content, "without making any change") ||
+			strings.Contains(m.Content, "without changing a single line") {
 			nudged = true
 		}
 	}

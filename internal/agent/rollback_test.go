@@ -42,12 +42,33 @@ func TestSuccessNeverRollsBack(t *testing.T) {
 
 // TestStockBehaviourUnchanged: with the flag off, every non-success exit rolls
 // back exactly as the released binary does.
-func TestStockBehaviourUnchanged(t *testing.T) {
-	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "")
+func TestKeepWorkCanBeDisabled(t *testing.T) {
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	l := &Loop{}
 	for _, r := range []Reason{ReasonAnswered, ReasonChurn, ReasonError, ReasonExploreStop} {
 		if !l.shouldRollback(r, VerifyResult{}) {
-			t.Fatalf("%s did not roll back with the flag off", r)
+			t.Fatalf("%s did not roll back with KLOO_KEEP_WORK_ON_FAIL=0", r)
+		}
+	}
+}
+
+// TestKeepWorkOnFailIsTheDefault: from v0.22.0 a run that merely ran out of road
+// keeps what it wrote. This is the behaviour the four rollback integration tests
+// used to assert the opposite of, and it is the change with the widest blast
+// radius in the release — it is pinned here explicitly so nobody flips it back by
+// accident.
+func TestKeepWorkOnFailIsTheDefault(t *testing.T) {
+	l := &Loop{}
+	red := VerifyResult{Command: "vitest", Passed: false, Stdout: "AssertionError: expected 3 to be 4"}
+	for _, r := range []Reason{ReasonAnswered, ReasonChurn, ReasonExploreStop, ReasonBudgetExceeded, ReasonUnverified} {
+		if l.shouldRollback(r, red) {
+			t.Fatalf("%s discarded the run's work under the v0.22.0 default", r)
+		}
+	}
+	// The tree is still restored when it cannot be trusted.
+	for _, r := range []Reason{ReasonError, ReasonInterrupted, ReasonSafetyStop} {
+		if !l.shouldRollback(r, red) {
+			t.Fatalf("%s left a possibly-broken tree in place", r)
 		}
 	}
 }

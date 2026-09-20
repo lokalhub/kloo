@@ -13,14 +13,14 @@ func TestEmptyTurnRecoveryIsBounded(t *testing.T) {
 
 // TestEmptyTurnRecoveryIsOptIn: until the bench says otherwise, an exhausted empty
 // completion ends the run exactly as it does today.
-func TestEmptyTurnRecoveryIsOptIn(t *testing.T) {
+func TestEmptyTurnRecoveryIsOptOut(t *testing.T) {
 	t.Setenv("KLOO_EMPTY_TURN_RECOVERY", "")
-	if emptyTurnRecovery() {
-		t.Fatal("recovery active with the flag off")
-	}
-	t.Setenv("KLOO_EMPTY_TURN_RECOVERY", "1")
 	if !emptyTurnRecovery() {
-		t.Fatal("flag not honoured")
+		t.Fatal("recovery should be ON by default (v0.22.0)")
+	}
+	t.Setenv("KLOO_EMPTY_TURN_RECOVERY", "0")
+	if emptyTurnRecovery() {
+		t.Fatal("KLOO_EMPTY_TURN_RECOVERY=0 must restore the previous behaviour")
 	}
 }
 

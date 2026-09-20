@@ -54,12 +54,12 @@ func TestUnbuildableTreeIsRolledBackEvenWhenKeepingWork(t *testing.T) {
 }
 
 // TestBuildBreakGuardIsOptIn.
-func TestBuildBreakGuardIsOptIn(t *testing.T) {
+func TestBuildBreakGuardIsOptOut(t *testing.T) {
 	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "1")
-	t.Setenv("KLOO_BUILD_BREAK_GUARD", "")
+	t.Setenv("KLOO_BUILD_BREAK_GUARD", "0")
 	l := &Loop{}
 	broken := VerifyResult{Command: "vitest", Passed: false, Stdout: a05Output}
 	if l.shouldRollback(ReasonExploreStop, broken) {
-		t.Fatal("guard active with the flag off")
+		t.Fatal("KLOO_BUILD_BREAK_GUARD=0 must restore the previous behaviour")
 	}
 }

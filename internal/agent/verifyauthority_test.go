@@ -64,10 +64,14 @@ func TestFailingCommandIsNotCalledOut(t *testing.T) {
 }
 
 // TestVerifyAuthorityIsOptIn.
-func TestVerifyAuthorityIsOptIn(t *testing.T) {
+func TestVerifyAuthorityIsOptOut(t *testing.T) {
 	t.Setenv("KLOO_VERIFY_AUTHORITY", "")
 	l := &Loop{VerifyCmd: "npx vitest run tests/a.test.ts tests/b.test.ts"}
+	if w := l.subsetTestWarning(cmdCall("npx vitest run tests/a.test.ts"), tools.Result{ExitCode: 0}, nil); w == "" {
+		t.Fatal("should be ON by default (v0.22.0)")
+	}
+	t.Setenv("KLOO_VERIFY_AUTHORITY", "0")
 	if w := l.subsetTestWarning(cmdCall("npx vitest run tests/a.test.ts"), tools.Result{ExitCode: 0}, nil); w != "" {
-		t.Fatal("active with the flag off")
+		t.Fatal("KLOO_VERIFY_AUTHORITY=0 must restore the previous behaviour")
 	}
 }

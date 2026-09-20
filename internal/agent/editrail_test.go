@@ -30,14 +30,14 @@ func TestEditCorrectiveDemandsAnEdit(t *testing.T) {
 
 // TestEditRailIsOptIn: off by default, so a released run's rail wording is
 // unchanged until the bench says otherwise.
-func TestEditRailIsOptIn(t *testing.T) {
+func TestEditRailIsOptOut(t *testing.T) {
 	t.Setenv("KLOO_EDIT_RAIL", "")
-	if editRail() {
-		t.Fatal("edit rail on by default")
-	}
-	t.Setenv("KLOO_EDIT_RAIL", "1")
 	if !editRail() {
-		t.Fatal("edit rail flag not honoured")
+		t.Fatal("edit rail should be ON by default (v0.22.0)")
+	}
+	t.Setenv("KLOO_EDIT_RAIL", "0")
+	if editRail() {
+		t.Fatal("KLOO_EDIT_RAIL=0 must restore the previous behaviour")
 	}
 }
 

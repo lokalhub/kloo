@@ -159,6 +159,11 @@ func TestIntegrationBudgetExceeded(t *testing.T) {
 
 // 3) churn: the same failing edit repeated halts via churn within N rounds.
 func TestIntegrationChurn(t *testing.T) {
+	// This test is about the ROLLBACK MACHINERY, which still exists and still fires
+	// for untrustworthy outcomes. From v0.22.0 a run that merely ran out of road
+	// KEEPS its work, so pin the pre-v0.22.0 semantics here; the new default is
+	// covered by TestKeepWorkOnFailIsTheDefault.
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	root := seedRepo(t)
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: writeFileCall(t, "still-wrong\n", "")}) // same edit every turn
 	cfg := config.Config{MaxSteps: 100, ChurnRounds: 2}
@@ -183,6 +188,11 @@ func TestIntegrationChurn(t *testing.T) {
 // 4a) rollback-on-abort, CLEAN repo: a budget abort after an edit restores the
 // committed state.
 func TestIntegrationRollbackCleanRepo(t *testing.T) {
+	// This test is about the ROLLBACK MACHINERY, which still exists and still fires
+	// for untrustworthy outcomes. From v0.22.0 a run that merely ran out of road
+	// KEEPS its work, so pin the pre-v0.22.0 semantics here; the new default is
+	// covered by TestKeepWorkOnFailIsTheDefault.
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	root := seedRepo(t)
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: writeFileCall(t, "loop-edit\n", "")})
 	cfg := config.Config{MaxSteps: 1, ChurnRounds: 100} // one edit, then budget trips
@@ -203,6 +213,11 @@ func TestIntegrationRollbackCleanRepo(t *testing.T) {
 // 4b) rollback-on-abort, DIRTY repo: a pre-existing uncommitted change survives
 // the rollback; only the loop's edit is reverted.
 func TestIntegrationRollbackDirtyRepo(t *testing.T) {
+	// This test is about the ROLLBACK MACHINERY, which still exists and still fires
+	// for untrustworthy outcomes. From v0.22.0 a run that merely ran out of road
+	// KEEPS its work, so pin the pre-v0.22.0 semantics here; the new default is
+	// covered by TestKeepWorkOnFailIsTheDefault.
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	root := seedRepo(t)
 	// Pre-existing uncommitted user change.
 	writeFile(t, filepath.Join(root, "answer.txt"), "user-dirty\n")
@@ -276,6 +291,11 @@ func TestIntegrationRepairThenApply(t *testing.T) {
 // infinite loop. At most MaxRepairAttempts (2) enriched observations appear, the
 // verify never goes green (file unchanged), and the abort rolls back.
 func TestIntegrationRepairBounded(t *testing.T) {
+	// This test is about the ROLLBACK MACHINERY, which still exists and still fires
+	// for untrustworthy outcomes. From v0.22.0 a run that merely ran out of road
+	// KEEPS its work, so pin the pre-v0.22.0 semantics here; the new default is
+	// covered by TestKeepWorkOnFailIsTheDefault.
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	root := seedRepo(t)
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: editFileCall(t, "answer.txt", "DOESNOTMATCH\n", "right\n", 50)})
 	cfg := config.Config{MaxSteps: 100, ChurnRounds: 2}

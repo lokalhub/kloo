@@ -71,6 +71,9 @@ func TestRescueHandoffAtTheRailKeepsTheChildsFix(t *testing.T) {
 // before — explore-stop, and the rollback that implies.
 func TestRescueHandoffOffByDefault(t *testing.T) {
 	t.Setenv("KLOO_DELEGATE_ON_STOP", "")
+	// Asserts a rollback, so it pins pre-v0.22.0 keep-work semantics (see
+	// TestKeepWorkOnFailIsTheDefault for the new default).
+	t.Setenv("KLOO_KEEP_WORK_ON_FAIL", "0")
 	loop, ck := rescueScenario(t)
 	rep, err := loop.Run(context.Background(), "fix it")
 	if err != nil {

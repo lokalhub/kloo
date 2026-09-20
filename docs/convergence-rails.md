@@ -1,8 +1,8 @@
 # Convergence rails
 
 Seven behaviours that stop kloo defeating itself on a task it can otherwise do.
-All are **opt-in** via environment variables while their defaults are decided
-separately (see "Defaults", below).
+**They are ON by default** as of v0.22.0. Any one can be disabled with
+`KLOO_<NAME>=0`.
 
 Measured on [kloo-bench](https://github.com/lokalhub/kloo-bench) against
 `muse-glimmer-30b`, paired against grok 1.0.34 on the same model and endpoint:
@@ -79,21 +79,46 @@ compile, even under `KLOO_KEEP_WORK_ON_FAIL`.
 test runner collected ZERO tests, and kloo read sixteen more times without
 repairing it.
 
-## Recommended set
+## Defaults and how to turn one off
+
+All seven are ON from v0.22.0. To restore the previous behaviour for any of them:
 
 ```sh
-export KLOO_EDIT_RAIL=1 KLOO_FORCE_EDIT=1 KLOO_PROTECT_VERIFY_PATHS=1 \
-       KLOO_VERIFY_AUTHORITY=1 KLOO_EMPTY_TURN_RECOVERY=1 \
-       KLOO_KEEP_WORK_ON_FAIL=1 KLOO_BUILD_BREAK_GUARD=1
+KLOO_KEEP_WORK_ON_FAIL=0 kloo "..."     # roll back on ANY non-success exit
 ```
 
-## Defaults
+### The one with real blast radius
 
-They ship OFF. Flipping them on breaks kloo's existing tests — above all
-`TestIntegrationRollbackCleanRepo` and `TestIntegrationChurn`, which pin "a
-non-success run rolls back the tree". That is a deliberate safety decision, and a
-benchmark result is not grounds to overwrite it silently. `envOnDefault` exists and
-is tested for whoever makes that call.
+`KLOO_KEEP_WORK_ON_FAIL` changes what kloo leaves on disk after a run that did not
+succeed. Before v0.22.0 kloo restored the tree on every non-success exit; now it
+restores only when the tree cannot be trusted — an internal error, an interrupt, a
+safety stop, or a final state that does not compile. A run that hit its step budget
+or churned **leaves its edits in place**.
+
+That is the better default for a developer (you want the diff, not an empty tree,
+and your work is in git anyway), and it is worth a large amount on the benchmark —
+kloo was erasing fixes that were already correct. But it IS a behaviour change, and
+`=0` restores the old contract exactly.
+
+### Two corrections made when the defaults were flipped
+
+Turning the flags on ran them against kloo's whole suite for the first time and
+found two real problems:
+
+1. **`KLOO_PROTECT_VERIFY_PATHS` blocked deliverables.** A verify command of
+   `grep -qx right answer.txt` names `answer.txt` — the file the task must create —
+   and the guard refused every write to it, churning the run. It now only protects
+   paths that actually look like tests (`.test.`, `.spec.`, `_test.go`, `tests/`,
+   `__tests__/`, …). Config files named by a verify command are no longer protected
+   either; they are not specs.
+2. **`KLOO_FORCE_EDIT` punished legitimate exploration.** It refused read-only calls
+   after a nudge regardless of whether they covered new ground, which is exactly the
+   over-eager behaviour kloo removed in v0.17.1 (`TestExploreRailAllowsManyDistinctReads`
+   pins the lesson). It now lets a read of something not yet seen through, and
+   refuses only RE-reads — which is what every trace behind the rail actually shows.
+
+Neither was visible while the flags were opt-in. Flipping the defaults was worth it
+for that alone.
 
 ## Measured and REJECTED
 
