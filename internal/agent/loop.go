@@ -902,6 +902,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			derr     error
 			before   string
 			beforeOK bool
+			noOpEdit bool // the edit applied cleanly but the file is byte-identical
 		)
 		if isEditTool(call.Name) {
 			before, beforeOK = l.currentFileContents(str(call.Args["path"]))
@@ -1043,6 +1044,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				if beforeOK {
 					if after, ok := l.currentFileContents(str(call.Args["path"])); ok && after == before {
 						counters.NoOpEdits++
+						noOpEdit = true
 					}
 				}
 			} else {
@@ -1103,6 +1105,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if w := l.subsetTestWarning(call, result, derr); w != "" {
 			convo = append(convo, obs)
 			obs = llm.Message{Role: llm.RoleUser, Content: w}
+		}
+		// A NO-OP EDIT REPORTED AS SUCCESS is a trap. kloo counted these and said
+		// nothing: the tool returned "edited <path>" while the file was unchanged, so
+		// the model believed its fix had landed, saw the test still failing, concluded
+		// the cause was elsewhere, and repeated the same edit until the churn rail
+		// killed the run.
+		//
+		// Measured on kloo-bench A16 across 19 runs: EVERY failure had
+		// repeated_edits=2 with no_op_edits 3-4 and ended in churn; NO passing run had
+		// either counter. That is the whole difference between kloo's 4/8 and grok's
+		// 8/8 on that case.
+		if noOpEdit && noOpFeedback() {
+			obs = llm.Message{Role: llm.RoleUser, Content: "That edit applied but changed NOTHING — the file is " +
+				"byte-for-byte identical to before. Your replacement text must already match what was there. " +
+				"Do not repeat it. Re-read the region you are targeting and make a DIFFERENT change, or edit a " +
+				"different file: the behaviour you are trying to alter is not controlled by the text you just " +
+				"replaced."}
 		}
 		if errors.Is(derr, errProtectedPath) {
 			target := str(call.Args["path"])
@@ -2728,6 +2747,10 @@ func coversNewGround(call tools.Call, seen map[string]bool) bool {
 	sig := exploreSignature(call)
 	return sig != "" && !seen[sig]
 }
+
+// noOpFeedback reports whether an edit that changed nothing is surfaced to the
+// model rather than silently counted (KLOO_NOOP_EDIT_FEEDBACK=1).
+func noOpFeedback() bool { return envOnAgent("KLOO_NOOP_EDIT_FEEDBACK") }
 
 // looksLikeTestFile reports whether a path named by the verify command is a TEST,
 // as opposed to a file the task is supposed to produce.
