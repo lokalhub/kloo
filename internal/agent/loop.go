@@ -561,6 +561,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	}
 
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
+	// One-time, at step 0: show the test this run is graded against. See
+	// failingTestSource — the brief names the test but never shows it, which is
+	// circular when the required behaviour IS the bug.
+	if td := l.Registry.Todos(); td != nil {
+		_ = td // the list is pinned per-turn below; nothing to seed at step 0
+	}
+	if ts := l.failingTestSource(); ts != "" {
+		convo = append(convo, llm.Message{Role: llm.RoleUser, Content: ts})
+	}
 	var (
 		snap        Snapshot
 		triedCkpt   bool
@@ -1677,6 +1686,14 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		hist = boundedHistory(convo, l.maxConv())
 	}
 
+	// Pin the task list, if one is in use: a list the model cannot see every turn
+	// is not a task list. Cheap (a few lines) and regenerated per turn like the
+	// other pins.
+	if td := l.Registry.Todos(); td != nil {
+		if r := td.Render(); r != "" {
+			tailMsgs = append(tailMsgs, llm.Message{Role: llm.RoleUser, Content: r})
+		}
+	}
 	msgs := append([]llm.Message{sys}, hist...)
 	// Appended AFTER history, never spliced into it: a tool result must stay
 	// adjacent to the assistant message that requested it.
@@ -2469,6 +2486,60 @@ func buildBreak(out string) (bool, string) {
 // (KLOO_BUILD_BREAK_GUARD=1): it demands an immediate repair edit, and it refuses
 // to leave the tree unbuildable at the end of a failed run.
 func buildBreakGuard() bool { return envOnDefault("KLOO_BUILD_BREAK_GUARD") }
+
+// failingTestSource returns the content of the test files the verify command
+// names, for a one-time injection at the start of a run (KLOO_SHOW_FAILING_TEST).
+//
+// The brief names the failing test file but never shows it, so the model has to
+// infer the required behaviour from the source it is trying to fix — which is
+// circular when the bug IS the behaviour. Measured on kloo-bench C17: kloo failed
+// 3 of 4 runs with ZERO edits, searching 17-30 times without ever writing a line,
+// and the real fix is a subtle VAT accounting rule (exempt-discount handling,
+// tax-corroboration) that cannot be derived from the broken code. The test states
+// the rule outright.
+//
+// This is the plan's §5.4 lead "feed the failing test's content", which was never
+// tested. It is NOT the same as the step-0 verify experiment (net -2), which fed
+// the test's OUTPUT rather than its SOURCE.
+func (l *Loop) failingTestSource() string {
+	if !envOnAgent("KLOO_SHOW_FAILING_TEST") || strings.TrimSpace(l.VerifyCmd) == "" || l.Root == "" {
+		return ""
+	}
+	ws, err := tools.NewWorkspace(l.Root)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	shown := 0
+	for _, tok := range strings.Fields(l.VerifyCmd) {
+		tok = strings.Trim(tok, "\"'")
+		if tok == "" || strings.HasPrefix(tok, "-") || !strings.Contains(tok, ".") ||
+			strings.Contains(tok, "config") || !looksLikeTestFile(tok) {
+			continue
+		}
+		src, rerr := tools.ReadFile(ws, tok)
+		if rerr != nil || strings.TrimSpace(src) == "" {
+			continue
+		}
+		if n := strings.Count(src, "\n"); n > showTestMaxLines {
+			lines := strings.Split(src, "\n")[:showTestMaxLines]
+			src = strings.Join(lines, "\n") + fmt.Sprintf("\n… (%d more lines — read_file this path for the rest)", n-showTestMaxLines)
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", tok, src)
+		if shown++; shown >= 2 {
+			break
+		}
+	}
+	if shown == 0 {
+		return ""
+	}
+	return "This is the test your work is graded against. It states the behaviour required; " +
+		"the source you are fixing does not. Do NOT edit it — make the code satisfy it.\n" + b.String()
+}
+
+// showTestMaxLines bounds the injected test so a large suite cannot swallow the
+// window; the model can read_file the rest.
+const showTestMaxLines = 400
 
 // verifyTestImports lists the source files the verify command's test files import.
 //

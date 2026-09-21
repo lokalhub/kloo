@@ -105,6 +105,17 @@ type Registry struct {
 	order []string
 	tools map[string]Tool
 	bg    *BackgroundManager // long-running commands started this run; nil ⇒ none
+	todos *TodoList          // grok-style task list; nil unless KLOO_TODO_WRITE is on
+}
+
+// Todos returns the run's task list, or nil when the tool is not offered. The loop
+// pins its rendering so the list stays visible across turns — a list the model
+// cannot see is not a task list.
+func (r *Registry) Todos() *TodoList {
+	if r == nil {
+		return nil
+	}
+	return r.todos
 }
 
 // StopBackground kills every background command started through this registry. The
@@ -179,7 +190,7 @@ func (r *Registry) EditOnlyView(allowFinish bool) *Registry {
 	if allowFinish {
 		keep[NameFinish] = true
 	}
-	out := &Registry{tools: r.tools, bg: r.bg}
+	out := &Registry{tools: r.tools, bg: r.bg, todos: r.todos}
 	for _, name := range r.order {
 		if keep[name] {
 			out.order = append(out.order, name)

@@ -275,6 +275,14 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	} else {
 		r.Register(NewRunCommandTool(ws, append(opts, WithBackground(bg))...))
 	}
+	// KLOO_TODO_WRITE=1 offers grok's task-list tool. It is the ONE substantive
+	// capability in grok's captured 26-tool surface that kloo has no equivalent
+	// for; everything else is either irrelevant to a headless fix-the-test task or
+	// already present under another name.
+	if envOn("KLOO_TODO_WRITE") {
+		r.todos = NewTodoList()
+		r.Register(todoWriteTool{r.todos})
+	}
 	r.Register(commandOutputTool{bg}) // read/stop background commands
 	r.Register(finishTool{})          // explicit terminator; the loop intercepts it
 	return r
