@@ -1037,6 +1037,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			everActed = true
 		}
 
+		editedBefore := edited
 		if isEditTool(call.Name) {
 			if derr == nil {
 				edited = true // a real change landed this run
@@ -1116,7 +1117,28 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// repeated_edits=2 with no_op_edits 3-4 and ended in churn; NO passing run had
 		// either counter. That is the whole difference between kloo's 4/8 and grok's
 		// 8/8 on that case.
-		if noOpEdit && noOpFeedback() {
+		// CONSTRAIN, don't inform. KLOO_NOOP_EDIT_REFUSE treats an edit that changed
+		// nothing as a FAILED edit rather than a successful one: `edited` is not set,
+		// the failed-edit streak advances, and the loop's existing repair path
+		// engages. The model cannot proceed as though its change landed, because as
+		// far as the loop is concerned it did not.
+		//
+		// This is the constrain-shaped twin of the corrective below, built because
+		// the informing version was measured and IGNORED — in the one bench run where
+		// it fired, the model was told its edit changed nothing and repeated it
+		// anyway until churn killed the run. Every rail in this campaign that changed
+		// behaviour removed an option; every one that offered advice did nothing.
+		if noOpEdit && noOpRefuse() {
+			edited = editedBefore // the no-op does not count as a change this run
+			editFailStreak++
+			counters.FailedEdits++
+			derr = errNoOpEdit
+			obs = llm.Message{Role: llm.RoleUser, Content: "That edit was REJECTED: applying it would leave the " +
+				"file byte-for-byte identical, so it is not a change. Your replacement text already matches what " +
+				"is in the file. Target a different region, or edit a different file — the behaviour you are " +
+				"trying to alter is not controlled by the text you just replaced."}
+		}
+		if noOpEdit && noOpFeedback() && !noOpRefuse() {
 			obs = llm.Message{Role: llm.RoleUser, Content: "That edit applied but changed NOTHING — the file is " +
 				"byte-for-byte identical to before. Your replacement text must already match what was there. " +
 				"Do not repeat it. Re-read the region you are targeting and make a DIFFERENT change, or edit a " +
@@ -2751,6 +2773,13 @@ func coversNewGround(call tools.Call, seen map[string]bool) bool {
 // noOpFeedback reports whether an edit that changed nothing is surfaced to the
 // model rather than silently counted (KLOO_NOOP_EDIT_FEEDBACK=1).
 func noOpFeedback() bool { return envOnAgent("KLOO_NOOP_EDIT_FEEDBACK") }
+
+// noOpRefuse reports whether a no-op edit is treated as a FAILED edit rather than
+// a successful one (KLOO_NOOP_EDIT_REFUSE=1).
+func noOpRefuse() bool { return envOnAgent("KLOO_NOOP_EDIT_REFUSE") }
+
+// errNoOpEdit marks an edit refused for changing nothing.
+var errNoOpEdit = errors.New("agent: edit would change nothing")
 
 // looksLikeTestFile reports whether a path named by the verify command is a TEST,
 // as opposed to a file the task is supposed to produce.

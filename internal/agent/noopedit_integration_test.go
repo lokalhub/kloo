@@ -77,3 +77,54 @@ func TestIntegrationRealEditIsNotCalledANoOp(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationNoOpEditIsRefused: the CONSTRAIN-shaped version. The informing
+// version was measured and ignored — in the one kloo-bench run where the
+// corrective fired, the model was told its edit changed nothing and repeated it
+// anyway until churn killed the run. Refusing does not depend on the model heeding
+// anything: the loop does not record a change, so the run cannot proceed as though
+// one landed.
+func TestIntegrationNoOpEditIsRefused(t *testing.T) {
+	t.Setenv("KLOO_NOOP_EDIT_REFUSE", "1")
+	root := seedRepo(t) // answer.txt contains "wrong\n"
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: writeFileCall(t, "wrong\n", "")})
+	loop := buildLoop(t, root, srv, config.Config{MaxSteps: 20, ChurnRounds: 2})
+
+	rep, _ := loop.Run(context.Background(), "make the check pass")
+
+	if rep.ToolCounters.FailedEdits == 0 {
+		t.Fatalf("a no-op edit was not counted as a FAILED edit (%s)", rep.String())
+	}
+	var told bool
+	for _, m := range rep.Transcript {
+		if strings.Contains(m.Content, "REJECTED") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatal("the refusal was not surfaced to the model")
+	}
+	// The run must not end as a success on the strength of a change that never
+	// happened.
+	if rep.Reason == ReasonSuccess {
+		t.Fatalf("run succeeded on a no-op edit (%s)", rep.String())
+	}
+}
+
+// TestIntegrationRefuseBeatsInform: with refusal on, the weaker informing path
+// must not also fire — two messages about one event is noise, and it was measured
+// as ineffective.
+func TestIntegrationRefuseBeatsInform(t *testing.T) {
+	t.Setenv("KLOO_NOOP_EDIT_REFUSE", "1")
+	t.Setenv("KLOO_NOOP_EDIT_FEEDBACK", "1")
+	root := seedRepo(t)
+	srv := llmtest.Sequence(t, llmtest.Mock{Body: writeFileCall(t, "wrong\n", "")})
+	loop := buildLoop(t, root, srv, config.Config{MaxSteps: 20, ChurnRounds: 2})
+
+	rep, _ := loop.Run(context.Background(), "make the check pass")
+	for _, m := range rep.Transcript {
+		if strings.Contains(m.Content, "changed NOTHING") {
+			t.Fatal("the informing corrective fired alongside the refusal")
+		}
+	}
+}
