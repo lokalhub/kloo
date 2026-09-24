@@ -1843,9 +1843,13 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// adjacent to the assistant message that requested it.
 	msgs = append(msgs, tailMsgs...)
 	// Prompt-cache breakpoint: mark the LAST message of the stable prefix — the
-	// final tail message, immediately above the per-turn pins. Everything below it
-	// (pins, then the repo map) is rewritten every turn, so a breakpoint there
-	// would cache nothing and burn the slot.
+	// final tail message, immediately above the per-turn pins, which are rewritten
+	// every turn; a breakpoint below them would cache nothing and burn the slot.
+	//
+	// Under the default MapPositionPinned the map is ABOVE the history and frozen,
+	// so it falls inside the cached prefix rather than below this mark. Under
+	// MapPositionTail it trails the conversation and is re-curated every turn, so
+	// it sits below the breakpoint and is re-sent in full.
 	markCacheBreakpoint(msgs, l.PromptCache, pinnedMessages(l.Memory))
 	req := l.withThinkingControl(l.Adapter.BuildRequest(llm.ChatRequest{
 		Model:       l.Model,

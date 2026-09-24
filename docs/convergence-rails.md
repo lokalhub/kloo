@@ -16,6 +16,18 @@ Measured on [kloo-bench](https://github.com/lokalhub/kloo-bench) against
 One case separates them, and that case (A29) is one kloo passes 4 times in 5 — a
 coin flip, inside the bench's ±3.5-case noise floor. Treat the two as tied.
 
+> **v0.23.0 update — some rail firings were a resource problem, not a reasoning
+> one.** The repo map was re-sent and re-curated every turn, so kloo re-prefilled
+> ~22,000 tokens on every model call. Runs were hitting `explore-stop`, `churn`
+> and `budget-exceeded` because the budget went into re-processing a map, not
+> because the model needed correcting. Pinning and freezing the map
+> ([map position](configuration.md#map-position---map-position)) removed that
+> cost and cut run time by roughly 40%.
+>
+> The rails below still earn their place — turning them off was measured far
+> worse. But when one fires repeatedly, check what the turn is *spending* before
+> assuming the model is stuck.
+
 ## The rails
 
 ### `KLOO_EDIT_RAIL=1` — the explore nudge demands an edit

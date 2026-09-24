@@ -44,7 +44,7 @@ churn detection as the primary guard).
 | `--max-steps` | `500` | Max autonomous steps. Also seeded by `--effort` (fast 50 · medium 500 · heavy 1000); an explicit `--max-steps` overrides the tier. |
 | `--ctx` | `8000` | The model's context window (`maxContextTokens`). Usually unnecessary now — kloo sizes it from the endpoint catalog — but setting it explicitly pins the value and disables auto-sizing. Match your server's `-c`/`num_ctx` for a local server that serves no catalog. |
 | `--curator-budget` | `32768` | Cap on the repo map kloo assembles per step, separate from `--ctx`. |
-| `--map-position` | `tail` | Where the repo map sits: `tail` (after the conversation) or `system` (legacy, inside the system prompt). Affects prompt-cache reuse in proportion to map size — see below. |
+| `--map-position` | `pinned` | Where the repo map sits: `pinned` (fixed index above the history, frozen for the run), `tail` (after the conversation) or `system` (legacy, inside the system prompt). Affects prompt-cache reuse in proportion to map size — see [map position](#map-position---map-position). |
 | `--repeat-nudge-rounds` | `0` (⇒ `3`) | Identical consecutive tool calls (name + args) before the repetition rail injects a corrective nudge. `0` ⇒ the built-in default `3`. For a repeated **read-only** call the nudge re-arms and fires at every multiple of this number; for a repeated **mutating** call it is one-shot. |
 | `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** tool calls (`edit_file`, `write_file`, `run_command`) before the repetition rail halts the run as churn. `0` ⇒ the built-in default `6`. Read-only calls are exempt — see [the repetition rail](#the-repetition-rail-and-repeated-reads). |
 | `--prompt-cache` | `auto` | Ask the provider to cache the stable prompt prefix: `auto` (on only for a provider known to support it), `on` (force it — the escape hatch for a provider the allowlist does not know yet), `off`. See [prompt caching](#prompt-caching---prompt-cache). `kloo doctor` prints the resolved state. |
@@ -359,6 +359,8 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_DELEGATE_UNTIL_EDIT` | `1` so running a command no longer forfeits delegation. |
 | `KLOO_MAP_SKIP_TESTS` | `1` to sort test files below every non-test file in the repo map. Measured **negative** on kloo-bench. |
 | `KLOO_NO_MAP` | `1` to drop the repo map from the prompt entirely. Measured **negative**, and the mechanism is inverted — without the map kloo read *more*. |
+| `KLOO_MAP_POSITION` | `pinned`, `tail` or `system` (same as `--map-position`). |
+| `KLOO_MAP_REFRESH` | With `pinned`, re-curate the frozen map every N turns. `0` (default) freezes it for the run. Each refresh costs one full re-prefill of the map. |
 | `KLOO_RESTART_ON_STALL` | `1` to restart a rail-stopped run once with a clean context. Measured **negative**. |
 | `KLOO_RESTART_FIRST_S` | Cap the first attempt (seconds) so a restart has room. Measured **negative**: two capped attempts are worth less than one uncapped one. |
 | `KLOO_SIMPLE_EDIT` | `1` to offer a three-field `search_replace` tool (`file_path`/`old_string`/`new_string`) **instead of** `edit_file`'s fenced SEARCH/REPLACE block. Untested on the bench — see the [beat-grok plan](../../../docs/apps/kloo/plans/beat-grok/README.md). |
@@ -427,7 +429,7 @@ profile if you want a hard kloo-side cost cap.
 |---|---|---|
 | `maxContextTokens` | `8000` | The **model's context window** — what the endpoint can accept. Drives the prompt budget and the compaction trigger. Auto-sized from the endpoint catalog when you don't set it (see below). |
 | `curatorBudgetTokens` | `32768` | Cap on what kloo **assembles** per step (the repo map), clamped to the usable window. Separate from the window on purpose — see below. |
-| `mapPosition` | `tail` | Where the curated repo map goes: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
+| `mapPosition` | `pinned` | Where the curated repo map goes: `pinned` (fixed index above the history, frozen), `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
 | `promptCache` | `auto` | Prompt-caching mode for this model: `auto`, `on` or `off`. See [prompt caching](#prompt-caching---prompt-cache). |
 | `maxTokens` | `0` (unbounded) | Cumulative prompt+completion tokens per run. `0` ⇒ unbounded — the default; cost is the service's domain, churn/steps/wall-clock guard runaways. |
 | `maxWallClockSeconds` | `3600` | Wall-clock ceiling per run — the final net for a churn-evading loop. `0` ⇒ unbounded. |
@@ -601,6 +603,45 @@ A run's `--json` reports `token_ratio` (what was measured) and
 `token_estimate_error` (how wrong flat chars/4 would have been), omitted when the
 endpoint reports no usage.
 
+### Map position (`--map-position`)
+
+The repo map is the single biggest block kloo sends, and it is re-sent every
+turn. Where it sits decides how much of the prompt a provider can serve from
+cache.
+
+| | Behaviour |
+|---|---|
+| `pinned` (default) | Fixed index above the history, **content frozen** after the first turn. The whole prompt stays a cacheable prefix. |
+| `tail` | After the conversation. Correct for *volatile* content — but a block at the end is displaced by every appended message, so the reusable prefix ends where the map used to sit. |
+| `system` | Legacy, inside the system prompt. For an endpoint that rejects a non-leading system message. |
+
+**Why both halves are needed.** A fixed position with volatile content
+invalidates everything *below* the map. Stable content at the tail still *moves*.
+Only a fixed index **and** frozen content keeps the prefix intact.
+
+**What it costs.** Measured on a 30B local model through a logging proxy, the
+same task run with each placement:
+
+| | median per model call | completion tokens/call | reusable prefix |
+|---|---|---|---|
+| `tail` | **19.10s** | 199 | 36.8% |
+| `pinned` | **2.66s** | 199 | 95.2% |
+
+Generation is identical — the same 199 completion tokens per call. The whole
+difference is prefill: ~22,000 tokens of map re-processed on **every** call, to
+deliver a map that changed by a median of **2 lines** per turn. End to end that
+was roughly **40% off total run time**.
+
+If the convergence rails (`explore-stop`, `churn`, `budget-exceeded`) fire often,
+this is worth checking first: a run can exhaust its budget re-processing the map
+rather than because the model is stuck.
+
+**If a frozen map goes stale** (the agent creates files the map never lists),
+`KLOO_MAP_REFRESH=N` re-curates it every N turns. Each refresh costs one full
+re-prefill, so N is the dial between freshness and speed. Dropping the map
+entirely (`KLOO_NO_MAP=1`) is **not** a win either: token use *rises*, because
+without a map the model explores more, which eats most of the saving.
+
 ### Prompt caching (`--prompt-cache`)
 
 Most of kloo's token spend is prompt, re-sent every turn. Providers that support
@@ -626,10 +667,11 @@ prompt_cache: on (resolved=on)         ← forced on
 ```
 
 **Where the breakpoint goes.** On the last message of the stable prefix — below the
-conversation, above the per-turn pins (the last verify result and the current file,
-both regenerated every turn) and above the trailing repo map. A breakpoint any lower
-would cache content that changes every turn, which caches nothing and spends the
-slot.
+conversation and above the per-turn pins (the last verify result and the current
+file, both regenerated every turn). A breakpoint any lower would cache content that
+changes every turn, which caches nothing and spends the slot. With the default
+`--map-position pinned` the repo map sits *above* the conversation and is frozen, so
+it falls inside the cached prefix rather than below the breakpoint.
 
 **If the provider rejects it.** kloo retries the request **once** without the marker,
 prints one line, and stops asking for the rest of the run:
