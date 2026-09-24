@@ -388,6 +388,8 @@ type toolCountersSummary struct {
 	RepeatedEdits     int `json:"repeated_edits"`
 	FailedEdits       int `json:"failed_edits"`
 	NoOpEdits         int `json:"no_op_edits"`
+	ChurnBannedEdits  int `json:"churn_banned_edits"`
+	NoOpSigRefusals   int `json:"noop_sig_refusals"`
 	VerifyAttempts    int `json:"verify_attempts"`
 	AutoDelegations   int `json:"auto_delegations"`
 	SubagentSteps     int `json:"subagent_steps"`
@@ -512,6 +514,8 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				RepeatedEdits:     tc.RepeatedEdits,
 				FailedEdits:       tc.FailedEdits,
 				NoOpEdits:         tc.NoOpEdits,
+				ChurnBannedEdits:  tc.ChurnBannedEdits,
+				NoOpSigRefusals:   tc.NoOpSigRefusals,
 				VerifyAttempts:    tc.VerifyAttempts,
 				AutoDelegations:   tc.AutoDelegations,
 				SubagentSteps:     tc.SubagentSteps,
@@ -867,6 +871,8 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("repeated_edits", c.RepeatedEdits)
 	add("failed_edits", c.FailedEdits)
 	add("no_op_edits", c.NoOpEdits)
+	add("churn_banned_edits", c.ChurnBannedEdits)
+	add("noop_sig_refusals", c.NoOpSigRefusals)
 	add("verify_attempts", c.VerifyAttempts)
 	add("auto_delegations", c.AutoDelegations)
 	add("subagent_steps", c.SubagentSteps)

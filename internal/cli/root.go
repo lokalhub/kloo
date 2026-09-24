@@ -344,7 +344,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
-	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
+	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: pinned (default; fixed index + frozen, so the whole prompt is cacheable), tail (after the conversation) or system (legacy)")
 	f.IntVar(&flagRepeatNudge, "repeat-nudge-rounds", 0, "identical consecutive tool calls before the repetition rail nudges (0 ⇒ built-in default)")
 	f.IntVar(&flagRepeatAbort, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreNudge, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -255,6 +256,11 @@ type Loop struct {
 	// MapPosition controls where the curated repo map is placed in the prompt:
 	// MapPositionTail (default, cache-friendly) or MapPositionSystem (legacy).
 	MapPosition string
+
+	// pinnedMap holds the frozen repo map for MapPositionPinned, so the block is
+	// byte-identical turn to turn and stays inside the cacheable prefix.
+	pinnedMap     string
+	pinnedMapTurn int
 
 	// Per-run prompt-cache accounting, reset at the top of every Run (the TUI
 	// reuses one Loop across submissions). Unexported: the Report is the contract.
@@ -629,6 +635,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		seenTargets  = map[string]bool{}
 		exploreTotal int
 
+		// Churn-escalation state (KLOO_CHURN_ESCALATE). churnBanned are paths CLOSED
+		// to further edits after a repeated-edit churn was escalated instead of
+		// halted; churnEscalated latches so the second churn really does stop the run.
+		// editedPaths is every path this run has successfully edited, so the
+		// escalation can name what is left untouched.
+		// noOpSigs are edit SIGNATURES (tool+path+diff) already proven to be no-ops.
+		// Re-issuing one is refused outright — see noOpSigBan().
+		noOpSigs       = map[string]bool{}
+		churnBanned    = map[string]bool{}
+		churnEscalated bool
+		editedPaths    = map[string]bool{}
+
 		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
 		editFailStreak int
@@ -759,6 +777,30 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			return finish(ReasonBudgetExceeded, nil, l.budgetEvidence(kind), nil)
 		}
 		if churned, kind := l.Churn.Check(); churned {
+			// ESCALATE INSTEAD OF HALT (KLOO_CHURN_ESCALATE). Measured on kloo-bench
+			// A16: every failing run ends here — a repeated no-op edit to ONE file,
+			// with the verify still red and 23-36 of the 60 steps unspent, while the
+			// third file the task needs is never opened. Every passing run edits three
+			// files; every failing run edits two. The run does not run out of budget or
+			// ability, it runs out of permission to continue.
+			//
+			// So the first repeated-edit churn CLOSES the file the model is stuck on
+			// and lets the run continue. This constrains rather than advises —
+			// the option is removed, not discouraged — because every advisory rail in
+			// this campaign was measured and ignored. It fires once: a second churn
+			// after the escalation halts exactly as before, so a genuine infinite loop
+			// still stops, one rail-width later.
+			if kind == ChurnRepeatedEdit && churnEscalate() && !churnEscalated && !lastVerify.Passed {
+				if target := churnEditTarget(l.Churn.Artifact()); target != "" {
+					churnEscalated = true
+					churnBanned[target] = true
+					recordRail(RailChurnEscalate)
+					l.Churn.Reset()
+					convo = append(convo, churnEscalationCorrective(target, editedPaths))
+					step-- // the escalation is not the model's step
+					continue
+				}
+			}
 			return finish(ReasonChurn, nil, nil, &ChurnEvidence{Kind: kind, Artifact: l.Churn.Artifact()})
 		}
 
@@ -908,6 +950,27 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			before, beforeOK = l.currentFileContents(str(call.Args["path"]))
 		}
 		switch {
+		case isEditTool(call.Name) && noOpSigBan() && noOpSigs[normalizeChurn(editSignature(call))]:
+			// This EXACT edit has already been applied and changed nothing. Telling the
+			// model that was not enough: measured on kloo-bench A16, KLOO_NOOP_EDIT_REFUSE
+			// rejected the same edit four times with an explicit "target a different
+			// region, or edit a different file", and the model re-issued it every time
+			// until the repetition rail stopped the run 31 steps short of the budget.
+			// A rejection the model can simply repeat is advice, not a constraint.
+			//
+			// Banned by SIGNATURE, not by path. Banning the FILE was tried (the churn
+			// escalation) and lost A16 outright: the file the model was stuck on was
+			// also the file still missing the LEFT JOIN, so closing it removed the only
+			// place the fix could go. The signature forbids exactly the call that
+			// provably does nothing and leaves every other edit to that file open.
+			counters.NoOpSigRefusals++
+			derr = errNoOpSigBanned
+		case isEditTool(call.Name) && churnBanned[str(call.Args["path"])]:
+			counters.ChurnBannedEdits++
+			// This file was closed by a churn escalation: the model already repeated
+			// the same edit to it until the rail fired. Reopening it is the loop the
+			// escalation exists to break.
+			derr = errChurnBannedPath
 		case isEditTool(call.Name) && l.protectedByVerify(str(call.Args["path"])) ||
 			isEditTool(call.Name) && l.protectedByVerify(str(call.Args["file_path"])):
 			// The files the verify command NAMES are the specification the work is
@@ -1041,11 +1104,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if isEditTool(call.Name) {
 			if derr == nil {
 				edited = true // a real change landed this run
+				if p := str(call.Args["path"]); p != "" {
+					editedPaths[p] = true
+				}
 				editFailStreak = 0
 				if beforeOK {
 					if after, ok := l.currentFileContents(str(call.Args["path"])); ok && after == before {
 						counters.NoOpEdits++
 						noOpEdit = true
+						noOpSigs[normalizeChurn(editSignature(call))] = true
 					}
 				}
 			} else {
@@ -1144,6 +1211,19 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				"Do not repeat it. Re-read the region you are targeting and make a DIFFERENT change, or edit a " +
 				"different file: the behaviour you are trying to alter is not controlled by the text you just " +
 				"replaced."}
+		}
+		if errors.Is(derr, errNoOpSigBanned) {
+			obs = llm.Message{Role: llm.RoleUser, Content: "REFUSED — you have already applied this exact edit " +
+				"and it changed nothing, so it is blocked for the rest of this run. It is not going to work the " +
+				"second time. The text you are replacing is ALREADY what you want it to be; the reason the " +
+				"check still fails is somewhere you have not looked. Read the failing error again and find what " +
+				"it names that you have not yet written — a missing declaration, join, import or field."}
+		}
+		if errors.Is(derr, errChurnBannedPath) {
+			obs = llm.Message{Role: llm.RoleUser, Content: "That file is CLOSED for the rest of this run. You " +
+				"already repeated the same edit to it until it was clear the change was not landing, so it is " +
+				"no longer editable. The behaviour you need is not controlled by that file. Open a file you " +
+				"have not edited yet and make the change there."}
 		}
 		if errors.Is(derr, errProtectedPath) {
 			target := str(call.Args["path"])
@@ -1665,10 +1745,25 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// repo may be inviting exactly that reading.
 	mapSection := ""
 	if !noRepoMap() {
-		mapSection = repoMapSection(l.assembleContext(task, mapBudget))
+		if l.mapPosition() == MapPositionPinned {
+			// Reuse the frozen map so the pinned block is byte-identical turn to
+			// turn; re-curating it would defeat the point of pinning it.
+			every := mapRefreshEvery()
+			if l.pinnedMap == "" || (every > 0 && l.pinnedMapTurn%every == 0) {
+				l.pinnedMap = repoMapSection(l.assembleContext(task, mapBudget))
+			}
+			l.pinnedMapTurn++
+			mapSection = l.pinnedMap
+		} else {
+			mapSection = repoMapSection(l.assembleContext(task, mapBudget))
+		}
 	}
 	sysContent := l.System
 	var tailMsgs []llm.Message
+	pinnedMap := ""
+	if mapSection != "" && l.mapPosition() == MapPositionPinned {
+		pinnedMap, mapSection = mapSection, ""
+	}
 	if mapSection != "" {
 		if l.mapAtTail() {
 			// USER, not system. Several open-weight chat templates hard-raise on a
@@ -1736,6 +1831,14 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		}
 	}
 	msgs := append([]llm.Message{sys}, hist...)
+	// Pinned map: a FIXED index, immediately after the task (hist[0]), so it sits
+	// inside the cacheable prefix and never moves. Safe to splice here — unlike a
+	// tool result, the map belongs to no assistant turn.
+	if pinnedMap != "" && len(msgs) >= 2 {
+		out := append([]llm.Message{}, msgs[:2]...)
+		out = append(out, llm.Message{Role: llm.RoleUser, Content: pinnedMap})
+		msgs = append(out, msgs[2:]...)
+	}
 	// Appended AFTER history, never spliced into it: a tool result must stay
 	// adjacent to the assistant message that requested it.
 	msgs = append(msgs, tailMsgs...)
@@ -1913,14 +2016,57 @@ func repoMapSection(mapText string) string {
 // conversation a stable, cacheable prefix.
 //
 // Set MapPositionSystem if an endpoint rejects a non-leading system message.
+// MapPositionPinned places the map at a FIXED index — immediately after the task
+// — and FREEZES its content for the rest of the run (refresh cadence via
+// KLOO_MAP_REFRESH, 0 = never).
+//
+// Measured 2026-09-23 on C07 through a logging proxy: the map is ~22,000 tokens
+// and its content changes on 33 of 41 turns, by a MEDIAN OF 2 LINES. Tail
+// placement is correct for volatile content — but the map is also displaced by
+// every appended message, so the reusable prefix ends where it used to sit and
+// kloo re-prefills all 22k tokens EVERY call. Measured reusable prefix: kloo
+// 36.8% vs grok 98.9%, which is the whole of kloo's 19.1s vs 3.25s per call
+// (generation is identical, 199 vs 195 tokens).
+//
+// Neither half alone is enough: a fixed position with volatile content
+// invalidates everything BELOW the map, and stable content at the tail still
+// moves. Cacheable requires both.
 const (
 	MapPositionTail   = "tail"
 	MapPositionSystem = "system"
+	MapPositionPinned = "pinned"
 )
+
+// mapRefreshEvery re-curates the pinned map every N turns (KLOO_MAP_REFRESH).
+// 0 (the default) freezes it after the first turn: each refresh costs one full
+// re-prefill of the map, so the cadence is the dial between navigation freshness
+// and prefill cost.
+func mapRefreshEvery() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("KLOO_MAP_REFRESH")))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
 
 // mapAtTail reports whether the curated map goes in a trailing message. Unset ⇒
 // tail (the cache-friendly default).
-func (l *Loop) mapAtTail() bool { return l.MapPosition != MapPositionSystem }
+func (l *Loop) mapAtTail() bool { return l.mapPosition() != MapPositionSystem }
+
+// mapPosition resolves the placement, letting KLOO_MAP_POSITION override the
+// configured value. The benchmark harness sets env, not flags, so an env seam
+// keeps an experiment from needing a harness change per arm.
+func (l *Loop) mapPosition() string {
+	if v := strings.TrimSpace(os.Getenv("KLOO_MAP_POSITION")); v != "" {
+		return strings.ToLower(v)
+	}
+	if l.MapPosition == "" {
+		// Match config.DefaultMapPosition. A Loop built directly (not through the
+		// CLI) must not silently get a different layout from the shipped one.
+		return MapPositionPinned
+	}
+	return l.MapPosition
+}
 
 // repoMapFileCap mirrors repomap.maxMappedFileBytes (walk.go:34): a defensive
 // upper bound on the size of a file whose content we read into memory for the
@@ -2193,12 +2339,16 @@ func editCorrective(n int, edited bool, failing, exercises []string) llm.Message
 		"an edit that turns out wrong is progress and can be revised; another read is not."}
 }
 
-// editRail reports whether the no-edit explore nudge demands an edit
-// (KLOO_EDIT_RAIL=1). Off by default.
+// editRail reports whether the no-edit explore nudge demands an edit.
+// ON by default since v0.22.0 (one of the seven convergence rails); KLOO_EDIT_RAIL=0
+// restores the previous behaviour. The comment here said "Off by default" long
+// after the rail shipped on, which is worse than no comment: it describes a
+// released default that has not been true for a version.
 func editRail() bool { return envOnDefault("KLOO_EDIT_RAIL") }
 
 // forceEdit reports whether a repeated no-edit explore nudge also WITHHOLDS the
-// read tools for that turn (KLOO_FORCE_EDIT=1). Off by default.
+// read tools for that turn. ON by default since v0.22.0; KLOO_FORCE_EDIT=0 restores
+// the previous behaviour. (Was documented as off by default while shipping on.)
 func forceEdit() bool { return envOnDefault("KLOO_FORCE_EDIT") }
 
 // turnRegistry is the vocabulary advertised for the turn being built: the full
@@ -2725,6 +2875,69 @@ const maxEmptyTurnRecoveries = 3
 // emptyTurnRecovery reports whether an exhausted empty completion is recoverable
 // (KLOO_EMPTY_TURN_RECOVERY=1) rather than fatal.
 func emptyTurnRecovery() bool { return envOnDefault("KLOO_EMPTY_TURN_RECOVERY") }
+
+// noOpSigBan reports whether an edit signature proven to be a no-op is REFUSED on
+// every later attempt (KLOO_NOOP_SIG_BAN=1). The constraining twin of
+// KLOO_NOOP_EDIT_REFUSE, which only tells the model the edit did nothing and
+// leaves it free to send the identical call again — which it does.
+func noOpSigBan() bool { return envOnAgent("KLOO_NOOP_SIG_BAN") }
+
+// errNoOpSigBanned marks a re-issued edit already proven to change nothing.
+var errNoOpSigBanned = errors.New("agent: edit already proven to be a no-op")
+
+// churnEscalate reports whether a repeated-edit churn escalates (closing the
+// repeated file and continuing) instead of halting the run (KLOO_CHURN_ESCALATE=1).
+func churnEscalate() bool { return envOnAgent("KLOO_CHURN_ESCALATE") }
+
+// errChurnBannedPath marks an edit aimed at a file a churn escalation has closed.
+var errChurnBannedPath = errors.New("agent: file closed by churn escalation")
+
+// churnEditTarget pulls the path out of a repeated edit signature, whose first
+// line is "edit_file <path>" / "write_file <path>" (see editSignature). Returns ""
+// when the artifact is not an edit signature, which leaves the halt in place.
+func churnEditTarget(artifact string) string {
+	line := artifact
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	f := strings.Fields(line)
+	if len(f) != 2 {
+		return ""
+	}
+	if f[0] != string(tools.NameEditFile) && f[0] != string(tools.NameWriteFile) {
+		return ""
+	}
+	return f[1]
+}
+
+// churnEscalationCorrective is what the model is told when a repeated-edit churn
+// closes a file instead of ending the run. It names what is closed and what has
+// already been changed, because the failure this exists for is a model that has
+// edited two of the three files a task needs and cannot see which one is missing.
+func churnEscalationCorrective(target string, edited map[string]bool) llm.Message {
+	var b strings.Builder
+	b.WriteString("STOP editing ")
+	b.WriteString(target)
+	b.WriteString(". You have now made the same edit to it repeatedly and the verification is still failing, ")
+	b.WriteString("so that file is CLOSED for the rest of this run — further edits to it will be refused.\n\n")
+	if len(edited) > 0 {
+		others := make([]string, 0, len(edited))
+		for p := range edited {
+			if p != target {
+				others = append(others, p)
+			}
+		}
+		if len(others) > 0 {
+			sort.Strings(others)
+			b.WriteString("Files you have already changed this run: ")
+			b.WriteString(strings.Join(others, ", "))
+			b.WriteString("\n\n")
+		}
+	}
+	b.WriteString("The change that is still missing is in a file you have NOT edited yet. Re-read the failing ")
+	b.WriteString("assertion, find the code path it exercises that you have not touched, and edit THAT file.")
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
 
 // errProtectedPath marks an edit aimed at a file the verify command names.
 var errProtectedPath = errors.New("agent: file is part of the verify command")
