@@ -357,7 +357,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_MAX_HANDOFFS` | Ceiling on harness-initiated handoffs per run (`0` ⇒ 1). Children are sequential and never nested. |
 | `KLOO_DELEGATE_ON_STOP` | `1` to hand off at the explore rail instead of stopping. Unproven. |
 | `KLOO_DELEGATE_UNTIL_EDIT` | `1` so running a command no longer forfeits delegation. |
-| `KLOO_MAP_SKIP_TESTS` | `1` to sort test files below every non-test file in the repo map. Measured **negative** on kloo-bench. |
+| `KLOO_MAP_SKIP_TESTS` | `1` to sort test files below every non-test file in the repo map. Measured **negative** — leave it off. |
 | `KLOO_NO_MAP` | `1` to drop the repo map from the prompt entirely. Measured **negative**, and the mechanism is inverted — without the map kloo read *more*. |
 | `KLOO_MAP_POSITION` | `pinned`, `tail` or `system` (same as `--map-position`). |
 | `KLOO_MAP_REFRESH` | With `pinned`, re-curate the frozen map every N turns. `0` (default) freezes it for the run. Each refresh costs one full re-prefill of the map. |

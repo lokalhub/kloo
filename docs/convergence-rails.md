@@ -4,17 +4,10 @@ Seven behaviours that stop kloo defeating itself on a task it can otherwise do.
 **They are ON by default** as of v0.22.0. Any one can be disabled with
 `KLOO_<NAME>=0`.
 
-Measured on [kloo-bench](https://github.com/lokalhub/kloo-bench) against
-`muse-glimmer-30b`, paired against grok 1.0.34 on the same model and endpoint:
-
-| | score |
-|---|---|
-| kloo before | 6–10 / 21 |
-| kloo with these seven | **16 / 21** |
-| grok, same model, same sweep | 17 / 21 |
-
-One case separates them, and that case (A29) is one kloo passes 4 times in 5 — a
-coin flip, inside the bench's ±3.5-case noise floor. Treat the two as tied.
+Each was added because a run was failing for a reason that had nothing to do with
+the model's ability on the task — reading without ever editing, repeating an edit
+that changed nothing, stopping one assertion short. Turning them off was measured
+distinctly worse, so they ship on.
 
 > **v0.23.0 update — some rail firings were a resource problem, not a reasoning
 > one.** The repo map was re-sent and re-curated every turn, so kloo re-prefilled
