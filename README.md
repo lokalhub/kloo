@@ -155,7 +155,7 @@ different profile with `/profile <path>`.
 | `--max-steps` | `500` | Max autonomous steps (also seeded by `--effort`: fast 50 · medium 500 · heavy 1000). |
 | `--ctx` | _(auto)_ | The model's context window. kloo sizes it from the endpoint's `/v1/models` catalog at startup (both TUI and headless); set this to pin a value and disable auto-sizing, or for a server that reports no context length (e.g. match your llama.cpp `-c`). |
 | `--curator-budget` | `32768` | Cap on the repo map kloo **assembles** per step — separate from `--ctx`, which is what the model can **hold**. |
-| `--map-position` | `tail` | Where the repo map sits in the prompt: `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
+| `--map-position` | `pinned` | Where the repo map sits in the prompt: `pinned` (a fixed index above the history, content frozen for the run — the whole prompt stays a cacheable prefix), `tail` (after the conversation) or `system` (legacy, inside the system prompt). |
 | `--repeat-nudge-rounds` | `0` (⇒ `3`) | Identical consecutive tool calls before the repetition rail nudges the model to try something else. `0` ⇒ the built-in default. |
 | `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** calls (`edit_file`/`write_file`/`run_command`) before the run halts as churn. `0` ⇒ the built-in default. Repeated **read-only** calls are nudged, not halted — see [configuration.md](docs/configuration.md#the-repetition-rail-and-repeated-reads). |
 | `--prompt-cache` | `auto` | Ask the provider to cache the stable prompt prefix: `auto` (on only for a provider known to support it), `on`, `off`. `kloo doctor` prints the resolved state — see [configuration.md](docs/configuration.md#prompt-caching---prompt-cache). |

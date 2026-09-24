@@ -63,9 +63,16 @@ Most are pinned by tests. Breaking one should fail the build, not a review.
   model can hold; `CuratorBudgetTokens` is what kloo chooses to assemble. Never
   budget the repo map from the window — that is how a 900k-window model came to
   authorise a 252k-token map on every turn.
-- **The prompt is ordered by volatility, ascending.** Stable content first, the
-  re-curated repo map last. Providers cache a byte-identical prompt *prefix*, so
-  anything volatile placed early invalidates everything after it.
+- **The prompt is ordered by volatility, ascending.** Providers cache a
+  byte-identical prompt *prefix*, so anything volatile placed early invalidates
+  everything after it. The corollary that took a while to see: a block at the
+  *end* is no safer, because every appended message displaces it and the reusable
+  prefix ends where it used to sit. The repo map was re-curated and tail-placed
+  for exactly that reason and cost ~22k tokens of re-prefill on EVERY call
+  (measured: 36.8% of the prompt reusable, and ~7x the time per model call).
+  Since v0.23.0 it is
+  **pinned at a fixed index and frozen** — cacheability needs *both*, and neither
+  alone is enough.
 - **Token counts are estimated, then corrected.** `internal/tokens` is
   entropy-aware (hashes cost ~2x what prose does) and calibrates against reported
   `prompt_tokens`. Never reintroduce a flat chars/N: it undercounts a lockfile by
