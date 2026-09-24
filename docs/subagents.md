@@ -48,23 +48,16 @@ would hit the endpoint unauthenticated.
 This is the configuration that produced the measured gain, and it is worth being
 precise about why — see below.
 
-## Measured results (kloo-bench, glimmer, independent vitest gate)
+## What the gain actually is
 
-| arm | passes |
-|---|---|
-| glimmer alone | 6–10/21 across five runs |
-| auto-delegation, **qwen** child | **15/21** |
-| auto-delegation, **glimmer** child | ~22–28% |
-| grok on glimmer (replicated twice) | 18/21 |
+Auto-delegation measurably helps a small parent — **but it is a hybrid, and that
+matters more than the headline.** A glimmer parent delegating to a *qwen* child
+means the capable model is doing the work the small one could not. With a
+*glimmer* child the gain is much smaller, because delegating glimmer→glimmer
+reproduces the same behaviour: parent and child both read without editing.
 
-15/21 against an expected 8.1 (SD 1.78) is 3.4 SD — a real gain.
-
-**But it is a hybrid.** A glimmer parent delegating to a qwen child means the
-capable model is doing the work the small one could not. With a *glimmer* child the
-gain is much smaller, because delegating glimmer→glimmer reproduces the same
-behaviour: parent and child both read without editing. **The win came from model
-substitution, not decomposition.** Do not quote 15/21 as though it were
-like-for-like against grok-on-glimmer.
+**The win came from model substitution, not decomposition.** Do not present it as
+a like-for-like result for the small model alone.
 
 ## Counters
 
@@ -84,8 +77,8 @@ be discarded, which made a dead child indistinguishable from an idle one.
 ## Tuning notes
 
 * **`KLOO_DELEGATE_AFTER_READS=18`** was measured. At the legacy trigger (6) it
-  fired on 92% of runs glimmer already solves, costing cases and time (C18
-  1593s→263s when moved to 18; timeouts fell from 10/21 to 2/21).
+  fired on the large majority of runs glimmer already solves, costing both cases
+  and time (one case went 1593s→263s when moved to 18, and timeouts became rare).
 * **`KLOO_SUBAGENT_STEPS=25`**: the default (half a 60-step parent) let delegated
   cases run to 2381s against a 2400s ceiling — a pass 19 seconds from the wire is a
   coin flip.
