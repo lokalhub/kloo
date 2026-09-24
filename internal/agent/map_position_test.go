@@ -39,7 +39,8 @@ func sentMessages(t *testing.T, srv *llmtest.Server) []struct {
 func TestMapPositionTailKeepsSystemStable(t *testing.T) {
 	root := genRepo(t, 14, 12)
 	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "file00.go"}})})
-	loop := memLoop(t, srv, root, 2000, NewWorkingMemory()) // MapPosition unset ⇒ tail
+	loop := memLoop(t, srv, root, 2000, NewWorkingMemory())
+	loop.MapPosition = MapPositionTail // explicit: the default is now pinned
 	loop.System = "you are kloo"
 
 	if _, err := loop.Run(context.Background(), "look at File3Func2DoesSomething"); err != nil {

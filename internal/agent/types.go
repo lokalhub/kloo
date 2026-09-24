@@ -177,6 +177,12 @@ const (
 	RailRepeatedCall Rail = "repeated-call"
 	// RailExplore: the model kept reading/exploring without acting; nudged to act-or-ask.
 	RailExplore Rail = "explore"
+	// RailChurnEscalate: a repeated-edit churn CLOSED the repeated file and let the
+	// run continue instead of halting (KLOO_CHURN_ESCALATE). Recorded because
+	// without it there is no way to tell an escalation that fired and did not help
+	// from one that never fired at all — the first bench round of this feature was
+	// unreadable for exactly that reason.
+	RailChurnEscalate Rail = "churn-escalate"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —
@@ -235,7 +241,15 @@ type ToolCounters struct {
 	RepeatedEdits    int
 	FailedEdits      int
 	NoOpEdits        int
-	VerifyAttempts   int
+	// ChurnBannedEdits counts edits refused because a churn escalation had closed
+	// that file. A high count means the model kept reaching for the same file
+	// after being told it was closed — the constraint holding, but not landing.
+	ChurnBannedEdits int
+	// NoOpSigRefusals counts edits refused because that exact edit was already
+	// proven to be a no-op. Ships WITH the flag: without it, a rail that fired and
+	// did not help is indistinguishable from one that never fired.
+	NoOpSigRefusals int
+	VerifyAttempts  int
 	// AutoDelegations counts investigations kloo spawned on the model's behalf
 	// when it was reading without acting. Ships WITH the feature so an inert
 	// experiment is distinguishable from a failed one.

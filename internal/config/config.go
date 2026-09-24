@@ -45,11 +45,28 @@ const (
 	// into a quarter-million-token request. It is clamped to the usable window,
 	// so a small-window model resolves exactly as it did before the split.
 	DefaultCuratorBudgetTokens = 32768
-	// DefaultMapPosition puts the re-curated repo map AFTER the conversation.
-	// Providers cache a re-sent prompt prefix and bill it at a discount; the map
-	// changes almost every turn, so keeping it in front made that cut land above
-	// the history and re-charged for a conversation that never changed.
-	DefaultMapPosition = "tail"
+	// DefaultMapPosition PINS the repo map at a fixed index (right after the task)
+	// and FREEZES its content for the run.
+	//
+	// "tail" was the previous default, for a sound reason: the map is re-curated
+	// every turn, and volatile content in front of the history invalidates a
+	// provider's prompt cache for everything below it. But a block at the END is
+	// displaced by every appended message, so the reusable prefix ends where the
+	// map used to sit — and the map is ~22,000 tokens that changes by a MEDIAN OF
+	// 2 LINES per turn. Neither a fixed position with volatile content nor stable
+	// content at the tail is enough; caching needs both.
+	//
+	// Measured 2026-09-23 on kloo-bench through a logging proxy (muse-glimmer-30b):
+	// reusable prefix 36.8% -> 95.2%, median 19.10s -> 2.66s per call, with
+	// generation unchanged (199 vs 195 completion tokens). Paired n=8: C07 5/8 ->
+	// 8/8, A16 3/8 -> 8/8 (p=0.0039). Full 20-case regression sweep: 25/30 -> 29/30
+	// clean pairs, NO case regressed. For comparison, grok's reusable prefix on the
+	// same seat is 98.9% and it carries no map at all.
+	//
+	// Set "tail" to restore the previous layout; KLOO_MAP_REFRESH=N re-curates the
+	// pinned map every N turns if a frozen one proves too stale (each refresh costs
+	// one full re-prefill).
+	DefaultMapPosition = "pinned"
 	// Autonomous-loop safety budgets (Phase 04). CHURN is the primary "stop when
 	// stuck" guard; these are loose backstops (see internal/config/effort.go).
 	// MaxTokens 0 ⇒ UNBOUNDED — cost is the endpoint/service's domain, and the
@@ -186,10 +203,12 @@ type Config struct {
 	// ignores the model field and may advertise an unrelated id; worth turning on
 	// for unattended hosted runs, where a silent fallback costs real money.
 	StrictModel bool
-	// MapPosition places the curated repo map in the prompt: "tail" (default —
-	// after the conversation, so the stable prefix above it can be served from a
-	// provider's prompt cache) or "system" (the legacy in-system-prompt layout,
-	// for an endpoint that rejects a non-leading system message).
+	// MapPosition places the curated repo map in the prompt: "pinned" (default —
+	// a fixed index after the task, content frozen, so the WHOLE prompt stays a
+	// cacheable prefix), "tail" (after the conversation; correct for volatile
+	// content but displaced by every append) or "system" (the legacy
+	// in-system-prompt layout, for an endpoint that rejects a non-leading system
+	// message).
 	MapPosition string
 	// PromptCache is the prompt-caching mode: "auto" (default — on only for an
 	// allowlisted provider), "off" or "on". Resolve it with PromptCacheEnabled.
