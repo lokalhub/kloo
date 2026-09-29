@@ -167,6 +167,12 @@ var ErrProfileParse = errors.New("parse profile file")
 type Config struct {
 	Endpoint string
 	Model    string
+	// ProviderSource records WHERE Provider came from: "flag", "env", "profile"
+	// (the reserved "defaultProvider" key) or "" when no provider is in play. It is
+	// diagnostic only — nothing keys off it — but `kloo doctor` showing "profile"
+	// is what makes an inherited default visible instead of mysterious.
+	ProviderSource string
+
 	// Provider is the resolved provider name (--provider / KLOO_PROVIDER), or ""
 	// when none was selected. It seeds Endpoint/APIKey; it is not sent to the
 	// endpoint (informational/debug).
@@ -463,6 +469,25 @@ func loadProviders(profilePath string) (map[string]providerEntry, error) {
 	return file.Providers, nil
 }
 
+// loadDefaultProvider reads the reserved top-level "defaultProvider" key: the
+// provider to use when neither --provider nor KLOO_PROVIDER names one. It exists
+// because a profile that defines exactly one provider still required the flag on
+// every single invocation, and forgetting it failed in a way that pointed at the
+// network rather than at the missing flag.
+func loadDefaultProvider(profilePath string) (string, error) {
+	data, path, err := readProfileFile(profilePath)
+	if err != nil || data == nil {
+		return "", err
+	}
+	var file struct {
+		DefaultProvider string `json:"defaultProvider"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return "", fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
+	}
+	return strings.TrimSpace(file.DefaultProvider), nil
+}
+
 // ProviderInfo is a named provider's resolved endpoint + key, suitable for
 // live provider switching in the TUI without re-parsing the full config.
 type ProviderInfo struct {
@@ -660,10 +685,29 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	// the PROFILE layer here, so KLOO_ENDPOINT/KLOO_API_KEY and --endpoint still win
 	// in the env/flag layers below.
 	provider := getenv(EnvProvider)
+	providerSource := ""
+	if provider != "" {
+		providerSource = "env"
+	}
 	if flags.Provider != nil {
-		provider = *flags.Provider
+		provider, providerSource = *flags.Provider, "flag"
+	}
+	// Profile default, BELOW flag and env: a profile that defines one provider
+	// should not need --provider on every invocation. Resolved before the provider
+	// block is loaded so everything downstream — endpoint, key, alias expansion —
+	// behaves exactly as if the flag had been passed.
+	providerFromDefault := false
+	if provider == "" {
+		def, err := loadDefaultProvider(profilePath)
+		if err != nil {
+			return Config{}, err
+		}
+		if def != "" {
+			provider, providerFromDefault, providerSource = def, true, "profile"
+		}
 	}
 	cfg.Provider = provider
+	cfg.ProviderSource = providerSource
 
 	var providerModels map[string]string
 	if provider != "" {
@@ -684,6 +728,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		}
 		p, ok := providers[provider]
 		if !ok {
+			if providerFromDefault {
+				return Config{}, unknownDefaultProviderError(provider, profilePath, providers)
+			}
 			return Config{}, unknownProviderError(provider, profilePath, providers)
 		}
 		if p.Endpoint != "" {
@@ -1083,14 +1130,31 @@ func loadProfileEntry(profilePath, model string) (*profileEntry, error) {
 	if err != nil || data == nil {
 		return nil, err
 	}
-	var profiles map[string]profileEntry
-	if err := json.Unmarshal(data, &profiles); err != nil {
+	// Decode the top level as raw values and parse ONLY the requested model's
+	// entry. Decoding straight into map[string]profileEntry made every top-level
+	// key a model entry, so a single scalar setting anywhere in the file — e.g.
+	// "defaultProvider": "lokalai" — failed with `cannot unmarshal string into Go
+	// value of type config.profileEntry` and took the whole profile down with it,
+	// including the providers block that had nothing to do with it. Reserved keys
+	// are settings, not models; skipping non-objects is what lets the two coexist.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
 	}
-	if entry, ok := profiles[model]; ok {
-		return &entry, nil
+	body, ok := raw[model]
+	if !ok {
+		return nil, nil
 	}
-	return nil, nil
+	if len(body) == 0 || body[0] != '{' {
+		// A non-object under a model name is a settings key, not tuning for a model
+		// that happens to share its name. Ignore it rather than fail the run.
+		return nil, nil
+	}
+	var entry profileEntry
+	if err := json.Unmarshal(body, &entry); err != nil {
+		return nil, fmt.Errorf("config: %w %s: per-model entry %q: %v", ErrProfileParse, path, model, err)
+	}
+	return &entry, nil
 }
 
 // loadEffortOverride reads the optional "efforts" section of the profile file and

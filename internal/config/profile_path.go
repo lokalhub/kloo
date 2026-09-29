@@ -236,10 +236,32 @@ func aliasNeedsProviderError(alias string, owners []string) error {
 	switch len(owners) {
 	case 1:
 		fmt.Fprintf(&b, "\n  Add: --provider %s", owners[0])
+		fmt.Fprintf(&b, "\n  Or set it once in the profile: \"defaultProvider\": %q", owners[0])
 	default:
-		fmt.Fprintf(&b, "\n  %q is defined by: %s\n  Add --provider with the one you want.",
+		fmt.Fprintf(&b, "\n  %q is defined by: %s\n  Add --provider with the one you want,",
 			alias, strings.Join(owners, ", "))
+		b.WriteString("\n  or set \"defaultProvider\" in the profile to pick one for every run.")
 	}
 	fmt.Fprintf(&b, "\n\n  Or pass --endpoint explicitly to use %q as a literal model id.", alias)
+	return errors.New(b.String())
+}
+
+// unknownDefaultProviderError explains a "defaultProvider" that names a provider
+// the profile does not define. Reporting this as a bad --provider would be
+// actively misleading: the user passed no flag, so they would go looking at their
+// command line instead of at the one line in the file that is wrong.
+func unknownDefaultProviderError(provider, profilePath string, found map[string]providerEntry) error {
+	path := profilePath
+	if path == "" {
+		path, _ = FindProfile(workspaceDir())
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "config: %q sets \"defaultProvider\": %q, but defines no such provider", path, provider)
+	if names := sortedKeys(found); len(names) > 0 {
+		fmt.Fprintf(&b, "\n  it defines: %s", strings.Join(names, ", "))
+	} else {
+		b.WriteString("\n  it defines no providers at all")
+	}
+	b.WriteString("\n\nFix \"defaultProvider\", or override it for this run with --provider.")
 	return errors.New(b.String())
 }

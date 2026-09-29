@@ -65,6 +65,7 @@ type memoryDiagnostic struct {
 type resolvedConfigDiagnostic struct {
 	Profile                profileDiagnostic `json:"profile"`
 	Provider               string            `json:"provider"`
+	ProviderSource         string            `json:"provider_source,omitempty"`
 	Model                  string            `json:"model"`
 	Endpoint               string            `json:"endpoint"`
 	APIKey                 secretState       `json:"api_key"`
@@ -261,6 +262,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 	return resolvedConfigDiagnostic{
 		Profile:             profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
 		Provider:            cfg.Provider,
+		ProviderSource:      cfg.ProviderSource,
 		Model:               cfg.Model,
 		Endpoint:            cfg.Endpoint,
 		APIKey:              secretState{Set: cfg.APIKey != "", Redacted: cfg.APIKey != ""},
@@ -345,7 +347,11 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 			fmt.Fprintf(out, "  %s\n", p)
 		}
 	}
-	fmt.Fprintf(out, "provider: %s\n", diag.Provider)
+	if diag.Provider != "" && diag.ProviderSource != "" {
+		fmt.Fprintf(out, "provider: %s (source=%s)\n", diag.Provider, diag.ProviderSource)
+	} else {
+		fmt.Fprintf(out, "provider: %s\n", diag.Provider)
+	}
 	fmt.Fprintf(out, "model: %s\n", diag.Model)
 	fmt.Fprintf(out, "endpoint: %s\n", diag.Endpoint)
 	if diag.APIKey.Set {

@@ -83,6 +83,48 @@ exists at any of:
 Create one of those, or pass --profile <path>.
 ```
 
+### A default provider
+
+Setting `--provider` on every invocation gets old, and forgetting it fails
+confusingly (see below). Name one in the profile instead:
+
+```json
+{
+  "defaultProvider": "lokalai",
+  "providers": {
+    "lokalai": {
+      "endpoint": "https://lokalai.example/v1",
+      "apiKey": "${LOKALAI_API}",
+      "models": { "glm": "glm-5.3-flash" }
+    }
+  }
+}
+```
+
+```
+kloo --model glm "fix the test"      # no --provider needed
+```
+
+It supplies everything the flag would: endpoint, bearer key and alias expansion.
+
+Precedence is `--provider` > `KLOO_PROVIDER` > `defaultProvider`, so either still
+redirects a single run. `kloo doctor` shows which one won:
+
+```
+provider: lokalai (source=profile)     # flag | env | profile
+```
+
+The key is optional — a profile without it behaves exactly as before. If it names
+a provider the profile does not define, the run stops and blames the **file**,
+not a flag you never passed:
+
+```
+kloo: config: "/home/you/etc/kloo.json" sets "defaultProvider": "typo", but defines no such provider
+  it defines: lokalai
+
+Fix "defaultProvider", or override it for this run with --provider.
+```
+
 ### A model alias needs its provider
 
 Model aliases live under a provider's `models` block, so the same short name can
@@ -337,6 +379,7 @@ kloo doctor --json --provider openrouter --model deepseek/deepseek-v4-flash
 
 Human output is stable, line-oriented text. `--json` emits one JSON object with:
 
+- `provider`: the resolved provider and its `source` (`flag` / `env` / `profile`)
 - `profile`: path, whether it exists, and `source` (`flag` / `search` / `search-miss`); on a miss, every path searched
 - `provider`, `model`, `endpoint`, `ctx`, `effort`, budget knobs, `temperature`,
   `no_think`, and `tool_format`
