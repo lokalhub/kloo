@@ -22,6 +22,13 @@ type secretState struct {
 type profileDiagnostic struct {
 	Path   string `json:"path"`
 	Exists bool   `json:"exists"`
+	// Source records HOW Path was chosen: "flag" when --profile was given, else
+	// "search" (the first existing candidate) or "search-miss" (nothing exists
+	// anywhere). Searched is the candidate list, in precedence order, and is set
+	// only when --profile was NOT given — the one case where the user benefits from
+	// seeing where kloo looked.
+	Source   string   `json:"source"`
+	Searched []string `json:"searched,omitempty"`
 }
 
 type commandDiagnostic struct {
@@ -192,10 +199,20 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 	// Apply the configured fractions first so the numbers below describe the run
 	// the user would actually get, not the built-in defaults.
 	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	cwd, _ := os.Getwd()
 	path := profilePath
+	source := "flag"
+	var searched []string
 	if path == "" {
-		if p, err := config.DefaultProfilePathForDiagnostics(); err == nil {
-			path = p
+		var found string
+		found, searched = config.FindProfile(cwd)
+		if found != "" {
+			path, source = found, "search"
+		} else {
+			source = "search-miss"
+			if p, err := config.DefaultProfilePathForDiagnostics(); err == nil {
+				path = p
+			}
 		}
 	}
 	exists := false
@@ -204,7 +221,6 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 			exists = true
 		}
 	}
-	cwd, _ := os.Getwd()
 	verify := commandDiagnostic{Command: strings.TrimSpace(verifyOverride), Source: "override"}
 	if verify.Command == "" {
 		if cmd := detectVerify(cwd); cmd != "" {
@@ -243,7 +259,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		scopeDiag = scopeDiagnostic{Active: sc.Active(), Allow: sc.Allow, Deny: sc.Deny, ReadOnly: sc.ReadOnly}
 	}
 	return resolvedConfigDiagnostic{
-		Profile:             profileDiagnostic{Path: path, Exists: exists},
+		Profile:             profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
 		Provider:            cfg.Provider,
 		Model:               cfg.Model,
 		Endpoint:            cfg.Endpoint,
@@ -319,7 +335,16 @@ func writeDoctorJSON(out io.Writer, diag resolvedConfigDiagnostic) error {
 
 func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintln(out, "kloo doctor")
-	fmt.Fprintf(out, "profile: %s (exists=%t)\n", diag.Profile.Path, diag.Profile.Exists)
+	fmt.Fprintf(out, "profile: %s (exists=%t, source=%s)\n", diag.Profile.Path, diag.Profile.Exists, diag.Profile.Source)
+	// Only on a total miss is the candidate list worth the screen space: that is
+	// when the user has to decide WHERE to put a profile, and guessing is the thing
+	// this output exists to prevent.
+	if diag.Profile.Source == "search-miss" {
+		fmt.Fprintf(out, "profile searched (none found, in order):\n")
+		for _, p := range diag.Profile.Searched {
+			fmt.Fprintf(out, "  %s\n", p)
+		}
+	}
 	fmt.Fprintf(out, "provider: %s\n", diag.Provider)
 	fmt.Fprintf(out, "model: %s\n", diag.Model)
 	fmt.Fprintf(out, "endpoint: %s\n", diag.Endpoint)

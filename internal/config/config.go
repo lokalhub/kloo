@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -668,13 +667,24 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 
 	var providerModels map[string]string
 	if provider != "" {
+		// A provider can ONLY come from a profile — its endpoint, key and model
+		// aliases have no other source. So this is the one axis where an absent
+		// profile is fatal, and it must say so: before this check the run failed
+		// with `unknown --provider "lokalai"`, which sent the user looking for a
+		// typo in a file that was never found in the first place.
+		if profilePath == "" {
+			if found, candidates := FindProfile(workspaceDir()); found == "" {
+				return Config{}, profileNotFoundError(
+					fmt.Sprintf("--provider %q needs one", provider), candidates)
+			}
+		}
 		providers, err := loadProviders(profilePath)
 		if err != nil {
 			return Config{}, err
 		}
 		p, ok := providers[provider]
 		if !ok {
-			return Config{}, fmt.Errorf("config: unknown --provider %q (define it under \"providers\" in the profile)", provider)
+			return Config{}, unknownProviderError(provider, profilePath, providers)
 		}
 		if p.Endpoint != "" {
 			cfg.Endpoint = p.Endpoint
@@ -1147,38 +1157,4 @@ func expandValue(s string) string {
 		}
 	}
 	return os.ExpandEnv(s)
-}
-
-// defaultProfilePath resolves profiles.json from kloo's global home. As of the
-// session feature that home is ~/.kloo (matching the {workspace}/.kloo scheme);
-// the older XDG / ~/.config/kloo path is kept as a fallback for back-compat so
-// existing installs keep working.
-func defaultProfilePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	// Preferred: ~/.kloo/profiles.json — use it when present.
-	preferred := filepath.Join(home, ".kloo", "profiles.json")
-	if _, err := os.Stat(preferred); err == nil {
-		return preferred, nil
-	}
-	// Fallback: XDG, else legacy ~/.config/kloo (used only when it actually exists).
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "kloo", "profiles.json"), nil
-	}
-	legacy := filepath.Join(home, ".config", "kloo", "profiles.json")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy, nil
-	}
-	// Neither exists: default to the preferred path (a missing profile is not an
-	// error upstream — Resolve treats absent profiles as "use defaults").
-	return preferred, nil
-}
-
-// DefaultProfilePathForDiagnostics returns the profile path Resolve would inspect
-// when --profile is unset. It performs no profile parsing and does not require the
-// file to exist.
-func DefaultProfilePathForDiagnostics() (string, error) {
-	return defaultProfilePath()
 }
