@@ -12,7 +12,7 @@ flags  >  env (KLOO_*)  >  profile file  >  bundled per-model defaults  >  built
 ```mermaid
 flowchart LR
     D[built-in<br/>defaults] --> B["bundled per-model<br/>defaults"]
-    B --> P["profile file<br/>~/.config/kloo/profiles.json"]
+    B --> P["profile file<br/>(found by search — see below)"]
     P --> E["env<br/>KLOO_*"]
     E --> F[CLI flags]
     F --> R([effective config])
@@ -26,6 +26,149 @@ The **bundled per-model defaults** layer fills gaps for known coding models (see
 [Bundled per-model defaults](#bundled-per-model-defaults)) so they work without a
 hand-written profile. It sits **below** your profile, so the profile, env, and
 flags **always** override it; an unmatched model just keeps the built-in defaults.
+
+## Where the profile is found
+
+Pass `--profile <path>` and that file is used, full stop. With `--profile` unset,
+kloo searches these paths and uses the **first one that exists**, most specific
+first:
+
+| # | Path |
+|---|---|
+| 1 | `<workspace>/.kloo/kloo.json` |
+| 2 | `<workspace>/.kloo/profiles.json` |
+| 3 | `~/.kloo/kloo.json` |
+| 4 | `~/.kloo/profiles.json` |
+| 5 | `$XDG_CONFIG_HOME/kloo/kloo.json` *(only when `XDG_CONFIG_HOME` is set)* |
+| 6 | `$XDG_CONFIG_HOME/kloo/profiles.json` |
+| 7 | `~/.config/kloo/kloo.json` |
+| 8 | `~/.config/kloo/profiles.json` |
+| 9 | `~/etc/kloo.json` |
+| 10 | `~/etc/profiles.json` |
+| 11 | `/etc/kloo.json` |
+| 12 | `/etc/profiles.json` |
+
+Both basenames are accepted in every directory, so either name works wherever you
+put it. `<workspace>` is the directory kloo is run in — a repo-local profile lets
+one project pin a provider or a model alias without touching your own config, the
+way `.editorconfig` does.
+
+`kloo doctor` prints which file was chosen and how:
+
+```
+profile: /home/you/.kloo/kloo.json (exists=true, source=search)
+```
+
+`source` is `flag` when you passed `--profile`, `search` when it was discovered,
+and `search-miss` when nothing exists — in which case doctor also prints every
+path it looked at.
+
+### When "not found" is an error
+
+A missing profile is **not** an error on its own. kloo runs with no profile at all:
+the built-in defaults plus `--endpoint` / `--model` are enough.
+
+It is fatal for exactly one thing: **`--provider`**. A provider's endpoint, bearer
+key and model aliases can only come from a profile, so with none found the run
+stops and names every path searched:
+
+```
+$ kloo --provider lokalai "fix the test"
+kloo: config: profile not found — --provider "lokalai" needs one, and no profile
+exists at any of:
+  /home/you/repo/.kloo/kloo.json
+  ...
+  /etc/profiles.json
+
+Create one of those, or pass --profile <path>.
+```
+
+### A default provider
+
+Setting `--provider` on every invocation gets old, and forgetting it fails
+confusingly (see below). Name one in the profile instead:
+
+```json
+{
+  "defaultProvider": "lokalai",
+  "providers": {
+    "lokalai": {
+      "endpoint": "https://lokalai.example/v1",
+      "apiKey": "${LOKALAI_API}",
+      "models": { "glm": "glm-5.3-flash" }
+    }
+  }
+}
+```
+
+```
+kloo --model glm "fix the test"      # no --provider needed
+```
+
+It supplies everything the flag would: endpoint, bearer key and alias expansion.
+
+Precedence is `--provider` > `KLOO_PROVIDER` > `defaultProvider`, so either still
+redirects a single run. `kloo doctor` shows which one won:
+
+```
+provider: lokalai (source=profile)     # flag | env | profile
+```
+
+The key is optional — a profile without it behaves exactly as before. If it names
+a provider the profile does not define, the run stops and blames the **file**,
+not a flag you never passed:
+
+```
+kloo: config: "/home/you/etc/kloo.json" sets "defaultProvider": "typo", but defines no such provider
+  it defines: lokalai
+
+Fix "defaultProvider", or override it for this run with --provider.
+```
+
+### A model alias needs its provider
+
+Model aliases live under a provider's `models` block, so the same short name can
+mean different ids on different providers. That means an alias **only** resolves
+when you also pass `--provider`:
+
+```
+$ kloo --profile ~/etc/kloo.json --model glm
+kloo: config: --model "glm" is a model alias, but no --provider was given
+  Aliases are defined per provider, so without one kloo would send "glm" verbatim
+  to the default endpoint (http://127.0.0.1:8080/v1) instead of the provider's.
+
+  Add: --provider lokalai
+
+  Or pass --endpoint explicitly to use "glm" as a literal model id.
+```
+
+Before this check, that command ran: the alias stayed literal, the endpoint fell
+back to `127.0.0.1:8080`, the key stayed unset, and kloo retried five times
+against a server that was not running.
+
+The guard fires **only** when all of these hold, so an ordinary llama.cpp or
+Ollama run is untouched:
+
+- no `--provider` / `KLOO_PROVIDER`, **and**
+- no `--endpoint` / `KLOO_ENDPOINT` (an explicit endpoint means "this id is
+  literal"), **and**
+- the model name is actually defined as an alias by some provider in the profile.
+
+### Shadowing
+
+Because the search stops at the first **existing** file, a stale profile high in
+the list silently hides one lower down. When the chosen profile does not define the
+provider you asked for, the error names the file it read *and* any lower-precedence
+candidate that does define it:
+
+```
+kloo: config: unknown --provider "lokalai" in /home/you/.config/kloo/profiles.json (found by search)
+  that profile defines no providers at all
+
+  /home/you/etc/kloo.json DOES define "lokalai", but
+  /home/you/.config/kloo/profiles.json is searched first and shadows it.
+  Use --profile /home/you/etc/kloo.json, or remove the shadowing file.
+```
 
 The **effort tier** is resolved first and seeds the loop budgets (steps/tokens/
 churn/wall-clock). The **model is a separate axis** — flags/env/profile set it
@@ -72,7 +215,7 @@ churn detection as the primary guard).
 | `--stop-on` | _(unset)_ | Detectable hard-stop rule(s) (repeatable/comma-separated): `off-scope-edit`, `read-only-edit`, `repeated-verify=N`. See [stop rules](#hard-stop-rules---stop-on). |
 | `--precheck` | _(unset)_ | Harness command run **before** verify each turn (repeatable; **not** comma-split — a command may contain commas). A failing precheck blocks verify+postcheck and is non-success. See [verifier hooks](#verifier-hooks---precheck----postcheck). |
 | `--postcheck` | _(unset)_ | Harness command run **after** a passing verify (repeatable). A failing postcheck is non-success even though verify passed. |
-| `--profile` | _(unset)_ | Path to `profiles.json`; defaults to `~/.config/kloo/profiles.json`. |
+| `--profile` | _(unset)_ | Path to the profile JSON. When unset, kloo searches the workspace, your home and `/etc` — see [Where the profile is found](#where-the-profile-is-found). |
 
 For copy-pasteable benchmark harness commands and artifact capture recipes, see
 [benchmarking.md](benchmarking.md).
@@ -236,7 +379,8 @@ kloo doctor --json --provider openrouter --model deepseek/deepseek-v4-flash
 
 Human output is stable, line-oriented text. `--json` emits one JSON object with:
 
-- `profile`: path and whether it exists
+- `provider`: the resolved provider and its `source` (`flag` / `env` / `profile`)
+- `profile`: path, whether it exists, and `source` (`flag` / `search` / `search-miss`); on a miss, every path searched
 - `provider`, `model`, `endpoint`, `ctx`, `effort`, budget knobs, `temperature`,
   `no_think`, and `tool_format`
 - `api_key`: only `set` and `redacted`, never the value
@@ -338,7 +482,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); not needed for a local llama.cpp / Ollama server, which has no auth. |
 | `OPENAI_API_KEY` | Fallback bearer token used only when `KLOO_API_KEY` is unset. |
 | `KLOO_MCP` | Set to `0` / `false` to disable all [MCP servers](mcp.md). `--no-mcp` overrides it; both override the profile. |
-| `XDG_CONFIG_HOME` | If set, the profile file lives at `$XDG_CONFIG_HOME/kloo/profiles.json`. |
+| `XDG_CONFIG_HOME` | If set, `$XDG_CONFIG_HOME/kloo/` joins the [profile search chain](#where-the-profile-is-found), between `~/.kloo` and `~/.config/kloo`. |
 | `NO_COLOR` | Disables all TUI colour (see [tui.md](tui.md)). |
 | `KLOO_CURATOR_BUDGET` | Cap on the per-step assembled repo map (same as `--curator-budget`). |
 | `KLOO_REPEAT_NUDGE_ROUNDS` | Repetition-rail nudge threshold (same as `--repeat-nudge-rounds`). Only a value **greater than 0** is accepted; `0`, a negative number, or a non-integer is silently ignored and the built-in default `3` applies. |

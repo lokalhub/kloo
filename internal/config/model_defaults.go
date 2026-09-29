@@ -34,6 +34,13 @@ var bundledModelDefaults = []modelDefault{
 	{match: "qwen3-coder", toolFormat: "native", temperature: 0.1, maxContextTokens: 32768},
 	// Devstral-Small-2-24B. ~128K window; Mistral's published coding temp region.
 	{match: "devstral", toolFormat: "native", temperature: 0.15, maxContextTokens: 32768},
+	// GLM-4.6 / GLM-5.x (incl. glm-5.3-flash on lokalai). Native function calling
+	// verified against the endpoint 2026-09-28: it emits a well-formed tool_calls
+	// block and, unlike muse-glimmer-30b, spends no hidden reasoning budget before
+	// the first visible token. Raw window measured at 262144 (max_tokens 262130 on a
+	// 14-token prompt is accepted; 262145 is rejected) — bounded here to a 32K
+	// curator budget, same as the other 256K-window row above.
+	{match: "glm", toolFormat: "native", temperature: 0.1, maxContextTokens: 32768},
 	// DeepSeek-Coder (the original 16K-window coder line). MUST precede the
 	// "deepseek" row below, since "deepseek" is a substring of these ids and
 	// first-match-wins would otherwise mis-route it to the v3 row.

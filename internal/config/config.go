@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -168,6 +167,12 @@ var ErrProfileParse = errors.New("parse profile file")
 type Config struct {
 	Endpoint string
 	Model    string
+	// ProviderSource records WHERE Provider came from: "flag", "env", "profile"
+	// (the reserved "defaultProvider" key) or "" when no provider is in play. It is
+	// diagnostic only — nothing keys off it — but `kloo doctor` showing "profile"
+	// is what makes an inherited default visible instead of mysterious.
+	ProviderSource string
+
 	// Provider is the resolved provider name (--provider / KLOO_PROVIDER), or ""
 	// when none was selected. It seeds Endpoint/APIKey; it is not sent to the
 	// endpoint (informational/debug).
@@ -464,6 +469,25 @@ func loadProviders(profilePath string) (map[string]providerEntry, error) {
 	return file.Providers, nil
 }
 
+// loadDefaultProvider reads the reserved top-level "defaultProvider" key: the
+// provider to use when neither --provider nor KLOO_PROVIDER names one. It exists
+// because a profile that defines exactly one provider still required the flag on
+// every single invocation, and forgetting it failed in a way that pointed at the
+// network rather than at the missing flag.
+func loadDefaultProvider(profilePath string) (string, error) {
+	data, path, err := readProfileFile(profilePath)
+	if err != nil || data == nil {
+		return "", err
+	}
+	var file struct {
+		DefaultProvider string `json:"defaultProvider"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return "", fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
+	}
+	return strings.TrimSpace(file.DefaultProvider), nil
+}
+
 // ProviderInfo is a named provider's resolved endpoint + key, suitable for
 // live provider switching in the TUI without re-parsing the full config.
 type ProviderInfo struct {
@@ -661,20 +685,53 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	// the PROFILE layer here, so KLOO_ENDPOINT/KLOO_API_KEY and --endpoint still win
 	// in the env/flag layers below.
 	provider := getenv(EnvProvider)
+	providerSource := ""
+	if provider != "" {
+		providerSource = "env"
+	}
 	if flags.Provider != nil {
-		provider = *flags.Provider
+		provider, providerSource = *flags.Provider, "flag"
+	}
+	// Profile default, BELOW flag and env: a profile that defines one provider
+	// should not need --provider on every invocation. Resolved before the provider
+	// block is loaded so everything downstream — endpoint, key, alias expansion —
+	// behaves exactly as if the flag had been passed.
+	providerFromDefault := false
+	if provider == "" {
+		def, err := loadDefaultProvider(profilePath)
+		if err != nil {
+			return Config{}, err
+		}
+		if def != "" {
+			provider, providerFromDefault, providerSource = def, true, "profile"
+		}
 	}
 	cfg.Provider = provider
+	cfg.ProviderSource = providerSource
 
 	var providerModels map[string]string
 	if provider != "" {
+		// A provider can ONLY come from a profile — its endpoint, key and model
+		// aliases have no other source. So this is the one axis where an absent
+		// profile is fatal, and it must say so: before this check the run failed
+		// with `unknown --provider "lokalai"`, which sent the user looking for a
+		// typo in a file that was never found in the first place.
+		if profilePath == "" {
+			if found, candidates := FindProfile(workspaceDir()); found == "" {
+				return Config{}, profileNotFoundError(
+					fmt.Sprintf("--provider %q needs one", provider), candidates)
+			}
+		}
 		providers, err := loadProviders(profilePath)
 		if err != nil {
 			return Config{}, err
 		}
 		p, ok := providers[provider]
 		if !ok {
-			return Config{}, fmt.Errorf("config: unknown --provider %q (define it under \"providers\" in the profile)", provider)
+			if providerFromDefault {
+				return Config{}, unknownDefaultProviderError(provider, profilePath, providers)
+			}
+			return Config{}, unknownProviderError(provider, profilePath, providers)
 		}
 		if p.Endpoint != "" {
 			cfg.Endpoint = p.Endpoint
@@ -698,6 +755,18 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	// Expand a provider model alias to the real id BEFORE anything keys off the
 	// model: the per-model profile entry and the bundled-defaults table both match
 	// on the id, so an unexpanded alias silently misses both layers.
+	// A model alias with no --provider is almost always a forgotten flag, and
+	// until now it failed in the most confusing way available: the alias stayed
+	// literal, the endpoint fell back to 127.0.0.1:8080, the key stayed unset, and
+	// kloo cheerfully retried five times against a server that was not running.
+	// Real incident: `kloo --profile ~/etc/kloo.json --model glm` (no --provider)
+	// spent 1m26s on "connection refused" while the endpoint that serves glm was
+	// perfectly healthy. Catch it here, where the answer is unambiguous.
+	if provider == "" && getenv(EnvEndpoint) == "" && flags.Endpoint == nil {
+		if owners := providersDefiningAlias(profilePath, modelSel); len(owners) > 0 {
+			return Config{}, aliasNeedsProviderError(modelSel, owners)
+		}
+	}
 	if real, ok := providerModels[modelSel]; ok && real != "" {
 		modelSel = real
 	}
@@ -1061,14 +1130,31 @@ func loadProfileEntry(profilePath, model string) (*profileEntry, error) {
 	if err != nil || data == nil {
 		return nil, err
 	}
-	var profiles map[string]profileEntry
-	if err := json.Unmarshal(data, &profiles); err != nil {
+	// Decode the top level as raw values and parse ONLY the requested model's
+	// entry. Decoding straight into map[string]profileEntry made every top-level
+	// key a model entry, so a single scalar setting anywhere in the file — e.g.
+	// "defaultProvider": "lokalai" — failed with `cannot unmarshal string into Go
+	// value of type config.profileEntry` and took the whole profile down with it,
+	// including the providers block that had nothing to do with it. Reserved keys
+	// are settings, not models; skipping non-objects is what lets the two coexist.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
 	}
-	if entry, ok := profiles[model]; ok {
-		return &entry, nil
+	body, ok := raw[model]
+	if !ok {
+		return nil, nil
 	}
-	return nil, nil
+	if len(body) == 0 || body[0] != '{' {
+		// A non-object under a model name is a settings key, not tuning for a model
+		// that happens to share its name. Ignore it rather than fail the run.
+		return nil, nil
+	}
+	var entry profileEntry
+	if err := json.Unmarshal(body, &entry); err != nil {
+		return nil, fmt.Errorf("config: %w %s: per-model entry %q: %v", ErrProfileParse, path, model, err)
+	}
+	return &entry, nil
 }
 
 // loadEffortOverride reads the optional "efforts" section of the profile file and
@@ -1147,38 +1233,4 @@ func expandValue(s string) string {
 		}
 	}
 	return os.ExpandEnv(s)
-}
-
-// defaultProfilePath resolves profiles.json from kloo's global home. As of the
-// session feature that home is ~/.kloo (matching the {workspace}/.kloo scheme);
-// the older XDG / ~/.config/kloo path is kept as a fallback for back-compat so
-// existing installs keep working.
-func defaultProfilePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	// Preferred: ~/.kloo/profiles.json — use it when present.
-	preferred := filepath.Join(home, ".kloo", "profiles.json")
-	if _, err := os.Stat(preferred); err == nil {
-		return preferred, nil
-	}
-	// Fallback: XDG, else legacy ~/.config/kloo (used only when it actually exists).
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "kloo", "profiles.json"), nil
-	}
-	legacy := filepath.Join(home, ".config", "kloo", "profiles.json")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy, nil
-	}
-	// Neither exists: default to the preferred path (a missing profile is not an
-	// error upstream — Resolve treats absent profiles as "use defaults").
-	return preferred, nil
-}
-
-// DefaultProfilePathForDiagnostics returns the profile path Resolve would inspect
-// when --profile is unset. It performs no profile parsing and does not require the
-// file to exist.
-func DefaultProfilePathForDiagnostics() (string, error) {
-	return defaultProfilePath()
 }
