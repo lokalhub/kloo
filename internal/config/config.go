@@ -448,6 +448,13 @@ type providerEntry struct {
 	// the 8000-token built-in window. The alias is expanded BEFORE the per-model
 	// profile lookup and the bundled-defaults table, so both see the real id.
 	Models map[string]string `json:"models,omitempty"`
+	// DefaultModel is the model to use when neither --model nor KLOO_MODEL names
+	// one and THIS provider is selected. It belongs per provider rather than only
+	// at the top level because the right model depends on who is serving: the
+	// built-in fallback ("local") is meaningful to a llama.cpp server and
+	// meaningless to a hosted endpoint, which rejects it outright. It may be an
+	// alias from Models — it is resolved before expansion, so both work.
+	DefaultModel string `json:"defaultModel,omitempty"`
 }
 
 // loadProviders reads the reserved "providers" block from the profile file. Like
@@ -486,6 +493,23 @@ func loadDefaultProvider(profilePath string) (string, error) {
 		return "", fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
 	}
 	return strings.TrimSpace(file.DefaultProvider), nil
+}
+
+// loadDefaultModel reads the reserved top-level "defaultModel" key: the fallback
+// model when no flag, env or provider default names one. It is the cross-provider
+// rung, below a provider's own defaultModel.
+func loadDefaultModel(profilePath string) (string, error) {
+	data, path, err := readProfileFile(profilePath)
+	if err != nil || data == nil {
+		return "", err
+	}
+	var file struct {
+		DefaultModel string `json:"defaultModel"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return "", fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
+	}
+	return strings.TrimSpace(file.DefaultModel), nil
 }
 
 // ProviderInfo is a named provider's resolved endpoint + key, suitable for
@@ -710,6 +734,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	cfg.ProviderSource = providerSource
 
 	var providerModels map[string]string
+	var providerDefaultModel string
 	if provider != "" {
 		// A provider can ONLY come from a profile — its endpoint, key and model
 		// aliases have no other source. So this is the one axis where an absent
@@ -740,12 +765,26 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.APIKey = expandValue(p.APIKey)
 		}
 		providerModels = p.Models
+		providerDefaultModel = strings.TrimSpace(p.DefaultModel)
 	}
 
 	// Resolve the model selector (flag > env > default). The model id is used
 	// verbatim — a provider supplies only the endpoint+key, so the same raw id
 	// (e.g. "deepseek/deepseek-v4-flash") describes which model to serve.
+	// Model selector: flag > env > the selected provider's defaultModel > the
+	// profile's top-level defaultModel > the built-in. Without the provider rungs,
+	// selecting a provider and nothing else resolved the endpoint and key correctly
+	// and then sent the built-in "local", which a hosted endpoint rejects — the
+	// config was right and the run still failed.
 	modelSel := DefaultModel
+	if def, err := loadDefaultModel(profilePath); err != nil {
+		return Config{}, err
+	} else if def != "" {
+		modelSel = def
+	}
+	if providerDefaultModel != "" {
+		modelSel = providerDefaultModel
+	}
 	if v := getenv(EnvModel); v != "" {
 		modelSel = v
 	}

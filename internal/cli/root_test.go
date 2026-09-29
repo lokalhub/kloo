@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/config"
+	"github.com/lokalhub/kloo/internal/configtest"
 )
 
 // runCmd builds the root command with injected deps and the given args.
@@ -94,6 +95,10 @@ func TestFlagsMapToConfig(t *testing.T) {
 // TestDefaultsWhenNoFlags: with no flags, resolved config is the documented
 // defaults (proves unset flags do NOT override via Changed()-gating).
 func TestDefaultsWhenNoFlags(t *testing.T) {
+	// "no flags" must also mean "no profile", and the profile search chain reaches
+	// into $HOME — without this the test reads the developer's own profile and the
+	// assertion below becomes a statement about their laptop.
+	configtest.IsolateProfileSearch(t)
 	var gotCfg config.Config
 	deps := Deps{RunHeadless: func(cfg config.Config, task, verifyCmd string, lint lintOpts, out io.Writer) error {
 		gotCfg = cfg

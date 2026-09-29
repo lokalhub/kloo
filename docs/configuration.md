@@ -125,6 +125,49 @@ kloo: config: "/home/you/etc/kloo.json" sets "defaultProvider": "typo", but defi
 Fix "defaultProvider", or override it for this run with --provider.
 ```
 
+### A default model
+
+`defaultProvider` gets you the right endpoint and key, but the **model** still
+falls back to the built-in `local`, which a hosted endpoint rejects:
+
+```
+kloo: model "local" is not in the endpoint's catalog
+```
+
+Name one per provider — the right model depends on who is serving it:
+
+```json
+{
+  "defaultProvider": "lokalai",
+  "providers": {
+    "lokalai": {
+      "endpoint": "https://lokalai.example/v1",
+      "apiKey": "${LOKALAI_API}",
+      "defaultModel": "glimmer",
+      "models": { "glimmer": "muse-glimmer-30b", "glm": "glm-5.3-flash" }
+    }
+  }
+}
+```
+
+```
+kloo "fix the test"      # no flags at all
+```
+
+A top-level `"defaultModel"` applies when no provider is selected or the selected
+one names none — useful for a plain llama.cpp setup that always serves the same
+model. Either may be an alias from the provider's `models` block; it is resolved
+before expansion, so short names work.
+
+Full precedence:
+
+```
+--model  >  KLOO_MODEL  >  provider defaultModel  >  top-level defaultModel  >  built-in
+```
+
+With none of them set, the built-in default stands, so an existing setup is
+unchanged.
+
 ### A model alias needs its provider
 
 Model aliases live under a provider's `models` block, so the same short name can

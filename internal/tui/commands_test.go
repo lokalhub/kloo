@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lokalhub/kloo/internal/configtest"
 	"github.com/lokalhub/kloo/internal/llm"
 )
 
@@ -393,6 +394,9 @@ func TestSlashProviderUnknownNameShowsOptions(t *testing.T) {
 }
 
 func TestSlashProviderNoProfileGraceful(t *testing.T) {
+	// "no profile configured" has to be true of the MACHINE too, not just of the
+	// model: the search chain would otherwise find the developer's own profile.
+	configtest.IsolateProfileSearch(t)
 	m := newSized() // no profilePath
 	m2 := typeAndEnter(m, "/provider openrouter")
 	if !contains(m2.View(), "provider") {

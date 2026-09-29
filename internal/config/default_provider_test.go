@@ -122,3 +122,100 @@ func TestScalarKeyDoesNotBreakTheProfile(t *testing.T) {
 		t.Errorf("ctx = %d: the per-model entry was lost alongside the scalar key", cfg.MaxContextTokens)
 	}
 }
+
+// TestProviderDefaultModel closes the second half of the same papercut. Selecting a
+// provider resolved the endpoint and key correctly and then sent the built-in
+// "local", which a hosted endpoint rejects — config right, run still dead:
+//
+//	kloo: model "local" is not in the endpoint's catalog
+//
+// A provider's own defaultModel fixes it, and must go through alias expansion so
+// the short name in "models" is usable here too.
+func TestProviderDefaultModel(t *testing.T) {
+	path := writeProfile(t, `{
+	  "defaultProvider": "lokalai",
+	  "providers": {
+	    "lokalai": {
+	      "endpoint": "https://a.invalid/v1",
+	      "defaultModel": "glm",
+	      "models": {"glm": "glm-5.3-flash"}
+	    }
+	  },
+	  "glm-5.3-flash": {"maxContextTokens": 131072}
+	}`)
+	cfg, err := Resolve(Flags{}, envFunc(nil), path)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Model != "glm-5.3-flash" {
+		t.Errorf("model = %q, want the provider default expanded through its alias", cfg.Model)
+	}
+	if cfg.MaxContextTokens != 131072 {
+		t.Errorf("ctx = %d: the per-model entry for the expanded id was missed", cfg.MaxContextTokens)
+	}
+}
+
+// TestModelPrecedence walks every rung: flag > env > provider default > top-level
+// default > built-in. Each one must beat the one below it and nothing else.
+func TestModelPrecedence(t *testing.T) {
+	const body = `{
+	  "defaultProvider": "lokalai",
+	  "defaultModel": "top-level-model",
+	  "providers": {"lokalai": {"endpoint": "https://a.invalid/v1", "defaultModel": "provider-model"}}
+	}`
+	path := writeProfile(t, body)
+
+	cfg, err := Resolve(Flags{Model: strp("flag-model")}, envFunc(map[string]string{EnvModel: "env-model"}), path)
+	if err != nil || cfg.Model != "flag-model" {
+		t.Errorf("flag should win: model=%q err=%v", cfg.Model, err)
+	}
+	cfg, err = Resolve(Flags{}, envFunc(map[string]string{EnvModel: "env-model"}), path)
+	if err != nil || cfg.Model != "env-model" {
+		t.Errorf("env should beat the profile defaults: model=%q err=%v", cfg.Model, err)
+	}
+	cfg, err = Resolve(Flags{}, envFunc(nil), path)
+	if err != nil || cfg.Model != "provider-model" {
+		t.Errorf("provider default should beat the top-level one: model=%q err=%v", cfg.Model, err)
+	}
+
+	// Same profile minus the provider's own default: the top-level one takes over.
+	path2 := writeProfile(t, `{
+	  "defaultProvider": "lokalai",
+	  "defaultModel": "top-level-model",
+	  "providers": {"lokalai": {"endpoint": "https://a.invalid/v1"}}
+	}`)
+	cfg, err = Resolve(Flags{}, envFunc(nil), path2)
+	if err != nil || cfg.Model != "top-level-model" {
+		t.Errorf("top-level default should apply: model=%q err=%v", cfg.Model, err)
+	}
+
+	// And with neither, the built-in stands — an existing llama.cpp setup that
+	// names no default must keep working exactly as before.
+	path3 := writeProfile(t, `{"providers":{"lokalai":{"endpoint":"https://a.invalid/v1"}}}`)
+	cfg, err = Resolve(Flags{}, envFunc(nil), path3)
+	if err != nil || cfg.Model != DefaultModel {
+		t.Errorf("built-in default should stand: model=%q want %q err=%v", cfg.Model, DefaultModel, err)
+	}
+}
+
+// TestTopLevelDefaultModelAppliesWithoutAnyProvider: defaultModel is not tied to
+// providers. A bare llama.cpp user naming their served model in the profile should
+// not have to repeat --model on every run either.
+func TestTopLevelDefaultModelAppliesWithoutAnyProvider(t *testing.T) {
+	path := writeProfile(t, `{"defaultModel": "qwen2.5-coder-7b"}`)
+	cfg, err := Resolve(Flags{}, envFunc(nil), path)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Model != "qwen2.5-coder-7b" {
+		t.Errorf("model = %q, want the top-level default", cfg.Model)
+	}
+	if cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("endpoint = %q, want the built-in — defaultModel must not imply a provider", cfg.Endpoint)
+	}
+	// The bundled table is keyed by the resolved id, so this also proves the default
+	// lands before that layer runs.
+	if cfg.MaxContextTokens != 24576 {
+		t.Errorf("ctx = %d, want the bundled qwen2.5-coder row (24576)", cfg.MaxContextTokens)
+	}
+}
