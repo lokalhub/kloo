@@ -143,3 +143,29 @@ func TestApplyBundledDefaults(t *testing.T) {
 		})
 	}
 }
+
+// TestGLMRowMatchesLokalaiID pins the row added for the lokalai endpoint's
+// glm-5.3-flash. The match key is only three characters, so this also guards the
+// two properties that make a short key safe: it hits the real id, and it does not
+// steal any OTHER id already in the table (first-match-wins means a stray hit
+// would silently re-route that model's window and temperature).
+func TestGLMRowMatchesLokalaiID(t *testing.T) {
+	got := lookupModelDefaults("glm-5.3-flash")
+	if got.match != "glm" {
+		t.Fatalf("glm-5.3-flash matched %q, want the glm row", got.match)
+	}
+	if got.toolFormat != "native" {
+		t.Errorf("toolFormat = %q, want native (verified against the endpoint)", got.toolFormat)
+	}
+	if got.maxContextTokens != 32768 {
+		t.Errorf("maxContextTokens = %d, want 32768", got.maxContextTokens)
+	}
+	for _, other := range []string{
+		"qwen2.5-coder-32b", "qwen3-coder-30b-a3b", "devstral-small-2-24b",
+		"deepseek-coder-6.7b", "deepseek/deepseek-v4-flash", "muse-glimmer-30b",
+	} {
+		if lookupModelDefaults(other).match == "glm" {
+			t.Errorf("%s was captured by the glm row", other)
+		}
+	}
+}

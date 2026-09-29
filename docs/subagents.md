@@ -20,7 +20,7 @@ the loop delegates on its behalf. This is the mode that was measured.
 export KLOO_AUTO_DELEGATE=1
 export KLOO_DELEGATE_AFTER_READS=18
 export KLOO_SUBAGENT_STEPS=25
-export KLOO_SUBAGENT_MODEL=qwen3.8-27b-nvfp4   # optional: route the child elsewhere
+export KLOO_SUBAGENT_MODEL=glm-5.3-flash   # optional: route the child elsewhere
 ```
 
 ## What the child does and does not share
