@@ -83,6 +83,35 @@ exists at any of:
 Create one of those, or pass --profile <path>.
 ```
 
+### A model alias needs its provider
+
+Model aliases live under a provider's `models` block, so the same short name can
+mean different ids on different providers. That means an alias **only** resolves
+when you also pass `--provider`:
+
+```
+$ kloo --profile ~/etc/kloo.json --model glm
+kloo: config: --model "glm" is a model alias, but no --provider was given
+  Aliases are defined per provider, so without one kloo would send "glm" verbatim
+  to the default endpoint (http://127.0.0.1:8080/v1) instead of the provider's.
+
+  Add: --provider lokalai
+
+  Or pass --endpoint explicitly to use "glm" as a literal model id.
+```
+
+Before this check, that command ran: the alias stayed literal, the endpoint fell
+back to `127.0.0.1:8080`, the key stayed unset, and kloo retried five times
+against a server that was not running.
+
+The guard fires **only** when all of these hold, so an ordinary llama.cpp or
+Ollama run is untouched:
+
+- no `--provider` / `KLOO_PROVIDER`, **and**
+- no `--endpoint` / `KLOO_ENDPOINT` (an explicit endpoint means "this id is
+  literal"), **and**
+- the model name is actually defined as an alias by some provider in the profile.
+
 ### Shadowing
 
 Because the search stops at the first **existing** file, a stale profile high in

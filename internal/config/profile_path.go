@@ -200,3 +200,46 @@ func sortedKeys(m map[string]providerEntry) []string {
 	sort.Strings(names)
 	return names
 }
+
+// providersDefiningAlias returns the names of the providers in the profile whose
+// "models" block defines alias, sorted. Empty when the profile has none — which
+// includes the ordinary case of a real model id that is nobody's alias, so this
+// stays silent for every run that is not the mistake it is looking for.
+func providersDefiningAlias(profilePath, alias string) []string {
+	if alias == "" {
+		return nil
+	}
+	providers, err := loadProviders(profilePath)
+	if err != nil {
+		return nil // malformed profile is reported elsewhere; do not double-fault
+	}
+	var owners []string
+	for name, p := range providers {
+		if real, ok := p.Models[alias]; ok && real != "" {
+			owners = append(owners, name)
+		}
+	}
+	sort.Strings(owners)
+	return owners
+}
+
+// aliasNeedsProviderError explains a model alias used without --provider. Aliases
+// are provider-scoped by design (the same short name can mean different things on
+// different providers), so kloo cannot pick one for the user — but it can say
+// exactly which flag to add, which is the whole difference between this and five
+// retries against localhost.
+func aliasNeedsProviderError(alias string, owners []string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "config: --model %q is a model alias, but no --provider was given", alias)
+	b.WriteString("\n  Aliases are defined per provider, so without one kloo would send")
+	fmt.Fprintf(&b, " %q verbatim\n  to the default endpoint (%s) instead of the provider's.\n", alias, DefaultEndpoint)
+	switch len(owners) {
+	case 1:
+		fmt.Fprintf(&b, "\n  Add: --provider %s", owners[0])
+	default:
+		fmt.Fprintf(&b, "\n  %q is defined by: %s\n  Add --provider with the one you want.",
+			alias, strings.Join(owners, ", "))
+	}
+	fmt.Fprintf(&b, "\n\n  Or pass --endpoint explicitly to use %q as a literal model id.", alias)
+	return errors.New(b.String())
+}

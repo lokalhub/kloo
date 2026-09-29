@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // noEnv is an empty environment: these tests exercise the profile layer only.
 func noEnv(string) string { return "" }
@@ -86,13 +89,32 @@ func TestAliasIsProviderScoped(t *testing.T) {
 		}
 	}
 
+	// With no --provider the alias must still not apply — but as of the profile
+	// search work this is a hard ERROR rather than a silent pass-through. The old
+	// behaviour sent the alias verbatim to the default endpoint, which in the real
+	// incident meant five retries and 1m26s against 127.0.0.1:8080 while the
+	// endpoint that actually serves the model was healthy. kloo cannot pick a
+	// provider (that is the whole point of scoping), but it can name the flag.
 	model := "fast"
-	cfg, err := Resolve(Flags{Model: &model}, noEnv, profile)
+	_, err := Resolve(Flags{Model: &model}, noEnv, profile)
+	if err == nil {
+		t.Fatal("an alias with no --provider must not resolve silently")
+	}
+	for _, want := range []string{"fast", "--provider", "local, openrouter"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error is missing %q:\n%s", want, err)
+		}
+	}
+
+	// The escape hatch: an explicit --endpoint says "I mean this literally", so the
+	// same call resolves and the alias is left alone.
+	endpoint := "http://example.invalid/v1"
+	cfg, err := Resolve(Flags{Model: &model, Endpoint: &endpoint}, noEnv, profile)
 	if err != nil {
-		t.Fatalf("Resolve(no provider): %v", err)
+		t.Fatalf("explicit --endpoint must bypass the guard: %v", err)
 	}
 	if cfg.Model != "fast" {
-		t.Errorf("with no --provider the alias must not apply, got %q", cfg.Model)
+		t.Errorf("with --endpoint the alias must not apply, got %q", cfg.Model)
 	}
 }
 

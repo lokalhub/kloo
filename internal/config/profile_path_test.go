@@ -278,3 +278,58 @@ func TestProfileSearchPathsDedupes(t *testing.T) {
 		t.Errorf("precedence lost after dedupe: ~/.kloo at %d, ~/.config/kloo at %d", a, b)
 	}
 }
+
+// TestAliasWithoutProviderNamesTheFlag reproduces the reported incident exactly:
+// `kloo --profile ~/etc/kloo.json --model glm` with no --provider. Before the
+// guard the alias stayed literal, the endpoint fell back to 127.0.0.1:8080 and the
+// key stayed unset, so kloo retried five times over 1m26s against a server that
+// was not running — while the endpoint serving that model was healthy.
+func TestAliasWithoutProviderNamesTheFlag(t *testing.T) {
+	path := writeProfile(t, `{
+	  "providers": {
+	    "lokalai": {
+	      "endpoint": "https://example.invalid/v1",
+	      "models": {"glm": "glm-5.3-flash", "glimmer": "muse-glimmer-30b"}
+	    }
+	  }
+	}`)
+	_, err := Resolve(Flags{Model: strp("glm")}, envFunc(nil), path)
+	if err == nil {
+		t.Fatal("alias with no --provider resolved silently")
+	}
+	msg := err.Error()
+	// With exactly one owner the message must give the literal flag to add, not a
+	// list to choose from — that is the difference between a fix and a hint.
+	if !strings.Contains(msg, "--provider lokalai") {
+		t.Errorf("error should name the flag to add:\n%s", msg)
+	}
+}
+
+// TestRealModelIDWithoutProviderIsSilent: the guard must fire ONLY on the mistake.
+// A real model id that is nobody's alias runs against the default endpoint exactly
+// as before — that is the ordinary llama.cpp/Ollama case and must not regress.
+func TestRealModelIDWithoutProviderIsSilent(t *testing.T) {
+	path := writeProfile(t, `{"providers":{"lokalai":{"models":{"glm":"glm-5.3-flash"}}}}`)
+	cfg, err := Resolve(Flags{Model: strp("qwen2.5-coder-7b")}, envFunc(nil), path)
+	if err != nil {
+		t.Fatalf("a non-alias model must not trip the guard: %v", err)
+	}
+	if cfg.Model != "qwen2.5-coder-7b" || cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("model=%q endpoint=%q, want the id verbatim on the default endpoint",
+			cfg.Model, cfg.Endpoint)
+	}
+}
+
+// TestAliasWithExplicitEndpointIsAllowed: KLOO_ENDPOINT is the same "I mean this
+// literally" signal as --endpoint, so the guard must respect it from the env too.
+func TestAliasWithExplicitEndpointIsAllowed(t *testing.T) {
+	path := writeProfile(t, `{"providers":{"lokalai":{"models":{"glm":"glm-5.3-flash"}}}}`)
+	env := envFunc(map[string]string{EnvEndpoint: "http://example.invalid/v1"})
+	cfg, err := Resolve(Flags{Model: strp("glm")}, env, path)
+	if err != nil {
+		t.Fatalf("KLOO_ENDPOINT must bypass the guard: %v", err)
+	}
+	if cfg.Model != "glm" {
+		t.Errorf("model = %q, want the alias left literal", cfg.Model)
+	}
+}

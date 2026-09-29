@@ -708,6 +708,18 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	// Expand a provider model alias to the real id BEFORE anything keys off the
 	// model: the per-model profile entry and the bundled-defaults table both match
 	// on the id, so an unexpanded alias silently misses both layers.
+	// A model alias with no --provider is almost always a forgotten flag, and
+	// until now it failed in the most confusing way available: the alias stayed
+	// literal, the endpoint fell back to 127.0.0.1:8080, the key stayed unset, and
+	// kloo cheerfully retried five times against a server that was not running.
+	// Real incident: `kloo --profile ~/etc/kloo.json --model glm` (no --provider)
+	// spent 1m26s on "connection refused" while the endpoint that serves glm was
+	// perfectly healthy. Catch it here, where the answer is unambiguous.
+	if provider == "" && getenv(EnvEndpoint) == "" && flags.Endpoint == nil {
+		if owners := providersDefiningAlias(profilePath, modelSel); len(owners) > 0 {
+			return Config{}, aliasNeedsProviderError(modelSel, owners)
+		}
+	}
 	if real, ok := providerModels[modelSel]; ok && real != "" {
 		modelSel = real
 	}
