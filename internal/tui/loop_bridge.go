@@ -531,6 +531,7 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 		VerifyCmd:  rep.FinalVerify.Command,
 		VerifyExit: rep.FinalVerify.ExitCode,
 		RolledBack: rep.RolledBack,
+		Summary:    rep.Summary,
 	}
 	switch {
 	case rep.Err != nil:

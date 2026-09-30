@@ -73,6 +73,12 @@ type reportMsg struct {
 	VerifyCmd  string
 	VerifyExit int
 	RolledBack bool
+	// Summary is the text the model passed to the finish tool. On a question or
+	// review task it IS the answer, and it used to be dropped here: the model
+	// composed a reply, kloo captured it on the Report, and the terminal showed a
+	// receipt (steps/tokens/elapsed) with the answer nowhere on screen. Reported as
+	// kloo "not feeling like" grok or Claude on the same model and question.
+	Summary string
 }
 
 // handleReport renders the terminal state and returns the UI to idle. A
@@ -98,6 +104,13 @@ func (ri reportItem) render(width int) string {
 	title := bannerTitle(r.Reason)
 
 	var b strings.Builder
+	// The answer comes FIRST. A summary is what the model wanted to tell the user;
+	// the counters below are bookkeeping, and burying prose under them (or dropping
+	// it, as this did) is what made a question to kloo feel unanswered.
+	if sum := strings.TrimSpace(r.Summary); sum != "" {
+		b.WriteString(sum)
+		b.WriteString("\n\n")
+	}
 	fmt.Fprintf(&b, "■ run stopped — %s\n", title)
 	if r.Detail != "" {
 		fmt.Fprintf(&b, "reason:  %s\n", r.Detail)

@@ -9,6 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/lokalhub/kloo/internal/configtest"
 	"github.com/muesli/termenv"
 )
 
@@ -18,7 +20,13 @@ import (
 // forces the ascii colour profile so goldens carry no ANSI escapes.
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.Ascii)
-	os.Exit(m.Run())
+	// Isolate the profile search for the whole package: kloo's config resolution
+	// reads $HOME, so without this a test meaning "no profile is configured"
+	// silently reads the developer's own.
+	restore := configtest.IsolateProfileSearchForPackage()
+	code := m.Run()
+	restore()
+	os.Exit(code)
 }
 
 func init() {

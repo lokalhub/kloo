@@ -179,6 +179,10 @@ func TestNoArgsLaunchesTUI(t *testing.T) {
 // loop (not the TUI), passing
 // the resolved config, task, and verify command.
 func TestTaskRoutesToRunHeadless(t *testing.T) {
+	// Asserts against config.DefaultModel, so the machine must have no profile —
+	// the search chain reaches into $HOME and would otherwise resolve the
+	// developer's own default model.
+	configtest.IsolateProfileSearch(t)
 	var ran bool
 	var gotTask, gotVerify string
 	var gotLint lintOpts

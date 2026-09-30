@@ -301,6 +301,12 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 		fmt.Fprintf(out, "run stopped — no report (elapsed %s)\n", elapsed.Round(time.Second))
 		return
 	}
+	// The model's own summary before the counters: on a question or review task it
+	// is the answer, and printing only the statistics made a completed run look
+	// like a run that produced nothing.
+	if sum := strings.TrimSpace(rep.Summary); sum != "" {
+		fmt.Fprintf(out, "%s\n\n", sum)
+	}
 	fmt.Fprintf(out, "run stopped — %s\n", strings.ToUpper(string(rep.Reason)))
 	fmt.Fprintf(out, "  steps:   %d\n", rep.Steps)
 	fmt.Fprintf(out, "  tokens:  %d\n", rep.TokensUsed)
