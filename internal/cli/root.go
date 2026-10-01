@@ -117,52 +117,56 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	deps.withDefaults()
 
 	var (
-		flagModel        string
-		flagProvider     string
-		flagEndpoint     string
-		flagMode         string
-		flagProfile      string
-		flagMaxSteps     int
-		flagTemp         float64
-		flagVerify       string
-		flagBenchmark    bool
-		flagEffort       string
-		flagNewSess      bool
-		flagResume       string
-		flagNoMCP        bool
-		flagLint         string
-		flagNoLint       bool
-		flagCtx          int
-		flagCurator      int
-		flagMapPosition  string
-		flagRepeatNudge  int
-		flagRepeatAbort  int
-		flagExploreNudge int
-		flagExploreAbort int
-		flagExploreTotal int
-		flagUsableFrac   float64
-		flagTriggerFrac  float64
-		flagPromptCache  string
-		flagStrictModel  bool
-		flagAllowedDirs  []string
-		flagAllowEnv     []string
-		flagJSON         bool
-		flagJSONOnly     bool
-		flagStatusFile   string
-		flagNoThink      bool
-		flagAllow        []string
-		flagDeny         []string
-		flagReadOnly     []string
-		flagPatchOnly    bool
-		flagStopOn       []string
-		flagPrecheck     []string
-		flagPostcheck    []string
-		flagRetryCodes   []int
-		flagRetryBase    time.Duration
-		flagRetryMax     time.Duration
-		flagColdLoad     time.Duration
-		flagStreamIdle   time.Duration
-		flagMaxRetries   int
+		flagModel            string
+		flagProvider         string
+		flagEndpoint         string
+		flagMode             string
+		flagProfile          string
+		flagMaxSteps         int
+		flagMaxTokens        int
+		flagTemp             float64
+		flagVerify           string
+		flagBenchmark        bool
+		flagEffort           string
+		flagNewSess          bool
+		flagResume           string
+		flagNoMCP            bool
+		flagLint             string
+		flagNoLint           bool
+		flagCtx              int
+		flagCurator          int
+		flagMapPosition      string
+		flagRepeatNudge      int
+		flagRepeatAbort      int
+		flagExploreNudge     int
+		flagExploreAbort     int
+		flagExploreTotal     int
+		flagExploreTokenCap  int
+		flagSaturationWindow int
+		flagSaturationMin    float64
+		flagUsableFrac       float64
+		flagTriggerFrac      float64
+		flagPromptCache      string
+		flagStrictModel      bool
+		flagAllowedDirs      []string
+		flagAllowEnv         []string
+		flagJSON             bool
+		flagJSONOnly         bool
+		flagStatusFile       string
+		flagNoThink          bool
+		flagAllow            []string
+		flagDeny             []string
+		flagReadOnly         []string
+		flagPatchOnly        bool
+		flagStopOn           []string
+		flagPrecheck         []string
+		flagPostcheck        []string
+		flagRetryCodes       []int
+		flagRetryBase        time.Duration
+		flagRetryMax         time.Duration
+		flagColdLoad         time.Duration
+		flagStreamIdle       time.Duration
+		flagMaxRetries       int
 	)
 
 	cmd := &cobra.Command{
@@ -202,6 +206,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("max-steps") {
 				flags.MaxSteps = &flagMaxSteps
 			}
+			if fs.Changed("max-tokens") {
+				flags.MaxTokens = &flagMaxTokens
+			}
 			if fs.Changed("ctx") {
 				flags.MaxContextTokens = &flagCtx
 			}
@@ -222,6 +229,15 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("explore-abort-rounds") {
 				flags.ExploreAbortRounds = &flagExploreAbort
+			}
+			if fs.Changed("explore-token-cap") {
+				flags.ExploreTokenCap = &flagExploreTokenCap
+			}
+			if fs.Changed("explore-saturation-window") {
+				flags.ExploreSaturationWindow = &flagSaturationWindow
+			}
+			if fs.Changed("explore-saturation-min") {
+				flags.ExploreSaturationMin = &flagSaturationMin
 			}
 			if fs.Changed("explore-total-cap") {
 				flags.ExploreTotalCap = &flagExploreTotal
@@ -342,6 +358,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to the profile JSON; when unset kloo searches <workspace>/.kloo, ~/.kloo, ~/.config/kloo, ~/etc and /etc for kloo.json or profiles.json (see kloo doctor)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
+	f.IntVar(&flagMaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ unbounded, the built-in default); the status line shows used/budget once set")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
 	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: pinned (default; fixed index + frozen, so the whole prompt is cacheable), tail (after the conversation) or system (legacy)")
@@ -350,6 +367,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagExploreNudge, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
 	f.Float64Var(&flagUsableFrac, "usable-window-frac", 0, "fraction of --ctx usable as PROMPT, reserving the rest for the completion and tool schemas (0 ⇒ built-in 0.80)")
 	f.Float64Var(&flagTriggerFrac, "compact-trigger-frac", 0, "fraction of the usable window at which compaction STARTS (0 ⇒ built-in 0.70); multiplies with --usable-window-frac")
+	f.IntVar(&flagExploreTokenCap, "explore-token-cap", 0, "TOKENS a read-only span may spend before the exploration rail stops the run (0 ⇒ built-in backstop, negative ⇒ disabled) — the window-independent form of --explore-total-cap")
+	f.IntVar(&flagSaturationWindow, "explore-saturation-window", 0, "read-only turns in the sliding window used to detect that reads have stopped covering new ground (0 ⇒ built-in, negative ⇒ disabled)")
+	f.Float64Var(&flagSaturationMin, "explore-saturation-min", 0, "minimum share of that window which must cover NEW ground; below it the run is nudged, then stopped (0 ⇒ built-in)")
 	f.IntVar(&flagExploreTotal, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&flagExploreAbort, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.StringVar(&flagPromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
@@ -412,6 +432,9 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("max-steps") {
 		flags.MaxSteps = &values.MaxSteps
+	}
+	if fs.Changed("max-tokens") {
+		flags.MaxTokens = &values.MaxTokens
 	}
 	if fs.Changed("ctx") {
 		flags.MaxContextTokens = &values.Ctx
@@ -528,6 +551,7 @@ type configFlagValues struct {
 	Mode                 string
 	Profile              string
 	MaxSteps             int
+	MaxTokens            int
 	Temperature          float64
 	Effort               string
 	NoMCP                bool
@@ -573,6 +597,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.Mode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&v.Profile, "profile", "", "path to the profile JSON; when unset kloo searches <workspace>/.kloo, ~/.kloo, ~/.config/kloo, ~/etc and /etc for kloo.json or profiles.json (see kloo doctor)")
 	f.IntVar(&v.MaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
+	f.IntVar(&v.MaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ unbounded, the built-in default)")
 	f.IntVar(&v.Ctx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&v.CuratorBudget, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")

@@ -143,6 +143,12 @@ const (
 	EnvExploreNudgeRounds = "KLOO_EXPLORE_NUDGE_ROUNDS"
 	EnvExploreAbortRounds = "KLOO_EXPLORE_ABORT_ROUNDS"
 	EnvExploreTotalCap    = "KLOO_EXPLORE_TOTAL_CAP"
+	// EnvExploreTokenCap bounds a read-only span in TOKENS (0 ⇒ built-in backstop,
+	// negative ⇒ disabled). Tokens scale with the window; turns do not.
+	EnvExploreTokenCap = "KLOO_EXPLORE_TOKEN_CAP"
+	// EnvExploreSaturationWindow/Min configure the new-ground saturation rail.
+	EnvExploreSaturationWindow = "KLOO_EXPLORE_SATURATION_WINDOW"
+	EnvExploreSaturationMin    = "KLOO_EXPLORE_SATURATION_MIN"
 
 	// EnvUsableWindowFrac / EnvCompactTriggerFrac decide how much of --ctx kloo
 	// actually works in. They MULTIPLY: at the defaults (0.80, 0.70) a declared
@@ -233,6 +239,10 @@ type Config struct {
 	ExploreNudgeRounds int
 	ExploreAbortRounds int
 	ExploreTotalCap    int
+	ExploreTokenCap    int
+	// ExploreSaturationWindow/Min: the sliding-window new-ground rail.
+	ExploreSaturationWindow int
+	ExploreSaturationMin    float64
 	// UsableWindowFrac / CompactTriggerFrac: 0 ⇒ the agent package default.
 	UsableWindowFrac   float64
 	CompactTriggerFrac float64
@@ -340,8 +350,14 @@ type Flags struct {
 	Provider    *string
 	Temperature *float64
 	MaxSteps    *int
-	Mode        *string
-	Effort      *string
+	// MaxTokens (--max-tokens) caps CUMULATIVE tokens for the run. The budget
+	// machinery has always supported it (runBudget.Check), but every effort tier
+	// sets 0 and there was no way to reach it from the CLI — so in practice a run
+	// had no token ceiling at all and could spend millions before any other rail
+	// noticed. nil ⇒ not set on the CLI.
+	MaxTokens *int
+	Mode      *string
+	Effort    *string
 	// MaxContextTokens (--ctx) overrides the per-step context window above the
 	// profile/bundled/built-in defaults. nil ⇒ not set on the CLI.
 	MaxContextTokens *int
@@ -352,13 +368,16 @@ type Flags struct {
 	MapPosition *string
 	// RepeatNudgeRounds / RepeatAbortRounds (--repeat-nudge-rounds /
 	// --repeat-abort-rounds) tune the repetition rail. nil ⇒ not set on the CLI.
-	RepeatNudgeRounds  *int
-	RepeatAbortRounds  *int
-	ExploreNudgeRounds *int
-	ExploreAbortRounds *int
-	ExploreTotalCap    *int
-	UsableWindowFrac   *float64
-	CompactTriggerFrac *float64
+	RepeatNudgeRounds       *int
+	RepeatAbortRounds       *int
+	ExploreNudgeRounds      *int
+	ExploreAbortRounds      *int
+	ExploreTotalCap         *int
+	ExploreTokenCap         *int
+	ExploreSaturationWindow *int
+	ExploreSaturationMin    *float64
+	UsableWindowFrac        *float64
+	CompactTriggerFrac      *float64
 	// PromptCache (--prompt-cache) is "auto", "off" or "on". nil ⇒ not set on the CLI.
 	PromptCache *string
 	// StrictModel (--strict-model) fails a run whose model the endpoint doesn't list.
@@ -406,30 +425,33 @@ type Flags struct {
 //
 //	{ "qwen2.5-coder": {"toolFormat": "native", "temperature": 0.2, "fewShotPath": "..."} }
 type profileEntry struct {
-	ToolFormat           *string  `json:"toolFormat,omitempty"`
-	Temperature          *float64 `json:"temperature,omitempty"`
-	FewShotPath          *string  `json:"fewShotPath,omitempty"`
-	MaxContextTokens     *int     `json:"maxContextTokens,omitempty"`
-	CuratorBudgetTokens  *int     `json:"curatorBudgetTokens,omitempty"`
-	MapPosition          *string  `json:"mapPosition,omitempty"`
-	PromptCache          *string  `json:"promptCache,omitempty"`
-	MaxTokens            *int     `json:"maxTokens,omitempty"`
-	MaxWallClockSeconds  *int     `json:"maxWallClockSeconds,omitempty"`
-	ChurnRounds          *int     `json:"churnRounds,omitempty"`
-	RepeatNudgeRounds    *int     `json:"repeatNudgeRounds,omitempty"`
-	RepeatAbortRounds    *int     `json:"repeatAbortRounds,omitempty"`
-	ExploreNudgeRounds   *int     `json:"exploreNudgeRounds,omitempty"`
-	ExploreAbortRounds   *int     `json:"exploreAbortRounds,omitempty"`
-	ExploreTotalCap      *int     `json:"exploreTotalCap,omitempty"`
-	UsableWindowFrac     *float64 `json:"usableWindowFrac,omitempty"`
-	CompactTriggerFrac   *float64 `json:"compactTriggerFrac,omitempty"`
-	NoThink              *bool    `json:"noThink,omitempty"`
-	LLMMaxRetries        *int     `json:"llmMaxRetries,omitempty"`
-	LLMRetryCodes        []int    `json:"llmRetryCodes,omitempty"`
-	LLMRetryBaseDelay    *string  `json:"llmRetryBaseDelay,omitempty"`
-	LLMRetryMaxDelay     *string  `json:"llmRetryMaxDelay,omitempty"`
-	LLMColdLoadTimeout   *string  `json:"llmColdLoadTimeout,omitempty"`
-	LLMStreamIdleTimeout *string  `json:"llmStreamIdleTimeout,omitempty"`
+	ToolFormat              *string  `json:"toolFormat,omitempty"`
+	Temperature             *float64 `json:"temperature,omitempty"`
+	FewShotPath             *string  `json:"fewShotPath,omitempty"`
+	MaxContextTokens        *int     `json:"maxContextTokens,omitempty"`
+	CuratorBudgetTokens     *int     `json:"curatorBudgetTokens,omitempty"`
+	MapPosition             *string  `json:"mapPosition,omitempty"`
+	PromptCache             *string  `json:"promptCache,omitempty"`
+	MaxTokens               *int     `json:"maxTokens,omitempty"`
+	MaxWallClockSeconds     *int     `json:"maxWallClockSeconds,omitempty"`
+	ChurnRounds             *int     `json:"churnRounds,omitempty"`
+	RepeatNudgeRounds       *int     `json:"repeatNudgeRounds,omitempty"`
+	RepeatAbortRounds       *int     `json:"repeatAbortRounds,omitempty"`
+	ExploreNudgeRounds      *int     `json:"exploreNudgeRounds,omitempty"`
+	ExploreAbortRounds      *int     `json:"exploreAbortRounds,omitempty"`
+	ExploreTotalCap         *int     `json:"exploreTotalCap,omitempty"`
+	ExploreTokenCap         *int     `json:"exploreTokenCap,omitempty"`
+	ExploreSaturationWindow *int     `json:"exploreSaturationWindow,omitempty"`
+	ExploreSaturationMin    *float64 `json:"exploreSaturationMin,omitempty"`
+	UsableWindowFrac        *float64 `json:"usableWindowFrac,omitempty"`
+	CompactTriggerFrac      *float64 `json:"compactTriggerFrac,omitempty"`
+	NoThink                 *bool    `json:"noThink,omitempty"`
+	LLMMaxRetries           *int     `json:"llmMaxRetries,omitempty"`
+	LLMRetryCodes           []int    `json:"llmRetryCodes,omitempty"`
+	LLMRetryBaseDelay       *string  `json:"llmRetryBaseDelay,omitempty"`
+	LLMRetryMaxDelay        *string  `json:"llmRetryMaxDelay,omitempty"`
+	LLMColdLoadTimeout      *string  `json:"llmColdLoadTimeout,omitempty"`
+	LLMStreamIdleTimeout    *string  `json:"llmStreamIdleTimeout,omitempty"`
 }
 
 // providerEntry is one entry of the reserved "providers" profile block, selected
@@ -601,6 +623,15 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.ExploreTotalCap != nil {
 		cfg.ExploreTotalCap = *e.ExploreTotalCap
+	}
+	if e.ExploreTokenCap != nil {
+		cfg.ExploreTokenCap = *e.ExploreTokenCap
+	}
+	if e.ExploreSaturationWindow != nil {
+		cfg.ExploreSaturationWindow = *e.ExploreSaturationWindow
+	}
+	if e.ExploreSaturationMin != nil {
+		cfg.ExploreSaturationMin = *e.ExploreSaturationMin
 	}
 	if e.UsableWindowFrac != nil {
 		cfg.UsableWindowFrac = *e.UsableWindowFrac
@@ -891,6 +922,23 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.ExploreAbortRounds = n
 		}
 	}
+	// Signed: a NEGATIVE value disables these rails, so the usual ">0" guard would
+	// silently swallow the only way to turn them off.
+	if v := getenv(EnvExploreTokenCap); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.ExploreTokenCap = n
+		}
+	}
+	if v := getenv(EnvExploreSaturationWindow); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.ExploreSaturationWindow = n
+		}
+	}
+	if v := getenv(EnvExploreSaturationMin); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 {
+			cfg.ExploreSaturationMin = f
+		}
+	}
 	if v := getenv(EnvExploreTotalCap); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			cfg.ExploreTotalCap = n
@@ -957,6 +1005,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if flags.MaxSteps != nil {
 		cfg.MaxSteps = *flags.MaxSteps
 	}
+	if flags.MaxTokens != nil {
+		cfg.MaxTokens = *flags.MaxTokens
+	}
 	if flags.CuratorBudgetTokens != nil {
 		cfg.CuratorBudgetTokens = *flags.CuratorBudgetTokens
 	}
@@ -977,6 +1028,15 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.ExploreTotalCap != nil {
 		cfg.ExploreTotalCap = *flags.ExploreTotalCap
+	}
+	if flags.ExploreTokenCap != nil {
+		cfg.ExploreTokenCap = *flags.ExploreTokenCap
+	}
+	if flags.ExploreSaturationWindow != nil {
+		cfg.ExploreSaturationWindow = *flags.ExploreSaturationWindow
+	}
+	if flags.ExploreSaturationMin != nil {
+		cfg.ExploreSaturationMin = *flags.ExploreSaturationMin
 	}
 	if flags.UsableWindowFrac != nil {
 		cfg.UsableWindowFrac = *flags.UsableWindowFrac

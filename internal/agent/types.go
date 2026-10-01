@@ -177,6 +177,13 @@ const (
 	RailRepeatedCall Rail = "repeated-call"
 	// RailExplore: the model kept reading/exploring without acting; nudged to act-or-ask.
 	RailExplore Rail = "explore"
+	// RailExploreTokens: the read-only span crossed its TOKEN ceiling. Distinct from
+	// RailExplore so a sweep can tell "spent too much" from "read too many times" —
+	// at a large window those are nowhere near each other.
+	RailExploreTokens Rail = "explore-tokens"
+	// RailExploreSaturated: recent reads stopped covering new ground, so the model
+	// has the context it is going to get. Fires once as a nudge, then as a stop.
+	RailExploreSaturated Rail = "explore-saturated"
 	// RailChurnEscalate: a repeated-edit churn CLOSED the repeated file and let the
 	// run continue instead of halting (KLOO_CHURN_ESCALATE). Recorded because
 	// without it there is no way to tell an escalation that fired and did not help

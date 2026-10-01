@@ -191,6 +191,13 @@ type Loop struct {
 	// ExploreTotalCap bounds consecutive read-only turns regardless of novelty;
 	// 0 ⇒ DefaultExploreTotalCap.
 	ExploreTotalCap int
+	// ExploreTokenCap bounds tokens spent on consecutive read-only turns;
+	// 0 ⇒ DefaultExploreTokenCap, negative ⇒ disabled.
+	ExploreTokenCap int
+	// ExploreSaturationWindow/Min configure the new-ground saturation rail;
+	// 0 ⇒ the defaults, negative window ⇒ disabled.
+	ExploreSaturationWindow int
+	ExploreSaturationMin    float64
 
 	// ctxShrinks counts overflow recoveries performed this run.
 	ctxShrinks int
@@ -362,6 +369,37 @@ const (
 	// DefaultExploreTotalCap bounds TOTAL consecutive read-only turns. 16 distinct
 	// reads is normal on a real repo; 40 without a single edit is a spiral.
 	DefaultExploreTotalCap = 40
+	// DefaultExploreTokenCap bounds exploration in TOKENS rather than turns.
+	//
+	// A turn count is the wrong unit, because every turn re-sends the whole prompt:
+	// 40 read-only turns costs ~320k tokens at ctx 8000 and ~4M at ctx 131072. One
+	// threshold therefore means two completely different things, and at a large
+	// window the turn cap is so far away that nothing stops a run that has spent
+	// millions of tokens learning nothing. Reported directly: a question task that
+	// consumed ~2M tokens and never stopped.
+	//
+	// 2,000,000 is set as a BACKSTOP, not a tuning: it sits above what the bench's
+	// known-good runs spend (those run at ~32k windows, where 20-30 reads — the
+	// amount kloo's own notes say a one-file fix needs — costs well under 1M), so
+	// it should not change a run that was going to succeed. It exists to end the
+	// runs that were never going to.
+	DefaultExploreTokenCap = 2_000_000
+	// Saturation: the share of recent read-only turns that covered NEW ground.
+	//
+	// The existing rails ask "how many reads?". This asks "are the reads still
+	// teaching it anything?" — which is the thing a turn count is a poor proxy for.
+	// Early exploration runs near 1.0; a model that has understood the code decays
+	// toward 0 as it re-reads and circles. That decay is the honest signal that it
+	// has the context it is going to get, because it is derived from the model's own
+	// behaviour rather than a guess about repo size. A fixed turn count is wrong in
+	// both directions at once: a small question saturates in 3 turns, a real
+	// investigation in a monorepo may legitimately need 30.
+	DefaultExploreSaturationWindow = 8 // read-only turns in the sliding window
+	// 0.35, not 0.25: with a window of 8 the band this rail owns is "1 or 2 new
+	// targets in the last 8 reads" (0 is the streak rail's). A min of 0.25 would
+	// exclude 2/8 and leave the rail covering a single ratio, which is too thin to
+	// be worth the mechanism.
+	DefaultExploreSaturationMin = 0.35
 	// maxContextShrinks bounds overflow recovery ACROSS the run. The per-call flag
 	// alone was not enough: each rebuild is a fresh call, so it reset every time and
 	// a non-converging shrink span 1536 times.
@@ -466,6 +504,36 @@ func (l *Loop) exploreTotalCap() int {
 		return l.ExploreTotalCap
 	}
 	return DefaultExploreTotalCap
+}
+
+// exploreTokenCap is the token ceiling for a read-only span. A negative configured
+// value disables the rail outright (0 keeps the built-in backstop) — the usual
+// "0 means default" convention would otherwise leave no way to turn it off.
+func (l *Loop) exploreTokenCap() int {
+	if l.ExploreTokenCap < 0 {
+		return 0
+	}
+	if l.ExploreTokenCap > 0 {
+		return l.ExploreTokenCap
+	}
+	return DefaultExploreTokenCap
+}
+
+func (l *Loop) exploreSaturationWindow() int {
+	if l.ExploreSaturationWindow < 0 {
+		return 0
+	}
+	if l.ExploreSaturationWindow > 0 {
+		return l.ExploreSaturationWindow
+	}
+	return DefaultExploreSaturationWindow
+}
+
+func (l *Loop) exploreSaturationMin() float64 {
+	if l.ExploreSaturationMin > 0 {
+		return l.ExploreSaturationMin
+	}
+	return DefaultExploreSaturationMin
 }
 
 func (l *Loop) exploreAbortRounds() int {
@@ -634,6 +702,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// Read targets already visited this run. Revisiting one is not new ground.
 		seenTargets  = map[string]bool{}
 		exploreTotal int
+		// exploreTokens is the cumulative token spend across the CURRENT read-only
+		// span, reset by any acting turn exactly like exploreTotal. Tokens are the
+		// unit that actually scales with the window; turns are not.
+		exploreTokens int
+		// exploreNewGround is a sliding window of per-turn "did this cover new
+		// ground?" answers, newest last, bounded to exploreSaturationWindow.
+		exploreNewGround []bool
+		saturationNudged bool
 		// Per-run read ledger: lets a re-read of an UNCHANGED file whose dump is
 		// still in the prompt be answered with a pointer instead of the whole dump
 		// again (readdedupe.go).
@@ -1528,14 +1604,27 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			readsSinceEdit++
 			exploreTotal++ // read-only turns since the last action, new ground or not
 			sig := exploreSignature(call)
-			if sig != "" && !seenTargets[sig] {
+			newGround := sig != "" && !seenTargets[sig]
+			if newGround {
 				seenTargets[sig] = true
 				exploreStreak = 0 // new ground: this turn made progress
 			} else {
 				exploreStreak++
 			}
+			// Tokens spent on this span, and the sliding new-ground window. Both are
+			// kept even when their rails are disabled: they are cheap, and a counter
+			// that only exists when it fires cannot be used to tell an inert
+			// configuration from a working one.
+			exploreTokens += usage.TotalTokens
+			if w := l.exploreSaturationWindow(); w > 0 {
+				exploreNewGround = append(exploreNewGround, newGround)
+				if len(exploreNewGround) > w {
+					exploreNewGround = exploreNewGround[len(exploreNewGround)-w:]
+				}
+			}
 		} else {
 			exploreStreak, exploreTotal, exploreNudgedAt = 0, 0, 0
+			exploreTokens, exploreNewGround, saturationNudged = 0, nil, false
 		}
 		if l.DelegateAfterReads > 0 && l.canAutoDelegate() && handoffs < l.maxHandoffs() &&
 			!edited && readsSinceEdit >= l.DelegateAfterReads {
@@ -1604,6 +1693,33 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// is not the model answering a question, and reporting it as "answered"
 			// made a stopped run indistinguishable from a clean one in every report
 			// and benchmark that reads the reason.
+			return finish(ReasonExploreStop, nil, nil, nil)
+		// ── The two rails below are ADDITIVE and deliberately come LAST. ──
+		//
+		// A switch case is exclusive: placed above the established arms, either of
+		// these would match first on a turn where an older rail was also ready, and
+		// push that rail's stop out by a turn. TestLoopExplorationRailStopsTheSpin
+		// caught exactly that (steps 8 -> 9). They may only catch what the rails
+		// above do not.
+		//
+		// The same ceiling as exploreTotalCap, denominated in the unit that scales
+		// with the window. At ctx 131072 the 40-turn cap is ~4M tokens away, which is
+		// why a run could spend millions and never be stopped by it.
+		case l.exploreTokenCap() > 0 && exploreTokens >= l.exploreTokenCap():
+			recordRail(RailExploreTokens)
+			return finish(ReasonExploreStop, nil, nil, nil)
+		// Saturated: reads have stopped teaching it anything. Nudge once, and stop
+		// only if the NEXT full window is still saturated — so a model that briefly
+		// circles and then finds a new thread is not cut off mid-recovery.
+		case saturated(exploreNewGround, l.exploreSaturationWindow(), l.exploreSaturationMin()):
+			if !saturationNudged {
+				saturationNudged = true
+				exploreNewGround = nil // a fresh window must pass before stopping
+				recordRail(RailExploreSaturated)
+				convo = append(convo, l.saturationCorrective(len(seenTargets)))
+				break
+			}
+			recordRail(RailExploreSaturated)
 			return finish(ReasonExploreStop, nil, nil, nil)
 		// The NUDGE keys on TOTAL read-only turns, not the no-new-ground streak, and
 		// re-arms. It only appends a message, so firing it early and repeatedly is
@@ -2220,6 +2336,54 @@ func observation(call tools.Call, res tools.Result, err error) llm.Message {
 		}
 	}
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
+// saturated reports whether a read-only span has stopped covering new ground: at
+// least a full window of samples, of which fewer than min are new.
+//
+// It requires a FULL window deliberately. Judging saturation from two or three
+// samples would stop a run during the normal opening moves, where re-reading the
+// file you just listed is not circling — it is orienting.
+func saturated(window []bool, size int, min float64) bool {
+	if size <= 0 || len(window) < size {
+		return false
+	}
+	newGround := 0
+	for _, ok := range window {
+		if ok {
+			newGround++
+		}
+	}
+	// ZERO new ground is NOT this rail's business. That is pure repetition, which
+	// exploreAbortRounds already stops via exploreStreak, and claiming it here fired
+	// one step earlier than that rail — caught by TestExploreRailUnchangedWithVerifyGate,
+	// which pins the explore scenarios against v0.16.7.
+	//
+	// This rail exists for the case the streak rail structurally cannot see: PARTIAL
+	// decay. Any single new-ground turn resets exploreStreak to 0, so a model that
+	// finds one new file every several turns while otherwise circling never trips it,
+	// however long it goes on. That band is what saturation covers, and keeping the
+	// two disjoint means this is purely additive.
+	if newGround == 0 {
+		return false
+	}
+	return float64(newGround)/float64(len(window)) < min
+}
+
+// saturationCorrective tells the model what the rail just observed about its own
+// behaviour, and gives it the two legitimate exits. It names the number of distinct
+// targets seen so the statement is checkable rather than a bare scolding — a weak
+// model nudged with an unfalsifiable claim tends to argue with it.
+func (l *Loop) saturationCorrective(distinctTargets int) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"STOP exploring. You have inspected %d distinct targets, and your recent reads have "+
+			"returned to ground you already covered — you are not learning anything new from them.\n"+
+			"You have the context you are going to get. Do ONE of these now:\n"+
+			"- If the task was a question: answer it with what you already know, then call finish "+
+			"with that answer as the summary.\n"+
+			"- If the task needs a change: make the edit.\n"+
+			"Do NOT read, search or list anything else first.",
+		distinctTargets)}
 }
 
 // exploreSignature identifies WHAT a read-only turn looked at, so the explore rail
