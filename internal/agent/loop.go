@@ -191,6 +191,13 @@ type Loop struct {
 	// ExploreTotalCap bounds consecutive read-only turns regardless of novelty;
 	// 0 ⇒ DefaultExploreTotalCap.
 	ExploreTotalCap int
+	// NoFinalAnswer disables the closing tool-free reply on a cut-short run
+	// (finalanswer.go). The free salvage of existing prose still applies.
+	NoFinalAnswer bool
+	// MaxOutputTokens is the per-request completion cap (max_tokens).
+	// 0 ⇒ computed per request from the window and the estimated prompt
+	// (outputcap.go); negative ⇒ never sent, which is kloo's historical behaviour.
+	MaxOutputTokens int
 	// ExploreTokenCap bounds tokens spent on consecutive read-only turns;
 	// 0 ⇒ DefaultExploreTokenCap, negative ⇒ disabled.
 	ExploreTokenCap int
@@ -726,6 +733,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		churnBanned    = map[string]bool{}
 		churnEscalated bool
 		editedPaths    = map[string]bool{}
+		// summarySalvaged marks a Summary that is the last thing the model happened to
+		// say rather than a reply it was asked for, so the renderers can label it
+		// honestly instead of passing a mid-investigation fragment off as a conclusion.
+		summarySalvaged bool
 
 		// Failed-edit rail state: consecutive edit_file attempts that FAILED to apply
 		// (reset by a successful edit). Catches the edit↔read flail no other rail sees.
@@ -783,6 +794,21 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
 		l.onState(StateStop)
 		l.Registry.StopBackground() // kill any background servers this run started (no leaks across runs)
+		// A run cut short by a budget or a rail used to report counters and nothing
+		// else: finishSummary is set only when the model calls finish, so every other
+		// terminal path produced an empty Summary even though the model had been
+		// working for minutes. Give it an answer — the closing reply when one can be
+		// had, otherwise the last substantive prose already in the conversation
+		// (finalanswer.go). Never on success (there is already a summary and a green
+		// verify) and never on an endpoint error, where asking again is pointless.
+		if finishSummary == "" && answerableStop(reason) {
+			if a, called := l.finalAnswer(ctx, l.finalAnswerSystem(), convo); a != "" {
+				finishSummary, summarySalvaged = a, !called
+				if called {
+					counters.FinalAnswers++
+				}
+			}
+		}
 		st := l.Budget.Stats()
 		compactions := 0
 		if l.Memory != nil {
@@ -805,6 +831,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 			ToolCounters:       counters,
 			Summary:            finishSummary,
+			SummarySalvaged:    summarySalvaged,
 		}
 		if len(railFires) > 0 {
 			rep.RailFires = railFires
@@ -1994,6 +2021,11 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// measured ratio collapse to the clamp floor on short conversations, where the
 	// schemas dominate the prompt.
 	l.lastPromptChars = messageChars(msgs) + l.toolSchemaChars(req.Tools)
+	// Bound the COMPLETION against the window, sized from the prompt we just
+	// measured. Set here rather than in BuildRequest because this is the only
+	// place that knows the final prompt size, schemas included — and the cap is a
+	// function of that size, not of the window alone (outputcap.go).
+	req.MaxTokens = l.outputCap(l.estimatedPromptTokens(l.lastPromptChars))
 
 	resp, err := l.complete(ctx, req)
 	if err != nil {

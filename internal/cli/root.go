@@ -124,6 +124,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagProfile          string
 		flagMaxSteps         int
 		flagMaxTokens        int
+		flagMaxOutputTokens  int
+		flagNoFinalAnswer    bool
 		flagTemp             float64
 		flagVerify           string
 		flagBenchmark        bool
@@ -205,6 +207,12 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("max-steps") {
 				flags.MaxSteps = &flagMaxSteps
+			}
+			if fs.Changed("max-output-tokens") {
+				flags.MaxOutputTokens = &flagMaxOutputTokens
+			}
+			if fs.Changed("no-final-answer") {
+				flags.NoFinalAnswer = &flagNoFinalAnswer
 			}
 			if fs.Changed("max-tokens") {
 				flags.MaxTokens = &flagMaxTokens
@@ -358,6 +366,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to the profile JSON; when unset kloo searches <workspace>/.kloo, ~/.kloo, ~/.config/kloo, ~/etc and /etc for kloo.json or profiles.json (see kloo doctor)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
+	f.IntVar(&flagMaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ computed from the window minus the estimated prompt; negative ⇒ never sent). Not the same as --max-tokens, which is the whole run")
+	f.BoolVar(&flagNoFinalAnswer, "no-final-answer", false, "do not make a closing tool-free call for an answer when a budget or rail cuts the run short (the last prose kloo produced is still shown)")
 	f.IntVar(&flagMaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ unbounded, the built-in default); the status line shows used/budget once set")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")

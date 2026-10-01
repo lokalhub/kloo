@@ -71,6 +71,14 @@ func TestMapPinnedIsFixedIndexAndFrozen(t *testing.T) {
 	loop := memLoop(t, srv, root, 2000, NewWorkingMemory())
 	loop.MapPosition = MapPositionPinned
 	loop.System = "you are kloo"
+	// This test asserts an invariant over the LOOP'S TURNS: the pinned map sits at
+	// a fixed index and is frozen, so everything below it stays a cacheable prefix.
+	// The closing final-answer call (finalanswer.go) is not a loop turn — it is
+	// terminal, tool-free, and deliberately carries no map, because the map exists
+	// to help the model choose what to READ and that call cannot read. Including it
+	// here would assert the invariant over a request it was never about. Its own
+	// behaviour is covered by finalanswer_test.go.
+	loop.NoFinalAnswer = true
 
 	if _, err := loop.Run(context.Background(), "look at File3Func2DoesSomething"); err != nil {
 		t.Fatalf("run: %v", err)

@@ -63,16 +63,22 @@ type memoryDiagnostic struct {
 }
 
 type resolvedConfigDiagnostic struct {
-	Profile                profileDiagnostic `json:"profile"`
-	Provider               string            `json:"provider"`
-	ProviderSource         string            `json:"provider_source,omitempty"`
-	Model                  string            `json:"model"`
-	Endpoint               string            `json:"endpoint"`
-	APIKey                 secretState       `json:"api_key"`
-	Ctx                    int               `json:"ctx"`
-	Effort                 string            `json:"effort"`
-	MaxSteps               int               `json:"max_steps"`
-	MaxTokens              int               `json:"max_tokens"`
+	Profile        profileDiagnostic `json:"profile"`
+	Provider       string            `json:"provider"`
+	ProviderSource string            `json:"provider_source,omitempty"`
+	Model          string            `json:"model"`
+	Endpoint       string            `json:"endpoint"`
+	APIKey         secretState       `json:"api_key"`
+	Ctx            int               `json:"ctx"`
+	Effort         string            `json:"effort"`
+	MaxSteps       int               `json:"max_steps"`
+	// Named max_RUN_tokens deliberately. This is the whole run's cumulative
+	// ceiling, and printing it as "max_tokens" gave it the exact name of the
+	// OpenAI per-request parameter — in the one command whose job is to remove
+	// confusion about the resolved configuration. The per-request cap is printed
+	// beside it as max_output_tokens.
+	MaxRunTokens           int               `json:"max_run_tokens"`
+	MaxOutputTokens        int               `json:"max_output_tokens"`
 	MaxWallClockSeconds    int               `json:"max_wall_clock_seconds"`
 	ChurnRounds            int               `json:"churn_rounds"`
 	RepeatNudgeRounds      int               `json:"repeat_nudge_rounds"`
@@ -269,7 +275,8 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		Ctx:                 cfg.MaxContextTokens,
 		Effort:              cfg.Effort,
 		MaxSteps:            cfg.MaxSteps,
-		MaxTokens:           cfg.MaxTokens,
+		MaxRunTokens:        cfg.MaxTokens,
+		MaxOutputTokens:     cfg.MaxOutputTokens,
 		MaxWallClockSeconds: cfg.MaxWallClockSeconds,
 		ChurnRounds:         cfg.ChurnRounds,
 		RepeatNudgeRounds:   effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
@@ -362,7 +369,15 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "ctx: %d\n", diag.Ctx)
 	fmt.Fprintf(out, "effort: %s\n", diag.Effort)
 	fmt.Fprintf(out, "max_steps: %d\n", diag.MaxSteps)
-	fmt.Fprintf(out, "max_tokens: %d\n", diag.MaxTokens)
+	fmt.Fprintf(out, "max_run_tokens: %d (cumulative for the whole run; 0 = unbounded)\n", diag.MaxRunTokens)
+	switch {
+	case diag.MaxOutputTokens < 0:
+		fmt.Fprintf(out, "max_output_tokens: never sent (per-request max_tokens disabled)\n")
+	case diag.MaxOutputTokens > 0:
+		fmt.Fprintf(out, "max_output_tokens: %d (per-request, fixed)\n", diag.MaxOutputTokens)
+	default:
+		fmt.Fprintf(out, "max_output_tokens: computed per request (window - estimated prompt - slack)\n")
+	}
 	fmt.Fprintf(out, "max_wall_clock_seconds: %d\n", diag.MaxWallClockSeconds)
 	fmt.Fprintf(out, "churn_rounds: %d\n", diag.ChurnRounds)
 	fmt.Fprintf(out, "repeat_rounds: nudge=%d abort=%d\n", diag.RepeatNudgeRounds, diag.RepeatAbortRounds)

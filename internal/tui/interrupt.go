@@ -79,6 +79,11 @@ type reportMsg struct {
 	// receipt (steps/tokens/elapsed) with the answer nowhere on screen. Reported as
 	// kloo "not feeling like" grok or Claude on the same model and question.
 	Summary string
+	// SummarySalvaged: the Summary is the last thing the model happened to say, not
+	// a reply it was asked for. It may be a fragment mid-investigation, so it is
+	// labelled rather than presented as a conclusion — passing one off as a final
+	// answer would be worse than showing nothing.
+	SummarySalvaged bool
 }
 
 // handleReport renders the terminal state and returns the UI to idle. A
@@ -108,6 +113,9 @@ func (ri reportItem) render(width int) string {
 	// the counters below are bookkeeping, and burying prose under them (or dropping
 	// it, as this did) is what made a question to kloo feel unanswered.
 	if sum := strings.TrimSpace(r.Summary); sum != "" {
+		if r.SummarySalvaged {
+			b.WriteString("last thing kloo said (not a final answer):\n")
+		}
 		b.WriteString(sum)
 		b.WriteString("\n\n")
 	}
