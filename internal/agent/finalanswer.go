@@ -103,6 +103,12 @@ func (l *Loop) finalAnswer(ctx context.Context, system, convo []llm.Message) (st
 	if err != nil {
 		return salvaged, false
 	}
+	// Count what the closing call cost. It cannot change the outcome — the run is
+	// already over and Check() is not consulted again — but leaving it out made the
+	// reported total a lie by omission: the run spent these tokens and the receipt
+	// did not say so. FinalAnswerReserve is the allowance held back for exactly this
+	// spend, so the two numbers have to be about the same thing.
+	l.observeUsage(resp.Usage)
 	if len(resp.Choices) == 0 {
 		return salvaged, false
 	}
