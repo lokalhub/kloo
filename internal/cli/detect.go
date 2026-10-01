@@ -135,13 +135,12 @@ var verifySkipDirs = map[string]bool{
 // files IN dir (no recursion), or "" when none is recognised.
 func detectVerifyHere(dir string) string {
 	// Node/JS app — the common case: prefer a build script, then test (whichever
-	// exists; the script's exit code is what gates completion).
+	// exists; the script's exit code is what gates completion), then the widened
+	// fallbacks below for the very common repo that has neither under those exact
+	// names.
 	if scripts := nodeScripts(dir); scripts != nil {
-		if _, ok := scripts["build"]; ok {
-			return "npm run build"
-		}
-		if _, ok := scripts["test"]; ok {
-			return "npm test"
+		if cmd := nodeVerifyScript(scripts); cmd != "" {
+			return cmd
 		}
 	}
 	if fileExists(dir, "go.mod") {
@@ -154,6 +153,71 @@ func detectVerifyHere(dir string) string {
 		return "python -m pytest"
 	}
 	return ""
+}
+
+// nodeVerifyScript picks the verify command from a package.json "scripts" map, or
+// "" when nothing suitable is there.
+//
+// It used to look for the exact names "build" and "test" and nothing else. A large
+// share of real repos name neither. Both repos kloo is BENCHMARKED on are examples:
+//
+//	HRIS  scripts: build:frontend, build:worker, dev:*, test:e2e, test:l1-smoke:*, typecheck
+//	rscf  scripts: build:* absent, test present, test:suite, test:uat, typecheck, ...
+//
+// HRIS therefore detected nothing at all and ran UNVERIFIED on every single run —
+// no run against it could ever be marked success, which quietly removes the gate
+// from half the bench.
+//
+// Priority, with exact names FIRST so nothing already detected changes:
+//
+//  1. "build"            — unchanged
+//  2. "test"             — unchanged
+//  3. exactly one "build:<x>"  — a lone namespaced build is that project's build.
+//     Several (HRIS has two) is ambiguous and is NOT guessed, mirroring
+//     detectVerify's existing "one subdir project or nothing" rule.
+//  4. a typecheck-family script — tsc is a real gate: deterministic, needs no
+//     server or fixtures, and fails on exactly the breakage an editing agent causes.
+//
+// Deliberately NOT used: "test:<x>". Those are e2e/UAT/smoke suites that want a dev
+// server, a database or a browser. Picking one would convert "unverified" into
+// "verify fails for environmental reasons", which is strictly worse — the model
+// would churn against a red gate it cannot turn green.
+func nodeVerifyScript(scripts map[string]any) string {
+	if _, ok := scripts["build"]; ok {
+		return "npm run build"
+	}
+	if _, ok := scripts["test"]; ok {
+		return "npm test"
+	}
+	if only := soleScriptWithPrefix(scripts, "build:"); only != "" {
+		return "npm run " + only
+	}
+	for _, name := range typecheckScriptNames {
+		if _, ok := scripts[name]; ok {
+			return "npm run " + name
+		}
+	}
+	return ""
+}
+
+// typecheckScriptNames are the conventional names for a whole-project type check,
+// in preference order.
+var typecheckScriptNames = []string{"typecheck", "type-check", "tsc", "compile"}
+
+// soleScriptWithPrefix returns the single script name starting with prefix, or ""
+// when there are none or more than one. Ambiguity is never guessed.
+func soleScriptWithPrefix(scripts map[string]any, prefix string) string {
+	found := ""
+	for name := range scripts {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if found != "" {
+			return "" // ambiguous
+		}
+		found = name
+	}
+	return found
 }
 
 // fileExists reports whether dir/name exists.
