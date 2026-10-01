@@ -1235,6 +1235,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 
+		// A real change landed, so the unproductive-token allowance starts over. Keyed
+		// on noOpEdit as well as derr: an edit that leaves the file byte-for-byte
+		// identical is not progress, and letting it renew the allowance would hand a
+		// churning model an unlimited budget for doing nothing.
+		if isEditTool(call.Name) && derr == nil && !noOpEdit {
+			l.Budget.NoteProgress()
+		}
+
 		// Repair enrichment: on a no-match/ambiguous edit_file failure under the
 		// per-target cap, replace the bare error with a repair observation carrying the
 		// file's ACTUAL contents + a "fix this edit" instruction (repair.go), so a weak
@@ -2340,6 +2348,17 @@ func (l *Loop) budgetEvidence(kind BudgetKind) *BudgetEvidence {
 	st := l.Budget.Stats()
 	switch kind {
 	case BudgetTokens:
+		// Report the counter that actually tripped. A computed ceiling bounds spend
+		// SINCE THE LAST FILE CHANGE, so printing the cumulative total against it
+		// would show a limit of 1.5M "exceeded" at 4M on a run that had been editing
+		// happily — two different numbers under one label.
+		if st.ComputedCeiling {
+			return &BudgetEvidence{
+				Kind:     kind,
+				Limit:    fmt.Sprintf("%d since the last file change", st.MaxTokens),
+				Observed: fmt.Sprintf("%d (run total %d)", st.UnproductiveTokens, st.Tokens),
+			}
+		}
 		return &BudgetEvidence{Kind: kind, Limit: fmt.Sprint(st.MaxTokens), Observed: fmt.Sprint(st.Tokens)}
 	case BudgetWallClock:
 		return &BudgetEvidence{Kind: kind, Limit: st.MaxWall.String(), Observed: st.Elapsed.String()}

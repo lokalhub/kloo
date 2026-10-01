@@ -240,6 +240,10 @@ type Config struct {
 	ExploreAbortRounds int
 	ExploreTotalCap    int
 	ExploreTokenCap    int
+	// MaxTokensComputed reports that MaxTokens was DERIVED from the context window
+	// rather than named by the user. A derived ceiling bounds unproductive spend
+	// (tokens since the last file change); a named one bounds the whole run.
+	MaxTokensComputed bool
 	// MaxOutputTokens is the per-request completion cap: 0 ⇒ computed per request,
 	// negative ⇒ never sent (kloo's historical behaviour).
 	MaxOutputTokens int
@@ -1160,6 +1164,10 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		cfg.MaxTokens = 0 // unbounded
 	case cfg.MaxTokens == 0:
 		cfg.MaxTokens = ComputeRunTokenBudget(cfg.MaxContextTokens, cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+		// Derived, so it bounds UNPRODUCTIVE spend only. Long agentic coding that
+		// keeps changing files renews its allowance with every edit and is never cut
+		// off by a number kloo inferred; a run that reads in circles is.
+		cfg.MaxTokensComputed = cfg.MaxTokens > 0
 	}
 
 	return cfg, nil

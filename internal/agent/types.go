@@ -297,18 +297,28 @@ type Verifier interface {
 
 // BudgetStats are the current budget counters (for the report).
 type BudgetStats struct {
-	Steps     int
-	MaxSteps  int
-	Tokens    int
-	MaxTokens int
-	Elapsed   time.Duration
-	MaxWall   time.Duration
+	Steps    int
+	MaxSteps int
+	Tokens   int
+	// UnproductiveTokens is spend since the last real file change. The COMPUTED
+	// ceiling is checked against this rather than Tokens: a refactor that keeps
+	// landing edits legitimately costs millions, a question task reading in circles
+	// costs the same and produces nothing, and only the second should be stopped.
+	UnproductiveTokens int
+	// ComputedCeiling reports which counter MaxTokens bounds — unproductive spend
+	// when kloo derived the ceiling, total spend when the user named one.
+	ComputedCeiling bool
+	MaxTokens       int
+	Elapsed         time.Duration
+	MaxWall         time.Duration
 }
 
 // Budget bounds a run by steps, tokens, and wall-clock. The first to exceed wins.
 // (Seam implemented in budget.go.)
 type Budget interface {
 	Observe(step int)
+	// NoteProgress clears the unproductive-token counter: a real change landed.
+	NoteProgress()
 	AddTokens(n int)
 	Check() (tripped bool, kind BudgetKind)
 	Stats() BudgetStats
