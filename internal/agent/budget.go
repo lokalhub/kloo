@@ -58,8 +58,24 @@ func (b *runBudget) Check() (bool, BudgetKind) {
 	if b.maxSteps > 0 && b.steps > b.maxSteps {
 		return true, BudgetSteps
 	}
-	if b.maxTokens > 0 && b.tokens > b.maxTokens {
-		return true, BudgetTokens
+	// Trip EARLY by the closing answer's allowance, so the reply fits inside the
+	// ceiling the user set. Stopping at maxTokens and then spending more on a final
+	// answer would make --max-tokens 600000 cost 600000 plus the reply — a budget
+	// that quietly overshoots itself, which is the complaint this feature exists to
+	// answer, one layer down. Never reserve more than half the budget, so a small
+	// ceiling is not consumed entirely by its own reserve.
+	if b.maxTokens > 0 {
+		// A FRACTION of the ceiling, capped at the flat allowance. A fixed 2048
+		// slab is most of a small budget: TestBudgetTokensTrip sets maxTokens=100
+		// and 2048 (clamped to half) tripped it at 60 tokens — the reserve ate the
+		// budget it was meant to protect.
+		reserve := b.maxTokens / 20
+		if reserve > FinalAnswerReserve {
+			reserve = FinalAnswerReserve
+		}
+		if b.tokens > b.maxTokens-reserve {
+			return true, BudgetTokens
+		}
 	}
 	if b.maxWall > 0 && b.now().Sub(b.start) > b.maxWall {
 		return true, BudgetWallClock

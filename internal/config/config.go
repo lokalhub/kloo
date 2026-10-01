@@ -240,6 +240,10 @@ type Config struct {
 	ExploreAbortRounds int
 	ExploreTotalCap    int
 	ExploreTokenCap    int
+	// MaxOutputTokens is the per-request completion cap: 0 ⇒ computed per request,
+	// negative ⇒ never sent (kloo's historical behaviour).
+	MaxOutputTokens int
+	NoFinalAnswer   bool
 	// ExploreSaturationWindow/Min: the sliding-window new-ground rail.
 	ExploreSaturationWindow int
 	ExploreSaturationMin    float64
@@ -356,8 +360,12 @@ type Flags struct {
 	// had no token ceiling at all and could spend millions before any other rail
 	// noticed. nil ⇒ not set on the CLI.
 	MaxTokens *int
-	Mode      *string
-	Effort    *string
+	// MaxOutputTokens (--max-output-tokens) is the PER-REQUEST completion cap.
+	// Distinct from MaxTokens, which is the whole run's cumulative ceiling.
+	MaxOutputTokens *int
+	NoFinalAnswer   *bool
+	Mode            *string
+	Effort          *string
 	// MaxContextTokens (--ctx) overrides the per-step context window above the
 	// profile/bundled/built-in defaults. nil ⇒ not set on the CLI.
 	MaxContextTokens *int
@@ -1007,6 +1015,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.MaxTokens != nil {
 		cfg.MaxTokens = *flags.MaxTokens
+	}
+	if flags.MaxOutputTokens != nil {
+		cfg.MaxOutputTokens = *flags.MaxOutputTokens
+	}
+	if flags.NoFinalAnswer != nil {
+		cfg.NoFinalAnswer = *flags.NoFinalAnswer
 	}
 	if flags.CuratorBudgetTokens != nil {
 		cfg.CuratorBudgetTokens = *flags.CuratorBudgetTokens

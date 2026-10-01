@@ -45,6 +45,14 @@ type ChatRequest struct {
 	// ReasoningEffort is the OpenAI-compatible thinking control. kloo sets
 	// "none" only when --no-think/profile noThink is configured.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// MaxTokens bounds the COMPLETION for this one request (the OpenAI max_tokens).
+	// Omitted when 0, which was kloo's behaviour for its whole history: it reserved
+	// 20% of the window for the reply (memory.go usableWindowFrac) and then never
+	// told the server about that reserve. The server filled in its own default —
+	// usually the rest of the window — so "prompt + max_tokens" could exceed the
+	// per-request limit before a single token was generated, which is the 400 that
+	// killed two kloo-bench cases at ctx 131072.
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 // StreamOptions opts a streaming request into a final usage chunk

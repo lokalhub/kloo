@@ -105,6 +105,8 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		ExploreAbortRounds:      cfg.ExploreAbortRounds,
 		ExploreTotalCap:         cfg.ExploreTotalCap,
 		ExploreTokenCap:         cfg.ExploreTokenCap,
+		MaxOutputTokens:         cfg.MaxOutputTokens,
+		NoFinalAnswer:           cfg.NoFinalAnswer,
 		ExploreSaturationWindow: cfg.ExploreSaturationWindow,
 		ExploreSaturationMin:    cfg.ExploreSaturationMin,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
@@ -308,6 +310,11 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 	// is the answer, and printing only the statistics made a completed run look
 	// like a run that produced nothing.
 	if sum := strings.TrimSpace(rep.Summary); sum != "" {
+		// Salvaged prose may be a fragment mid-investigation. Label it rather than
+		// letting it read as a conclusion kloo never reached.
+		if rep.SummarySalvaged {
+			fmt.Fprintln(out, "last thing kloo said (not a final answer):")
+		}
 		fmt.Fprintf(out, "%s\n\n", sum)
 	}
 	fmt.Fprintf(out, "run stopped — %s\n", strings.ToUpper(string(rep.Reason)))
@@ -395,6 +402,7 @@ type toolCountersSummary struct {
 	InvalidToolCalls  int `json:"invalid_tool_calls"`
 	RepeatedReadFile  int `json:"repeated_read_file"`
 	DedupedReads      int `json:"deduped_reads"`
+	FinalAnswers      int `json:"final_answers"`
 	RepeatedEdits     int `json:"repeated_edits"`
 	FailedEdits       int `json:"failed_edits"`
 	NoOpEdits         int `json:"no_op_edits"`
@@ -522,6 +530,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				InvalidToolCalls:  tc.InvalidToolCalls,
 				RepeatedReadFile:  tc.RepeatedReadFile,
 				DedupedReads:      tc.DedupedReads,
+				FinalAnswers:      tc.FinalAnswers,
 				RepeatedEdits:     tc.RepeatedEdits,
 				FailedEdits:       tc.FailedEdits,
 				NoOpEdits:         tc.NoOpEdits,
@@ -880,6 +889,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("invalid_tool_calls", c.InvalidToolCalls)
 	add("repeated_read_file", c.RepeatedReadFile)
 	add("deduped_reads", c.DedupedReads)
+	add("final_answers", c.FinalAnswers)
 	add("repeated_edits", c.RepeatedEdits)
 	add("failed_edits", c.FailedEdits)
 	add("no_op_edits", c.NoOpEdits)

@@ -118,6 +118,8 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		ExploreAbortRounds:      cfg.ExploreAbortRounds,
 		ExploreTotalCap:         cfg.ExploreTotalCap,
 		ExploreTokenCap:         cfg.ExploreTokenCap,
+		MaxOutputTokens:         cfg.MaxOutputTokens,
+		NoFinalAnswer:           cfg.NoFinalAnswer,
 		ExploreSaturationWindow: cfg.ExploreSaturationWindow,
 		ExploreSaturationMin:    cfg.ExploreSaturationMin,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.

@@ -249,7 +249,10 @@ type ToolCounters struct {
 	// dump, because the contents were provably still in the prompt and unchanged
 	// on disk (readdedupe.go). Distinct from RepeatedReadFile, which counts every
 	// repeat including the ones that were legitimately re-served after a shed.
-	DedupedReads  int
+	DedupedReads int
+	// FinalAnswers counts closing tool-free replies that actually ran, so an inert
+	// configuration is distinguishable from a working one.
+	FinalAnswers  int
 	RepeatedEdits int
 	FailedEdits   int
 	NoOpEdits     int
@@ -459,13 +462,20 @@ type ChurnEvidence struct {
 type Report struct {
 	Reason Reason
 	Steps  int
-	// Summary is the text the model passed to the finish tool, when it called it.
-	// Empty for runs a rail ended. Subagent delegation returns this to the parent —
-	// it is the ONLY thing a parent sees of a child's work.
-	Summary     string
-	FinalVerify VerifyResult // the last real verify signal
-	Budget      *BudgetEvidence
-	Churn       *ChurnEvidence
+	// Summary is the model's closing text. Normally what it passed to the finish
+	// tool; on a run a budget or rail cut short, the answer it gave when asked for
+	// one, or failing that the last substantive prose it had already produced
+	// (finalanswer.go). It used to be empty on every path except finish, which left
+	// a cut-short run showing counters and nothing else. Subagent delegation returns
+	// this to the parent — it is the ONLY thing a parent sees of a child's work.
+	Summary string
+	// SummarySalvaged marks a Summary that was taken from earlier prose rather than
+	// composed as a reply. It may be a mid-investigation fragment, so renderers must
+	// label it as the last thing kloo said and NOT as a conclusion.
+	SummarySalvaged bool
+	FinalVerify     VerifyResult // the last real verify signal
+	Budget          *BudgetEvidence
+	Churn           *ChurnEvidence
 	// Safety is set when the run ended via an A7 --stop-on rule (ReasonSafetyStop).
 	Safety *SafetyEvidence
 	// LastScopeDenial is the most recent scope denial this run (nil when none), so a
