@@ -391,6 +391,7 @@ type failureDetail struct {
 type toolCountersSummary struct {
 	InvalidToolCalls  int `json:"invalid_tool_calls"`
 	RepeatedReadFile  int `json:"repeated_read_file"`
+	DedupedReads      int `json:"deduped_reads"`
 	RepeatedEdits     int `json:"repeated_edits"`
 	FailedEdits       int `json:"failed_edits"`
 	NoOpEdits         int `json:"no_op_edits"`
@@ -517,6 +518,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 			s.ToolCounters = &toolCountersSummary{
 				InvalidToolCalls:  tc.InvalidToolCalls,
 				RepeatedReadFile:  tc.RepeatedReadFile,
+				DedupedReads:      tc.DedupedReads,
 				RepeatedEdits:     tc.RepeatedEdits,
 				FailedEdits:       tc.FailedEdits,
 				NoOpEdits:         tc.NoOpEdits,
@@ -874,6 +876,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	}
 	add("invalid_tool_calls", c.InvalidToolCalls)
 	add("repeated_read_file", c.RepeatedReadFile)
+	add("deduped_reads", c.DedupedReads)
 	add("repeated_edits", c.RepeatedEdits)
 	add("failed_edits", c.FailedEdits)
 	add("no_op_edits", c.NoOpEdits)

@@ -238,9 +238,14 @@ type HookResult struct {
 type ToolCounters struct {
 	InvalidToolCalls int
 	RepeatedReadFile int
-	RepeatedEdits    int
-	FailedEdits      int
-	NoOpEdits        int
+	// DedupedReads counts read_file calls answered with a pointer instead of the
+	// dump, because the contents were provably still in the prompt and unchanged
+	// on disk (readdedupe.go). Distinct from RepeatedReadFile, which counts every
+	// repeat including the ones that were legitimately re-served after a shed.
+	DedupedReads  int
+	RepeatedEdits int
+	FailedEdits   int
+	NoOpEdits     int
 	// ChurnBannedEdits counts edits refused because a churn escalation had closed
 	// that file. A high count means the model kept reaching for the same file
 	// after being told it was closed — the constraint holding, but not landing.

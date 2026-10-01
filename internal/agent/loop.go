@@ -634,6 +634,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// Read targets already visited this run. Revisiting one is not new ground.
 		seenTargets  = map[string]bool{}
 		exploreTotal int
+		// Per-run read ledger: lets a re-read of an UNCHANGED file whose dump is
+		// still in the prompt be answered with a pointer instead of the whole dump
+		// again (readdedupe.go).
+		reads = newReadLedger()
 
 		// Churn-escalation state (KLOO_CHURN_ESCALATE). churnBanned are paths CLOSED
 		// to further edits after a repeated-edit churn was escalated instead of
@@ -1135,6 +1139,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// ONLY into convo (the model-facing transcript) — never into the churn feed
 		// below (which still sees editSignature+verifyOut) and never affecting `edited`
 		// (still set only on derr == nil), so no new false-churn/false-success source.
+		// A re-read of a file that has not changed, whose contents are still verbatim
+		// in the prompt, gets a pointer rather than the dump a second time. Gated hard
+		// on "no compaction since the original read": after a compaction the dump may
+		// have been shed, and the model then genuinely needs the content back — see
+		// readdedupe.go for why suppressing that read would starve it.
+		if call.Name == tools.NameReadFile && derr == nil {
+			if ptr := reads.Observe(str(call.Args["path"]), result.Output, step, memCompactions(l)); ptr != "" {
+				result = tools.Result{Output: ptr}
+				counters.DedupedReads++
+			}
+		}
 		obs := observation(call, result, derr)
 		correctableEdit := false // #2: this turn's edit failed a CORRECTABLE way (got a corrective within the repair budget)
 		if call.Name == tools.NameEditFile {
@@ -3162,10 +3177,16 @@ func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatRespo
 			resp, err = l.Client.Complete(ctx, req)
 		} else {
 			resp, err = l.Client.Stream(ctx, req, func(d llm.Delta) error {
-				if d.Content != "" {
-					emitted = true
-					l.OnDelta(d.Content)
+				// Only forward CONTENT deltas. Reasoning deltas must never reach
+				// OnDelta: a thinking model that streams its chain of thought and
+				// then returns the same text as the final message would show the
+				// user the identical reply twice (the streamed pass plus the
+				// post-turn flush).
+				if d.Content == "" {
+					return nil
 				}
+				emitted = true
+				l.OnDelta(d.Content)
 				return nil
 			})
 		}
