@@ -78,6 +78,7 @@ type resolvedConfigDiagnostic struct {
 	// confusion about the resolved configuration. The per-request cap is printed
 	// beside it as max_output_tokens.
 	MaxRunTokens           int               `json:"max_run_tokens"`
+	MaxRunTokensComputed   bool              `json:"max_run_tokens_computed"`
 	MaxOutputTokens        int               `json:"max_output_tokens"`
 	MaxWallClockSeconds    int               `json:"max_wall_clock_seconds"`
 	ChurnRounds            int               `json:"churn_rounds"`
@@ -266,34 +267,35 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		scopeDiag = scopeDiagnostic{Active: sc.Active(), Allow: sc.Allow, Deny: sc.Deny, ReadOnly: sc.ReadOnly}
 	}
 	return resolvedConfigDiagnostic{
-		Profile:             profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
-		Provider:            cfg.Provider,
-		ProviderSource:      cfg.ProviderSource,
-		Model:               cfg.Model,
-		Endpoint:            cfg.Endpoint,
-		APIKey:              secretState{Set: cfg.APIKey != "", Redacted: cfg.APIKey != ""},
-		Ctx:                 cfg.MaxContextTokens,
-		Effort:              cfg.Effort,
-		MaxSteps:            cfg.MaxSteps,
-		MaxRunTokens:        cfg.MaxTokens,
-		MaxOutputTokens:     cfg.MaxOutputTokens,
-		MaxWallClockSeconds: cfg.MaxWallClockSeconds,
-		ChurnRounds:         cfg.ChurnRounds,
-		RepeatNudgeRounds:   effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
-		ExploreNudgeRounds:  effectiveRepeatRounds(cfg.ExploreNudgeRounds, agent.DefaultExploreNudgeRounds),
-		UsableWindowFrac:    doctorUsableFrac(cfg),
-		CompactTriggerFrac:  doctorTriggerFrac(cfg),
-		UsablePromptTokens:  agent.UsableWindow(cfg.MaxContextTokens),
-		CompactAtTokens:     agent.CompactTriggerTokens(agent.UsableWindow(cfg.MaxContextTokens)),
-		ExploreAbortRounds:  effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
-		RepeatAbortRounds:   effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
-		Temperature:         cfg.Temperature,
-		NoThink:             cfg.NoThink,
-		ToolFormat:          cfg.ToolFormat,
-		PromptCache:         promptCacheDiag{Mode: cfg.PromptCache, Resolved: cfg.PromptCacheEnabled()},
-		Verify:              verify,
-		Lint:                lintDiag,
-		MCP:                 mcpDiagnostic{Disabled: cfg.MCPDisabled, ConfiguredServers: len(cfg.MCPServers), EnabledServers: enabled, MaxExposedTools: cfg.MCPMaxExposedTools},
+		Profile:              profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
+		Provider:             cfg.Provider,
+		ProviderSource:       cfg.ProviderSource,
+		Model:                cfg.Model,
+		Endpoint:             cfg.Endpoint,
+		APIKey:               secretState{Set: cfg.APIKey != "", Redacted: cfg.APIKey != ""},
+		Ctx:                  cfg.MaxContextTokens,
+		Effort:               cfg.Effort,
+		MaxSteps:             cfg.MaxSteps,
+		MaxRunTokens:         cfg.MaxTokens,
+		MaxRunTokensComputed: cfg.MaxTokensComputed,
+		MaxOutputTokens:      cfg.MaxOutputTokens,
+		MaxWallClockSeconds:  cfg.MaxWallClockSeconds,
+		ChurnRounds:          cfg.ChurnRounds,
+		RepeatNudgeRounds:    effectiveRepeatRounds(cfg.RepeatNudgeRounds, agent.DefaultRepeatNudgeRounds),
+		ExploreNudgeRounds:   effectiveRepeatRounds(cfg.ExploreNudgeRounds, agent.DefaultExploreNudgeRounds),
+		UsableWindowFrac:     doctorUsableFrac(cfg),
+		CompactTriggerFrac:   doctorTriggerFrac(cfg),
+		UsablePromptTokens:   agent.UsableWindow(cfg.MaxContextTokens),
+		CompactAtTokens:      agent.CompactTriggerTokens(agent.UsableWindow(cfg.MaxContextTokens)),
+		ExploreAbortRounds:   effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
+		RepeatAbortRounds:    effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
+		Temperature:          cfg.Temperature,
+		NoThink:              cfg.NoThink,
+		ToolFormat:           cfg.ToolFormat,
+		PromptCache:          promptCacheDiag{Mode: cfg.PromptCache, Resolved: cfg.PromptCacheEnabled()},
+		Verify:               verify,
+		Lint:                 lintDiag,
+		MCP:                  mcpDiagnostic{Disabled: cfg.MCPDisabled, ConfiguredServers: len(cfg.MCPServers), EnabledServers: enabled, MaxExposedTools: cfg.MCPMaxExposedTools},
 		Retry: retryDiagnostic{
 			LLMMaxRetries:        cfg.LLMMaxRetries,
 			LLMRetryCodes:        append([]int(nil), cfg.LLMRetryableStatusCodes...),
@@ -369,10 +371,13 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "ctx: %d\n", diag.Ctx)
 	fmt.Fprintf(out, "effort: %s\n", diag.Effort)
 	fmt.Fprintf(out, "max_steps: %d\n", diag.MaxSteps)
-	if diag.MaxRunTokens > 0 {
-		fmt.Fprintf(out, "max_run_tokens: %d (cumulative for the whole run)\n", diag.MaxRunTokens)
-	} else {
+	switch {
+	case diag.MaxRunTokens <= 0:
 		fmt.Fprintf(out, "max_run_tokens: unbounded\n")
+	case diag.MaxRunTokensComputed:
+		fmt.Fprintf(out, "max_run_tokens: %d since the last file change (computed; a run that keeps editing is never stopped by it)\n", diag.MaxRunTokens)
+	default:
+		fmt.Fprintf(out, "max_run_tokens: %d cumulative for the whole run (explicit)\n", diag.MaxRunTokens)
 	}
 	switch {
 	case diag.MaxOutputTokens > 0:

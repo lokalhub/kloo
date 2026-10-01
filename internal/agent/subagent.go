@@ -261,7 +261,13 @@ type stepBudget struct {
 }
 
 func (b *stepBudget) Observe(step int) { b.steps = step }
-func (b *stepBudget) AddTokens(n int)  { b.tokens += n }
+
+// NoteProgress is a no-op for a child: its ceiling is a STEP count, deliberately,
+// so one subagent cannot consume the whole run. There is no unproductive-token
+// allowance here to renew.
+func (b *stepBudget) NoteProgress() {}
+
+func (b *stepBudget) AddTokens(n int) { b.tokens += n }
 func (b *stepBudget) Check() (bool, BudgetKind) {
 	if b.maxSteps > 0 && b.steps >= b.maxSteps {
 		return true, BudgetSteps

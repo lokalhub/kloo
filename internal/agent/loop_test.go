@@ -35,14 +35,21 @@ func (v *stubVerifier) Verify(ctx context.Context) VerifyResult {
 }
 
 type stubBudget struct {
-	tripAt int // steps at which Check trips (0 ⇒ never)
-	kind   BudgetKind
-	steps  int
-	tokens int
+	progress int
+	tripAt   int // steps at which Check trips (0 ⇒ never)
+	kind     BudgetKind
+	steps    int
+	tokens   int
 }
 
 func (b *stubBudget) Observe(s int)   { b.steps = s }
 func (b *stubBudget) AddTokens(n int) { b.tokens += n }
+
+// NoteProgress records that a real change landed. The stub counts the calls so a
+// test can assert the loop signals progress on a successful, non-no-op edit —
+// that signal is what renews the unproductive-token allowance, so a run that keeps
+// editing is never stopped by the computed ceiling.
+func (b *stubBudget) NoteProgress() { b.progress++ }
 func (b *stubBudget) Check() (bool, BudgetKind) {
 	if b.tripAt > 0 && b.steps >= b.tripAt {
 		return true, b.kind

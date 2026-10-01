@@ -17,9 +17,20 @@ type runBudget struct {
 	steps     int
 	maxTokens int
 	tokens    int
-	maxWall   time.Duration
-	start     time.Time
-	now       func() time.Time
+	// unproductive is tokens spent since the last real file change. It is the
+	// counter the COMPUTED ceiling is checked against, because total spend is the
+	// wrong thing to bound: a long refactor that keeps landing edits legitimately
+	// costs millions, while a question task that reads in circles costs the same
+	// and produces nothing. Only the second one should be stopped, and the
+	// difference between them is whether the workspace is changing.
+	//
+	// An EXPLICIT --max-tokens still bounds total spend. If a ceiling was asked for
+	// by name, it means what it says.
+	unproductive    int
+	computedCeiling bool
+	maxWall         time.Duration
+	start           time.Time
+	now             func() time.Time
 }
 
 // NewBudget builds a budget from resolved config. now is the clock (pass nil for
@@ -29,11 +40,12 @@ func NewBudget(cfg config.Config, now func() time.Time) *runBudget {
 		now = time.Now
 	}
 	return &runBudget{
-		maxSteps:  cfg.MaxSteps,
-		maxTokens: cfg.MaxTokens,
-		maxWall:   time.Duration(cfg.MaxWallClockSeconds) * time.Second,
-		start:     now(),
-		now:       now,
+		maxSteps:        cfg.MaxSteps,
+		maxTokens:       cfg.MaxTokens,
+		computedCeiling: cfg.MaxTokensComputed,
+		maxWall:         time.Duration(cfg.MaxWallClockSeconds) * time.Second,
+		start:           now(),
+		now:             now,
 	}
 }
 
@@ -43,14 +55,24 @@ func NewBudget(cfg config.Config, now func() time.Time) *runBudget {
 func (b *runBudget) Reset() {
 	b.steps = 0
 	b.tokens = 0
+	b.unproductive = 0
 	b.start = b.now()
 }
 
 // Observe records the current step number (the loop calls it each turn).
 func (b *runBudget) Observe(step int) { b.steps = step }
 
-// AddTokens adds the turn's reported token usage to the cumulative counter.
-func (b *runBudget) AddTokens(n int) { b.tokens += n }
+// AddTokens adds the turn's reported token usage to both counters.
+func (b *runBudget) AddTokens(n int) {
+	b.tokens += n
+	b.unproductive += n
+}
+
+// NoteProgress records that a real change landed in the workspace, clearing the
+// unproductive counter. A run that keeps editing therefore keeps renewing its
+// allowance and is never stopped by the computed ceiling — which is the point: the
+// ceiling exists to end runs that are not getting anywhere, not to ration work.
+func (b *runBudget) NoteProgress() { b.unproductive = 0 }
 
 // Check returns whether any budget is exceeded, naming the first that tripped
 // (steps, then tokens, then wall-clock).
@@ -73,7 +95,15 @@ func (b *runBudget) Check() (bool, BudgetKind) {
 		if reserve > FinalAnswerReserve {
 			reserve = FinalAnswerReserve
 		}
-		if b.tokens > b.maxTokens-reserve {
+		// The computed ceiling bounds UNPRODUCTIVE spend; an explicit one bounds
+		// total spend. See the field comment: a run that is changing files is doing
+		// the job it was given, and the cost of that is the user's call, not a
+		// number kloo inferred from the context window.
+		spent := b.tokens
+		if b.computedCeiling {
+			spent = b.unproductive
+		}
+		if spent > b.maxTokens-reserve {
 			return true, BudgetTokens
 		}
 	}
@@ -86,11 +116,13 @@ func (b *runBudget) Check() (bool, BudgetKind) {
 // Stats returns the current counters (for the report).
 func (b *runBudget) Stats() BudgetStats {
 	return BudgetStats{
-		Steps:     b.steps,
-		MaxSteps:  b.maxSteps,
-		Tokens:    b.tokens,
-		MaxTokens: b.maxTokens,
-		Elapsed:   b.now().Sub(b.start),
-		MaxWall:   b.maxWall,
+		Steps:              b.steps,
+		MaxSteps:           b.maxSteps,
+		Tokens:             b.tokens,
+		UnproductiveTokens: b.unproductive,
+		ComputedCeiling:    b.computedCeiling,
+		MaxTokens:          b.maxTokens,
+		Elapsed:            b.now().Sub(b.start),
+		MaxWall:            b.maxWall,
 	}
 }
