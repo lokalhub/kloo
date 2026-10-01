@@ -369,14 +369,18 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "ctx: %d\n", diag.Ctx)
 	fmt.Fprintf(out, "effort: %s\n", diag.Effort)
 	fmt.Fprintf(out, "max_steps: %d\n", diag.MaxSteps)
-	fmt.Fprintf(out, "max_run_tokens: %d (cumulative for the whole run; 0 = unbounded)\n", diag.MaxRunTokens)
+	if diag.MaxRunTokens > 0 {
+		fmt.Fprintf(out, "max_run_tokens: %d (cumulative for the whole run)\n", diag.MaxRunTokens)
+	} else {
+		fmt.Fprintf(out, "max_run_tokens: unbounded\n")
+	}
 	switch {
-	case diag.MaxOutputTokens < 0:
-		fmt.Fprintf(out, "max_output_tokens: never sent (per-request max_tokens disabled)\n")
 	case diag.MaxOutputTokens > 0:
 		fmt.Fprintf(out, "max_output_tokens: %d (per-request, fixed)\n", diag.MaxOutputTokens)
-	default:
+	case diag.MaxOutputTokens < 0:
 		fmt.Fprintf(out, "max_output_tokens: computed per request (window - estimated prompt - slack)\n")
+	default:
+		fmt.Fprintf(out, "max_output_tokens: not sent (default)\n")
 	}
 	fmt.Fprintf(out, "max_wall_clock_seconds: %d\n", diag.MaxWallClockSeconds)
 	fmt.Fprintf(out, "churn_rounds: %d\n", diag.ChurnRounds)

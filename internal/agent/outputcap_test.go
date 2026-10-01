@@ -51,18 +51,19 @@ func TestComputeOutputCapKeepsAFloorOfSlack(t *testing.T) {
 	}
 }
 
-// The resolver's sign convention matches every other kloo knob: 0 = built-in
-// (here, computed), negative = off.
-func TestLoopOutputCapResolution(t *testing.T) {
-	l := &Loop{ContextTokens: 8000}
-	if got := l.outputCap(2000); got == 0 {
-		t.Error("default (0) should compute a cap")
-	}
-	if got := (&Loop{ContextTokens: 8000, MaxOutputTokens: -1}).outputCap(2000); got != 0 {
-		t.Errorf("negative = %d, want 0 (never send)", got)
+// The per-request cap is OFF by default, deliberately — not computed. A cap kloo
+// derives is still a guess about how long a legitimate reply may be, and guessing
+// low truncates a write_file mid-content, which reads as a model failure rather
+// than a configuration one. The computed form stays reachable behind a negative.
+func TestLoopOutputCapIsOffByDefault(t *testing.T) {
+	if got := (&Loop{ContextTokens: 8000}).outputCap(2000); got != 0 {
+		t.Errorf("default = %d, want 0 (not sent)", got)
 	}
 	if got := (&Loop{ContextTokens: 8000, MaxOutputTokens: 512}).outputCap(2000); got != 512 {
 		t.Errorf("explicit = %d, want 512 verbatim", got)
+	}
+	if got := (&Loop{ContextTokens: 8000, MaxOutputTokens: -1}).outputCap(2000); got == 0 {
+		t.Error("negative should opt INTO the computed cap")
 	}
 }
 

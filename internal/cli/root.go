@@ -366,9 +366,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.StringVar(&flagMode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&flagProfile, "profile", "", "path to the profile JSON; when unset kloo searches <workspace>/.kloo, ~/.kloo, ~/.config/kloo, ~/etc and /etc for kloo.json or profiles.json (see kloo doctor)")
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
-	f.IntVar(&flagMaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ computed from the window minus the estimated prompt; negative ⇒ never sent). Not the same as --max-tokens, which is the whole run")
+	f.IntVar(&flagMaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ NOT SENT, the default; negative ⇒ computed from the window minus the estimated prompt). Not the same as --max-tokens, which is the whole run")
 	f.BoolVar(&flagNoFinalAnswer, "no-final-answer", false, "do not make a closing tool-free call for an answer when a budget or rail cuts the run short (the last prose kloo produced is still shown)")
-	f.IntVar(&flagMaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ unbounded, the built-in default); the status line shows used/budget once set")
+	f.IntVar(&flagMaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ computed from the context window, the default; negative ⇒ unbounded). The status line shows used/budget")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
 	f.StringVar(&flagMapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: pinned (default; fixed index + frozen, so the whole prompt is cacheable), tail (after the conversation) or system (legacy)")
@@ -442,6 +442,12 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("max-steps") {
 		flags.MaxSteps = &values.MaxSteps
+	}
+	if fs.Changed("max-output-tokens") {
+		flags.MaxOutputTokens = &values.MaxOutputTokens
+	}
+	if fs.Changed("no-final-answer") {
+		flags.NoFinalAnswer = &values.NoFinalAnswer
 	}
 	if fs.Changed("max-tokens") {
 		flags.MaxTokens = &values.MaxTokens
@@ -562,6 +568,8 @@ type configFlagValues struct {
 	Profile              string
 	MaxSteps             int
 	MaxTokens            int
+	MaxOutputTokens      int
+	NoFinalAnswer        bool
 	Temperature          float64
 	Effort               string
 	NoMCP                bool
@@ -607,7 +615,9 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringVar(&v.Mode, "mode", config.DefaultMode, "run mode (auto|manual)")
 	f.StringVar(&v.Profile, "profile", "", "path to the profile JSON; when unset kloo searches <workspace>/.kloo, ~/.kloo, ~/.config/kloo, ~/etc and /etc for kloo.json or profiles.json (see kloo doctor)")
 	f.IntVar(&v.MaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
-	f.IntVar(&v.MaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ unbounded, the built-in default)")
+	f.IntVar(&v.MaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ computed from the context window, the default; negative ⇒ unbounded)")
+	f.IntVar(&v.MaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ NOT SENT, the default; negative ⇒ computed)")
+	f.BoolVar(&v.NoFinalAnswer, "no-final-answer", false, "do not make a closing tool-free call for an answer when a budget or rail cuts the run short")
 	f.IntVar(&v.Ctx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&v.CuratorBudget, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")

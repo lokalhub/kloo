@@ -66,11 +66,21 @@ func computeOutputCap(window, promptTokens int) int {
 
 // outputCap resolves the per-request completion cap for this loop:
 //
-//	MaxOutputTokens < 0  ⇒ never send (the escape hatch, and kloo's historical behaviour)
-//	MaxOutputTokens > 0  ⇒ send it verbatim
-//	MaxOutputTokens == 0 ⇒ computed from the window and the estimated prompt
+//	MaxOutputTokens == 0 ⇒ NOT SENT (the default)
+//	MaxOutputTokens > 0  ⇒ sent verbatim
+//	MaxOutputTokens < 0  ⇒ computed from the window and the estimated prompt
+//
+// The default is off, not computed, and that is a deliberate reversal. A cap kloo
+// derives is still kloo's guess about how long a legitimate reply may be, and the
+// cost of guessing low is silent truncation of real work — a write_file cut off
+// mid-content, which looks like a model failure rather than a configuration one.
+// The cost of not sending it is bounded and visible by comparison: a reply that
+// runs long, or the context-overflow 400 that kloo already parses and reports.
+//
+// The computed form stays available behind a negative value for anyone who wants
+// it, because the arithmetic is sound; it simply should not be imposed by default.
 func (l *Loop) outputCap(promptTokens int) int {
-	if l.MaxOutputTokens < 0 {
+	if l.MaxOutputTokens == 0 {
 		return 0
 	}
 	if l.MaxOutputTokens > 0 {
