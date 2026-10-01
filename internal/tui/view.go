@@ -170,7 +170,13 @@ func (m Model) renderRunningRegions() string {
 	// those are genuinely not in the transcript yet.
 
 	// Latest assistant summary (amber label per the mock), pinned until run end.
-	if s := strings.TrimSpace(m.latestSummary); s != "" {
+	// Frozen once the run has produced its first tool call: each tool result
+	// appends a card to the transcript, which would otherwise scroll the just-
+	// streamed prose out of view while the "Latest:" pin kept restating it in a
+	// moving frame. After the first tool the pin holds the pre-tool prose steady
+	// (the "frozen" anchor the phone console reads), instead of tracking every
+	// post-tool message and vanishing between them.
+	if s := strings.TrimSpace(m.frozenSummary()); s != "" {
 		lines = append(lines, truncate(warning.Render("Latest: ")+s, w))
 	}
 

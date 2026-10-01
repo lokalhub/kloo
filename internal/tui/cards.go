@@ -50,6 +50,11 @@ func editsOf(msg toolEventMsg) []editPair {
 // signal, no internal/agent change).
 func (m Model) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
 	m.activity = activityPhrase(msg)
+	// Freeze the pinned "Latest:" prose on the FIRST tool of the run: from here on
+	// the transcript grows by a card per tool and the bottom-anchored viewport
+	// scrolls the streamed prose away, so the pin must hold steady rather than
+	// track each new message (see frozenSummary).
+	m.freezeSummary()
 	// C8: also fold the completed tool into the compact active-run log.
 	m = m.pushActivity(activityFromTool(msg))
 	var it item

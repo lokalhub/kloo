@@ -330,6 +330,10 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 		// byte-identical to pre-P00 (mirrors the optional budget/churn lines).
 		fmt.Fprintf(out, "  compactions: %d\n", rep.Compactions)
 	}
+	if rp := rep.RePrefill; rp.Turns > 0 {
+		fmt.Fprintf(out, "  re-prefill: %d tok/turn avg · peak %d tok · cached %.0f%%\n",
+			rp.ChangedTokens/max(rp.Turns, 1), rp.PeakChangedBytes/4, rp.CachedFraction()*100)
+	}
 	if rep.Budget != nil {
 		fmt.Fprintf(out, "  budget:  %s (%s/%s)\n", rep.Budget.Kind, rep.Budget.Observed, rep.Budget.Limit)
 	}
@@ -438,9 +442,14 @@ type runSummary struct {
 	Compactions    int     `json:"compactions"`
 	// Prompt-cache accounting. Omitted entirely when the provider reports none
 	// (most local servers), so a local run's JSON is byte-identical to before.
-	PromptTokens       int     `json:"prompt_tokens,omitempty"`
-	CachedPromptTokens int     `json:"cached_prompt_tokens,omitempty"`
-	CacheHitRate       float64 `json:"cache_hit_rate,omitempty"`
+	PromptTokens       int `json:"prompt_tokens,omitempty"`
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// Re-prefill: what kloo re-sent that a prefix cache could not serve. The number
+	// to drive down — 1.0 cached means every turn sends only what is new.
+	RePrefillTokensPerTurn int     `json:"reprefill_tokens_per_turn,omitempty"`
+	RePrefillPeakTokens    int     `json:"reprefill_peak_tokens,omitempty"`
+	RePrefillCachedFrac    float64 `json:"reprefill_cached_fraction,omitempty"`
+	CacheHitRate           float64 `json:"cache_hit_rate,omitempty"`
 	// TokenRatio is the chars-per-token ratio MEASURED this run, and
 	// TokenEstimateError the old flat chars/4 heuristic's signed relative error
 	// against it. Omitted when the endpoint reported no usage to measure against.
@@ -496,6 +505,11 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 			// What a flat chars/4 would have implied, against what was really
 			// charged: the number that says whether the estimate can be trusted.
 			s.TokenEstimateError = round2(4.0/rep.TokenRatio - 1)
+		}
+		if rp := rep.RePrefill; rp.Turns > 0 {
+			s.RePrefillTokensPerTurn = rp.ChangedTokens / rp.Turns
+			s.RePrefillPeakTokens = rp.PeakChangedBytes / 4
+			s.RePrefillCachedFrac = round2(rp.CachedFraction())
 		}
 		if rep.CachedPromptTokens > 0 {
 			s.PromptTokens = rep.PromptTokens

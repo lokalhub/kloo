@@ -69,6 +69,10 @@ type Model struct {
 	// with the header; the request is in the transcript, which is where it belongs.
 	latestSummary string
 	activityLog   []activityEntry
+	// frozenSummaryText latches latestSummary at the first tool call of a run, so
+	// the pinned "Latest:" line keeps showing the prose the user was reading while
+	// tool cards scroll it out of the transcript (see frozenSummary in activity.go).
+	frozenSummaryText string
 	// expanded toggles full vs truncated run-command output (ctrl+o, task 03).
 	expanded bool
 

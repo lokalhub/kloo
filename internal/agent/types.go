@@ -478,7 +478,10 @@ type Report struct {
 	// (finalanswer.go). It used to be empty on every path except finish, which left
 	// a cut-short run showing counters and nothing else. Subagent delegation returns
 	// this to the parent — it is the ONLY thing a parent sees of a child's work.
-	Summary string
+	// RePrefill is how much prompt this run re-sent that a prefix cache could not
+	// serve — the cost of not leveraging context the model's server already holds.
+	RePrefill RePrefillStats
+	Summary   string
 	// SummarySalvaged marks a Summary that was taken from earlier prose rather than
 	// composed as a reply. It may be a mid-investigation fragment, so renderers must
 	// label it as the last thing kloo said and NOT as a conclusion.
