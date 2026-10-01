@@ -38,14 +38,15 @@ func activeModel(t *testing.T, w, h int) Model {
 }
 
 // TestActiveRunFrameStandard renders the active-run layout at the standard test size
-// and checks the task header, pinned summary, and activity log all appear with the
-// input+hint still present (no overlap).
+// and checks the pinned summary and activity log appear with the input+hint still
+// present (no overlap). It also pins the ABSENCE of the old "Task: <request>"
+// header: it duplicated the transcript's own "you: <request>" line one row below
+// it, and cost a transcript row on every running frame to do so.
 func TestActiveRunFrameStandard(t *testing.T) {
 	m := activeModel(t, tw, th)
 	v := m.View()
 	requireGolden(t, "active-run.golden", v)
 	for _, want := range []string{
-		"Task: add per-file scope enforcement",  // task header (original request)
 		"Latest: Scope checks are wired",        // pinned latest assistant summary
 		"edited internal/tools/scope.go",        // activity log entry (done)
 		"ran go test ./internal/tools (exit 1)", // activity log entry (fail)
@@ -55,6 +56,9 @@ func TestActiveRunFrameStandard(t *testing.T) {
 		if !contains(v, want) {
 			t.Errorf("active frame missing %q:\n%s", want, v)
 		}
+	}
+	if contains(v, "Task: ") {
+		t.Errorf("active frame re-introduced the Task header (it duplicates the transcript):\n%s", v)
 	}
 }
 
@@ -68,7 +72,7 @@ func TestActiveRunFrameSmall(t *testing.T) {
 	if lines := strings.Count(v, "\n") + 1; lines > 24 {
 		t.Fatalf("active frame at 80x24 is %d lines (must be ≤ 24):\n%s", lines, v)
 	}
-	for _, want := range []string{"Task: add per-file scope", "Latest:", "> type a task", "Esc/Ctrl-C interrupt"} {
+	for _, want := range []string{"Latest:", "> type a task", "Esc/Ctrl-C interrupt"} {
 		if !contains(v, want) {
 			t.Errorf("small active frame missing %q:\n%s", want, v)
 		}
@@ -81,8 +85,8 @@ func TestActiveRunFrameWide(t *testing.T) {
 	m := activeModel(t, 120, 36)
 	v := m.View()
 	requireGolden(t, "active-run-wide.golden", v)
-	if !contains(v, "Task: add per-file scope enforcement without weakening the workspace jail") {
-		t.Errorf("wide frame should show the full untruncated task:\n%s", v)
+	if contains(v, "Task: ") {
+		t.Errorf("wide frame should not restate the task — it is in the transcript:\n%s", v)
 	}
 }
 
@@ -94,7 +98,7 @@ func TestActiveRunNoColor(t *testing.T) {
 	if strings.Contains(v, "\x1b[") {
 		t.Fatalf("active frame must carry no ANSI escapes under NO_COLOR/ascii:\n%q", v)
 	}
-	for _, want := range []string{"Task:", "Latest:", "✓ edited internal/tools/scope.go", "✗ ran go test"} {
+	for _, want := range []string{"Latest:", "✓ edited internal/tools/scope.go", "✗ ran go test"} {
 		if !contains(v, want) {
 			t.Errorf("no-color active frame missing %q:\n%s", want, v)
 		}
@@ -159,7 +163,7 @@ func TestActiveRunViaProgram(t *testing.T) {
 	}
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		s := string(b)
-		return contains(s, "Task: rename the tabs") && contains(s, "edited a.ts")
+		return contains(s, "edited a.ts")
 	}, teatest.WithDuration(3*time.Second))
 
 	// The report ends the run → regions hide, stop banner shows.

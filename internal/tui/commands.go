@@ -243,9 +243,8 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	}
 	task := m.expandPastes(line) // the model receives the full pasted text
 	m.pastes = nil               // consumed by this submission
-	// C8: pin this request as the active task and start a fresh compact activity log
-	// + summary for the run (the full transcript still records everything).
-	m.activeTask = line
+	// C8: start a fresh compact activity log + summary for the run (the full
+	// transcript still records everything, including the request itself).
 	m.latestSummary = ""
 	m.activityLog = nil
 	ctx, cancel := context.WithCancel(context.Background())

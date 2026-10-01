@@ -4,6 +4,7 @@
 
 
 
+
 k> kloo — autonomous coding for small local models
 
 ▸ you: add per-file scope enforcement without weakening the workspace jail
@@ -23,7 +24,6 @@ k> kloo — autonomous coding for small local models
 │ ⌘ run_command  go test ./internal/tools    exit 1 ✗                                                                │
 │   FAIL                                                                                                             │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-Task: add per-file scope enforcement without weakening the workspace jail  · running go test ./internal/tools
 Latest: Scope checks are wired before writes; fixing read-only precedence test.
 ✓ read internal/tools/workspace.go  · 118 lines
 ✓ edited internal/tools/scope.go

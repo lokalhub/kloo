@@ -1,6 +1,7 @@
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ kloo dev  test-model · medium             step 7/500 · 14.4k/200k tok · auto │
 └──────────────────────────────────────────────────────────────────────────────┘
+
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ ✎ internal/tools/scope.go                                                  │
 │ - old                                                                      │
@@ -11,7 +12,6 @@
 │ ⌘ run_command  go test ./internal/tools    exit 1 ✗                        │
 │   FAIL                                                                     │
 └────────────────────────────────────────────────────────────────────────────┘
-Task: add per-file scope enforcement without weakening the workspace jail  · ru…
 Latest: Scope checks are wired before writes; fixing read-only precedence test.
 ✓ read internal/tools/workspace.go  · 118 lines
 ✓ edited internal/tools/scope.go

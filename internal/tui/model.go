@@ -59,12 +59,14 @@ type Model struct {
 	activity string
 
 	// C8 active-run visibility (view.go renderRunningRegions):
-	//   activeTask    — the original request, pinned in the task header while running.
 	//   latestSummary — the latest finalized assistant prose line, pinned above input.
 	//   activityLog   — a compact rolling log of per-tool/step entries (last few shown).
 	// All are display-only, derived from existing loop signals; the full transcript
 	// still records every card and assistant turn.
-	activeTask    string
+	//
+	// There was an activeTask field here, pinned as a "Task: <request>" header. It
+	// restated the transcript's own "you: <request>" line, so it was removed along
+	// with the header; the request is in the transcript, which is where it belongs.
 	latestSummary string
 	activityLog   []activityEntry
 	// expanded toggles full vs truncated run-command output (ctrl+o, task 03).

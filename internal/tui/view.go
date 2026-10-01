@@ -145,9 +145,9 @@ func (m Model) renderHint() string {
 }
 
 // renderRunningRegions renders the C8 active-run panels shown between the transcript
-// and the thinking line while a run is in flight: a task header (original request +
-// current in-flight activity), the pinned latest assistant summary, and a compact
-// activity log (the most recent few tool/step entries). Returns "" when idle so the
+// and the thinking line while a run is in flight: the pinned latest assistant
+// summary, and a compact activity log (the most recent few tool/step entries).
+// Returns "" when idle so the
 // idle layout (and its golden) is unchanged. Height is deterministic (line count),
 // so the viewport math in renderTranscriptRegion can subtract it exactly.
 func (m Model) renderRunningRegions() string {
@@ -157,14 +157,17 @@ func (m Model) renderRunningRegions() string {
 	w := m.width
 	var lines []string
 
-	// Task header: "Task: <request>" + a dim " · <current activity>" when known.
-	if t := strings.TrimSpace(m.activeTask); t != "" {
-		head := muted.Render("Task: ") + t
-		if a := strings.TrimSpace(m.activity); a != "" {
-			head += muted.Render("  · " + a)
-		}
-		lines = append(lines, truncate(head, w))
-	}
+	// There is deliberately NO "Task: <request>" header here. It echoed the task
+	// verbatim one row under the transcript's own "you: <request>" line, and its
+	// " · <activity>" suffix repeated the thinking line directly below it
+	// (renderThinking, verbs.go) — two duplications stacked three rows apart. It
+	// cost a transcript row on EVERY running frame (this region shrinks the
+	// viewport, see renderTranscriptRegion) to restate what was already on screen.
+	//
+	// It carried information in exactly one case: a run long enough to scroll the
+	// originating "you:" line out of view. That is a narrow win for a constant cost,
+	// and the task is still one scroll away. Latest/activity-log below are kept —
+	// those are genuinely not in the transcript yet.
 
 	// Latest assistant summary (amber label per the mock), pinned until run end.
 	if s := strings.TrimSpace(m.latestSummary); s != "" {
