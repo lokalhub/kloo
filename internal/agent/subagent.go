@@ -219,8 +219,16 @@ func (l *Loop) subagentBudget() Budget {
 	if n < 4 {
 		n = 4
 	}
-	return &stepBudget{maxSteps: n}
+	// subagentHardStepFactor bounds a child absolutely at a multiple of its renewable
+	// allowance. 3x is chosen to be clearly more than a productive child needs while
+	// staying far short of "the whole run": at the measured KLOO_SUBAGENT_STEPS=25
+	// that is 75 steps, against a 500-step parent.
+	return &stepBudget{maxSteps: n, hardMaxSteps: n * subagentHardStepFactor}
 }
+
+// subagentHardStepFactor is how much more than its renewable allowance a child may
+// ever take. See newStepBudget.
+const subagentHardStepFactor = 3
 
 // registryForDepth returns the tool set a loop at this depth may use. At the
 // depth limit the task tool is omitted entirely rather than left present and
@@ -255,21 +263,36 @@ func subagentReport(rep *Report) string {
 // parent's problem — the parent's own budget keeps counting while the child runs,
 // so a slow child still trips the run-level ceilings.
 type stepBudget struct {
-	steps    int
-	maxSteps int
-	tokens   int
+	steps int
+	// unproductive is steps since the child last changed a file. maxSteps is checked
+	// against THIS, for the same reason the parent's computed ceiling is: a child
+	// that is landing edits is doing the job it was delegated, and cutting it at a
+	// fixed step count stops it mid-work. Measured on kloo-bench C07, a child edited
+	// the correct file and ended in churn with 2 of 6 tests still failing — exactly
+	// the shape of a worker stopped before it finished.
+	unproductive int
+	maxSteps     int
+	// hardMaxSteps is the ABSOLUTE ceiling, and it is why renewing is safe. Without
+	// it a child that alternates edit/read could run until the parent's wall clock,
+	// which defeats the one invariant delegation depends on: a single child must not
+	// be able to consume the whole run.
+	hardMaxSteps int
+	tokens       int
 }
 
 func (b *stepBudget) Observe(step int) { b.steps = step }
 
-// NoteProgress is a no-op for a child: its ceiling is a STEP count, deliberately,
-// so one subagent cannot consume the whole run. There is no unproductive-token
-// allowance here to renew.
-func (b *stepBudget) NoteProgress() {}
+// NoteProgress renews the child's step allowance: a real change landed. The
+// absolute ceiling is untouched, so this buys more room to work, never unlimited
+// room.
+func (b *stepBudget) NoteProgress() { b.unproductive = b.steps }
 
 func (b *stepBudget) AddTokens(n int) { b.tokens += n }
 func (b *stepBudget) Check() (bool, BudgetKind) {
-	if b.maxSteps > 0 && b.steps >= b.maxSteps {
+	if b.hardMaxSteps > 0 && b.steps >= b.hardMaxSteps {
+		return true, BudgetSteps
+	}
+	if b.maxSteps > 0 && b.steps-b.unproductive >= b.maxSteps {
 		return true, BudgetSteps
 	}
 	return false, ""
@@ -277,7 +300,7 @@ func (b *stepBudget) Check() (bool, BudgetKind) {
 func (b *stepBudget) Stats() BudgetStats {
 	return BudgetStats{Steps: b.steps, MaxSteps: b.maxSteps, Tokens: b.tokens}
 }
-func (b *stepBudget) Reset() { b.steps, b.tokens = 0, 0 }
+func (b *stepBudget) Reset() { b.steps, b.unproductive, b.tokens = 0, 0, 0 }
 
 // autoDelegateCorrective is what the parent sees after kloo delegates FOR it.
 func autoDelegateCorrective(report string) llm.Message {
