@@ -111,12 +111,15 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		System:        SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
 		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
 
-		StopOn:             agentStopPolicy(cfg.StopOn),
-		StallRounds:        cfg.ChurnRounds,
-		RepeatNudgeRounds:  cfg.RepeatNudgeRounds,
-		ExploreNudgeRounds: cfg.ExploreNudgeRounds,
-		ExploreAbortRounds: cfg.ExploreAbortRounds,
-		ExploreTotalCap:    cfg.ExploreTotalCap,
+		StopOn:                  agentStopPolicy(cfg.StopOn),
+		StallRounds:             cfg.ChurnRounds,
+		RepeatNudgeRounds:       cfg.RepeatNudgeRounds,
+		ExploreNudgeRounds:      cfg.ExploreNudgeRounds,
+		ExploreAbortRounds:      cfg.ExploreAbortRounds,
+		ExploreTotalCap:         cfg.ExploreTotalCap,
+		ExploreTokenCap:         cfg.ExploreTokenCap,
+		ExploreSaturationWindow: cfg.ExploreSaturationWindow,
+		ExploreSaturationMin:    cfg.ExploreSaturationMin,
 		// Subagents: opt-in, so the default tool vocabulary is unchanged.
 		EnableSubagents:      subagentsEnabled(),
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
