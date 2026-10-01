@@ -1145,6 +1145,23 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		cfg.LLMStreamIdleTimeout = *flags.LLMStreamIdleTimeout
 	}
 
+	// The run's token ceiling is COMPUTED LAST, because it is derived from the
+	// resolved context window — which every layer above may have changed.
+	//
+	//	0        ⇒ computed from the window (the default; every effort tier ships 0)
+	//	negative ⇒ unbounded, the escape hatch and kloo's historical behaviour
+	//	positive ⇒ used verbatim, from a flag, env or profile
+	//
+	// Sizing it from the window rather than picking a constant is the same argument
+	// as the token-denominated explore cap: a turn's cost is set by the window, so a
+	// flat ceiling is far too tight at ctx 131072 and far too loose at ctx 8000.
+	switch {
+	case cfg.MaxTokens < 0:
+		cfg.MaxTokens = 0 // unbounded
+	case cfg.MaxTokens == 0:
+		cfg.MaxTokens = ComputeRunTokenBudget(cfg.MaxContextTokens, cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	}
+
 	return cfg, nil
 }
 

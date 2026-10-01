@@ -114,8 +114,19 @@ func TestBudgetResolvesFromConfigChain(t *testing.T) {
 	}
 	b := NewBudget(cfg, time.Now)
 	st := b.Stats()
-	if st.MaxSteps != config.DefaultMaxSteps || st.MaxTokens != config.DefaultMaxTokens {
-		t.Errorf("budget did not read config defaults: %+v", st)
+	if st.MaxSteps != config.DefaultMaxSteps {
+		t.Errorf("budget did not read the resolved max steps: %+v", st)
+	}
+	// MaxTokens is no longer DefaultMaxTokens (0 = unbounded). Every effort tier
+	// still ships 0, and config now reads that as "compute it from the context
+	// window" — a run used to have NO token ceiling at all, which is how a question
+	// task reached ~2M tokens with only the step cap and the hour to stop it.
+	want := config.ComputeRunTokenBudget(cfg.MaxContextTokens, cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	if st.MaxTokens != want {
+		t.Errorf("budget MaxTokens = %d, want the computed %d for ctx %d", st.MaxTokens, want, cfg.MaxContextTokens)
+	}
+	if st.MaxTokens == 0 {
+		t.Error("a default run is unbounded again — the computed budget is not reaching the budget")
 	}
 }
 

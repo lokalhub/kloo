@@ -30,6 +30,12 @@ func writeProfile(t *testing.T, body string) string {
 	return path
 }
 
+// computedRunBudgetForTest is the run-token ceiling these fixtures resolve to.
+// DefaultMaxTokens (0) no longer means "unbounded" — config reads 0 as "compute it
+// from the context window", so every fixture at the default ctx lands here. Spelled
+// via ComputeRunTokenBudget rather than a literal so the two cannot drift.
+var computedRunBudgetForTest = ComputeRunTokenBudget(DefaultMaxContextTokens, 0, 0)
+
 func TestResolve(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -52,7 +58,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -72,7 +78,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -93,7 +99,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -114,7 +120,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -135,7 +141,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -156,7 +162,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 			},
@@ -176,7 +182,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 				NoThink:             true,
@@ -198,7 +204,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 				NoThinkExplicit:     true,
@@ -219,7 +225,7 @@ func TestResolve(t *testing.T) {
 				CuratorBudgetTokens: DefaultCuratorBudgetTokens,
 				MapPosition:         DefaultMapPosition,
 				PromptCache:         DefaultPromptCache,
-				MaxTokens:           DefaultMaxTokens,
+				MaxTokens:           computedRunBudgetForTest,
 				MaxWallClockSeconds: DefaultMaxWallClockSeconds,
 				ChurnRounds:         DefaultChurnRounds,
 				JSONOnly:            true,
@@ -431,8 +437,14 @@ func TestResolveEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fast: %v", err)
 	}
-	if got.Effort != "fast" || got.Model != DefaultModel || got.MaxSteps != 50 || got.ChurnRounds != 2 || got.MaxTokens != 0 {
+	// MaxTokens is NOT asserted as 0 any more. Every tier still ships 0, and config
+	// now reads 0 as "compute the ceiling from the context window" — a tier no
+	// longer leaves a run with no token limit at all.
+	if got.Effort != "fast" || got.Model != DefaultModel || got.MaxSteps != 50 || got.ChurnRounds != 2 {
 		t.Errorf("fast tier = %+v", got)
+	}
+	if got.MaxTokens != computedRunBudgetForTest {
+		t.Errorf("fast tier MaxTokens = %d, want the computed %d", got.MaxTokens, computedRunBudgetForTest)
 	}
 
 	// heavy tier seeds patient budgets; the model is NOT changed by the tier.
