@@ -147,7 +147,31 @@ type workingMemory struct {
 	stats       MemoryStats
 	compactions int    // cumulative across the run (overview §3: the ⟲ counter)
 	prevVerify  string // #4: normalized previous failing verify, to flag a repeat
+	// MONOTONIC FOLD STATE. folded is how many of allTail's messages have already
+	// been folded into the running summary, and foldedEntries is that summary.
+	//
+	// They exist because the compaction path re-derived the summary from scratch
+	// every turn it ran, and once the history crosses the trigger it runs on EVERY
+	// turn. The summary sits above the tail, so a summary that changes each turn
+	// invalidates the whole prompt below it — measured at --ctx 8000 as the prompt
+	// oscillating 15713B → 5159B → 10003B → 5318B → 10630B with ~4844B re-prefilled
+	// on alternate turns, and a prefix cache that is worth ~15x on the endpoint
+	// (30k prompt: 16.2s cold, 1.05s on a shared prefix).
+	//
+	// Folding only ever ADVANCES, and already-folded entries are never recomputed,
+	// so the summary is byte-stable and the boundary moves rarely.
+	folded        int
+	foldedEntries []string
 }
+
+// lowWaterFrac is the hysteresis. When the fold boundary has to advance, it
+// advances PAST what is minimally required — to this fraction of the tail budget —
+// so the next few turns fit without moving it again.
+//
+// Shedding to exactly the limit is what produced the oscillation: the next read
+// dump crossed it immediately and the boundary moved again. Every move costs the
+// prefix below it, which on this endpoint is a full re-prefill.
+const lowWaterFrac = 0.60
 
 // smartVerify reports whether the verify same-failure marker is on
 // (KLOO_SMART_VERIFY=1): when a failing verify is IDENTICAL to the previous turn's,
@@ -240,10 +264,28 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// Keep the newest turns verbatim within the hot budget; fold the rest (the
 	// cold middle) into the running-summary slot via structural extraction.
 	tailBudget := hotBudget - pinTokens
+	// Where the boundary WOULD have to be to fit the tail budget.
 	tail, _ := keepTailWithin(allTail, tailBudget)
-	cold := allTail[:len(allTail)-len(tail)]
-	entries := summarizeCold(cold, maxKeepItemTokens)
-	w.compactions++
+	needFold := len(allTail) - len(tail)
+	if needFold > w.folded {
+		// It must advance. Advance it FURTHER than required (hysteresis) so the next
+		// turns fit without moving it again, and fold only what is newly cold —
+		// already-folded entries are never recomputed, so the summary stays
+		// byte-identical and the prefix below it survives.
+		deepTail, _ := keepTailWithin(allTail, int(float64(tailBudget)*lowWaterFrac))
+		if deep := len(allTail) - len(deepTail); deep > needFold {
+			needFold = deep
+		}
+		w.foldedEntries = append(w.foldedEntries,
+			summarizeCold(allTail[w.folded:needFold], maxKeepItemTokens)...)
+		w.folded = needFold
+		w.compactions++
+	}
+	// The tail is always everything after the boundary. When the boundary did not
+	// move, this turn is a pure APPEND to the previous prompt — which is the whole
+	// point: the compaction path running again must not by itself change the prompt.
+	tail = allTail[w.folded:]
+	entries := w.foldedEntries
 
 	// Shed in the fixed order until the hard ceiling holds (§2.4): the task and
 	// system base are the floor and never shed; window ≥ floor guarantees
@@ -324,7 +366,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 		WindowTokens:   window,
 		Compactions:    w.compactions,
 		SummaryTokens:  summaryTokens(entries, in.estimate),
-		DroppedTurns:   len(cold),
+		DroppedTurns:   w.folded, // messages folded into the summary so far (monotonic)
 		TrimmedTail:    tailTrimmed,
 		MapBudget:      in.MapBudget,
 		HotBudget:      hotBudget,

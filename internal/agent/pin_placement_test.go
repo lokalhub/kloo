@@ -57,10 +57,28 @@ func TestShedOrderUnchangedByPinPlacement(t *testing.T) {
 		// how much survives a shed — hence new literals. The PROPERTY this file
 		// guards (pin placement must not change the shed order) is unaffected and
 		// still asserted below; only the sizes moved.
-		baselinePromptTokens  = 1672
+		// These three moved when compaction gained HYSTERESIS (memory.go
+		// lowWaterFrac). When the fold boundary has to advance it now advances past
+		// what is minimally required, so more turns are folded in one go and fewer
+		// times — DroppedTurns 70 → 74, and the summary/prompt follow.
+		//
+		// This is NOT the drift the test guards. Its invariant is that moving the
+		// PINS does not change the token math, and that still holds: pin placement is
+		// untouched. The numbers changed because the shed DEPTH changed, deliberately,
+		// and the literals are re-baselined here rather than the guard weakened.
+		//
+		// Why: shedding to exactly the limit made the next read dump cross it again
+		// immediately, so the boundary moved almost every turn and the summary above
+		// the tail was rewritten each time. Measured at --ctx 8000 on qwen3-next, the
+		// prompt oscillated 11017B → 6284B → 11128B → 6380B with ~4844B re-prefilled
+		// on alternate turns; with hysteresis it grew monotonically
+		// 5160 → 5377 → 5441 → 5488 → 5981 → 6921 → 9031 and compactions fell from 7
+		// in 11 steps to 4 in 7. On this endpoint a lost prefix is a full re-prefill:
+		// a 30k prompt costs 16.2s cold and 1.05s when the prefix is shared.
+		baselinePromptTokens  = 1473
 		baselineWindowTokens  = 4000
-		baselineSummaryTokens = 435
-		baselineDroppedTurns  = 70
+		baselineSummaryTokens = 460
+		baselineDroppedTurns  = 74
 		baselineHotBudget     = 1008 // budget-partition fix: hot is now a fraction of the trigger, same base as map
 		baselineTrimmedTail   = false
 	)
@@ -76,7 +94,7 @@ func TestShedOrderUnchangedByPinPlacement(t *testing.T) {
 	got := wm.Stats()
 
 	if got.PromptTokens != baselinePromptTokens {
-		t.Errorf("PromptTokens = %d, want %d (v0.16.7 literal) — pin placement changed the token math",
+		t.Errorf("PromptTokens = %d, want %d (re-baselined at the hysteresis change) — pin placement changed the token math",
 			got.PromptTokens, baselinePromptTokens)
 	}
 	if got.WindowTokens != baselineWindowTokens {
