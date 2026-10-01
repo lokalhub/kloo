@@ -91,9 +91,9 @@ func (b *runBudget) Check() (bool, BudgetKind) {
 		// slab is most of a small budget: TestBudgetTokensTrip sets maxTokens=100
 		// and 2048 (clamped to half) tripped it at 60 tokens — the reserve ate the
 		// budget it was meant to protect.
-		reserve := b.maxTokens / 20
-		if reserve > FinalAnswerReserve {
-			reserve = FinalAnswerReserve
+		reserve := FinalAnswerReserve
+		if reserve > b.maxTokens/2 {
+			reserve = b.maxTokens / 2
 		}
 		// The computed ceiling bounds UNPRODUCTIVE spend; an explicit one bounds
 		// total spend. See the field comment: a run that is changing files is doing

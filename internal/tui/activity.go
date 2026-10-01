@@ -130,6 +130,38 @@ func summaryLine(content string) string {
 	return s
 }
 
+// frozenSummary is the pinned "Latest:" text shown while a run is in flight.
+//
+// Before the first tool call it is the live assistant prose (m.latestSummary),
+// which is what the user wants to read while kloo thinks. Once the run starts
+// executing tools, the transcript grows by a card per tool result and the
+// viewport is bottom-anchored, so the prose scrolls away — and the pin kept
+// tracking each *new* post-tool message, so the text the user was reading was
+// gone by the next frame ("the prompt goes and I no longer have the context of
+// the response"). After the first tool we stop updating and keep showing the
+// last pre-tool prose: the frozen anchor stays put for the rest of the run.
+// Falls back to the live summary when the run began with a tool call (nothing
+// was frozen yet), so the region is never worse than it used to be.
+func (m Model) frozenSummary() string {
+	if m.frozenSummaryText != "" {
+		return m.frozenSummaryText
+	}
+	return m.latestSummary
+}
+
+// freezeSummary latches the current assistant prose as the pinned summary, so
+// later messages cannot replace it during this run. Called on the first tool
+// event of a run; a no-op when nothing has been said yet (the run opened with a
+// tool call) or when it is already latched.
+func (m *Model) freezeSummary() {
+	if m.frozenSummaryText != "" {
+		return
+	}
+	if s := strings.TrimSpace(m.latestSummary); s != "" {
+		m.frozenSummaryText = s
+	}
+}
+
 // firstLine returns the first line of s (trimmed), for compact command display.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {

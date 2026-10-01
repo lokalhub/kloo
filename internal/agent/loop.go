@@ -293,6 +293,11 @@ type Loop struct {
 	// instead of dispatching it. An edit releases it immediately; otherwise it
 	// decays, so a model that will not edit can never be trapped. See forceEdit().
 	editOnlyLeft int
+	// lastPromptMsgs is the previous turn's prompt, kept to measure how much of this
+	// turn's is a byte-identical prefix of it (reprefill.go). That suffix is what a
+	// provider's cache cannot serve and kloo pays for again every turn.
+	lastPromptMsgs []llm.Message
+	rePrefill      RePrefillStats
 	// lastPromptChars is the character count of the request act() just built,
 	// paired with the prompt_tokens the provider reports back to calibrate the
 	// estimator. Consumed (and cleared) by observeUsage, so a turn whose chars we
@@ -627,6 +632,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	l.Budget.Reset()
 	l.Churn.Reset()
 	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
+	l.lastPromptMsgs, l.rePrefill = nil, RePrefillStats{}
 	l.toolCharsCache = 0
 
 	// Subagents: register the delegation tool for THIS run. Opt-in, so a loop that
@@ -827,6 +833,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			TokenRatio:         l.tokenRatio(),
 			Elapsed:            st.Elapsed,
 			Compactions:        compactions,
+			RePrefill:          l.rePrefillStats(),
 			Ignored:            ignoredAll,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 			ToolCounters:       counters,
@@ -2029,6 +2036,10 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// measured ratio collapse to the clamp floor on short conversations, where the
 	// schemas dominate the prompt.
 	l.lastPromptChars = messageChars(msgs) + l.toolSchemaChars(req.Tools)
+	// Measure what this turn re-sends. Here, because req.Messages is the final
+	// prompt — after assembly, pins, the map and any adapter rewriting — which is
+	// what the provider's cache actually sees.
+	l.observeRePrefill(req.Messages)
 	// Bound the COMPLETION against the window, sized from the prompt we just
 	// measured. Set here rather than in BuildRequest because this is the only
 	// place that knows the final prompt size, schemas included — and the cap is a

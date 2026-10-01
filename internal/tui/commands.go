@@ -247,6 +247,7 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	// transcript still records everything, including the request itself).
 	m.latestSummary = ""
 	m.activityLog = nil
+	m.frozenSummaryText = ""
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.running = true
