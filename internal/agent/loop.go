@@ -894,7 +894,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// run one final verify — Success when it passes, else Answered (the model's
 		// summary stands, but nothing was verified).
 		if call.Name == tools.NameFinish {
-			finishSummary = str(call.Args["summary"])
+			// Tolerant of the argument-name variants models use for this text (see
+			// tools.FinishSummary); reading only "summary" dropped the reply outright.
+			finishSummary = tools.FinishSummary(call.Args)
 			convo = append(convo, observation(call, tools.Result{Output: finishSummary}, nil))
 			if l.Verifier == nil {
 				// Unverified mode: no command to prove the change works. Honour finish

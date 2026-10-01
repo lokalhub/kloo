@@ -169,3 +169,43 @@ func TestGLMRowMatchesLokalaiID(t *testing.T) {
 		}
 	}
 }
+
+// TestQwen3NextRowsMatchLokalaiIDs pins the regression that motivated these rows:
+// lokalai serves this family as both "flash-next" and "qwen3.8-flash-next", and
+// NEITHER id contains a key from any earlier row, so both fell through to the
+// 8000-token default while the endpoint happily accepts a 300k-token prompt.
+func TestQwen3NextRowsMatchLokalaiIDs(t *testing.T) {
+	for _, id := range []string{
+		"flash-next", "qwen3.8-flash-next",
+		"Qwen3-Next-80B-A3B", "qwen3-next-80b-a3b-instruct",
+	} {
+		got := lookupModelDefaults(id)
+		if got.match != "qwen3-next" && got.match != "flash-next" {
+			t.Errorf("%s matched %q, want a qwen3-next row", id, got.match)
+		}
+		if got.maxContextTokens != 131072 {
+			t.Errorf("%s maxContextTokens = %d, want 131072 (measured 2026-10-01)", id, got.maxContextTokens)
+		}
+		if got.toolFormat != "native" {
+			t.Errorf("%s toolFormat = %q, want native", id, got.toolFormat)
+		}
+	}
+	// The window is what the 8000 default was wrong about; assert the gap is real
+	// so a future edit cannot quietly reinstate it.
+	if lookupModelDefaults("flash-next").maxContextTokens <= DefaultMaxContextTokens {
+		t.Fatal("flash-next window is not above the built-in default — the row is inert")
+	}
+	// qwen3-coder must keep its own row: "qwen3" is a shared prefix and a sloppier
+	// match key would capture it.
+	if m := lookupModelDefaults("qwen3-coder-30b-a3b").match; m != "qwen3-coder" {
+		t.Errorf("qwen3-coder-30b-a3b matched %q, want qwen3-coder", m)
+	}
+	for _, other := range []string{
+		"qwen2.5-coder-32b", "devstral-small-2-24b", "glm-5.3-flash",
+		"deepseek-coder-6.7b", "muse-glimmer-30b",
+	} {
+		if m := lookupModelDefaults(other).match; m == "qwen3-next" || m == "flash-next" {
+			t.Errorf("%s was captured by a qwen3-next row", other)
+		}
+	}
+}
