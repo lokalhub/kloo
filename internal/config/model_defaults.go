@@ -8,16 +8,19 @@ import "strings"
 // bundled-owned cfg fields; everything else falls through to the built-in
 // defaults. See the master plan §5.
 //
-// maxContextTokens is kloo's curator per-step context-assembly budget (see
-// DefaultMaxContextTokens / config.go), NOT the model's raw maximum context
-// length. The seeded values therefore reflect the model's real window ordinally
-// (bigger window ⇒ bigger budget) while staying bounded — pouring a 256K window
-// straight into the curator would regress the OOM-cap work (commit 171fcbf).
+// maxContextTokens is the MODEL'S context window (cfg.MaxContextTokens / --ctx,
+// default 8000) — what the endpoint can hold. It is NOT the curator budget; that
+// is the separate CuratorBudgetTokens / --curator-budget field (default 32768),
+// which this table does not set. An earlier version of this comment claimed the
+// reverse, and the 32768 values on the 256K-window rows below were seeded under
+// that misreading: they bound those models to a 32K window rather than to a 32K
+// assembled repo map. Left as-is pending a bench run, since widening them changes
+// measured behaviour; see the qwen3-next rows for what a window-sized value is.
 type modelDefault struct {
 	match            string  // lowercase substring of the model id
 	toolFormat       string  // "" | "native" | "trained" | "xml" (see tools.SelectAdapter)
 	temperature      float64 // coding-appropriate
-	maxContextTokens int     // curator per-step budget (NOT the model's raw max)
+	maxContextTokens int     // the MODEL'S context window (--ctx), not the curator budget
 }
 
 // bundledModelDefaults is the ordered, in-binary table of known-good defaults
@@ -32,6 +35,20 @@ var bundledModelDefaults = []modelDefault{
 	// Qwen3-Coder-30B-A3B. ~256K native window; bounded 32K curator budget (the
 	// full window would blow the repo-map curator / cost).
 	{match: "qwen3-coder", toolFormat: "native", temperature: 0.1, maxContextTokens: 32768},
+	// Qwen3-Next (Qwen3-Next-80B-A3B and the lokalai ids "flash-next" and
+	// "qwen3.8-flash-next", which are the same family). Two match keys because the
+	// endpoint's short alias does not carry the family name, and a model that
+	// matched nothing fell through to the 8000-token default — a ~37x undercount
+	// that made kloo compact away a directory listing it had just read.
+	//
+	// Window measured against the endpoint 2026-10-01 by prompt length, not by
+	// max_tokens (this endpoint accepts max_tokens=2097152 without complaint, so
+	// that probe proves nothing): a 300,012-token prompt is accepted. /models
+	// reports no context_length for any model here, which is why nothing could be
+	// discovered at runtime. Set to 131072 — comfortably inside the measured floor,
+	// and matching the value already in use for glm-5.3-flash on the same host.
+	{match: "qwen3-next", toolFormat: "native", temperature: 0.1, maxContextTokens: 131072},
+	{match: "flash-next", toolFormat: "native", temperature: 0.1, maxContextTokens: 131072},
 	// Devstral-Small-2-24B. ~128K window; Mistral's published coding temp region.
 	{match: "devstral", toolFormat: "native", temperature: 0.15, maxContextTokens: 32768},
 	// GLM-4.6 / GLM-5.x (incl. glm-5.3-flash on lokalai). Native function calling
