@@ -296,6 +296,31 @@ const lowWaterFrac = 0.60
 // re-read from disk on demand, which is what makes them safe to drop.
 const summaryBudgetFrac = 0.25
 
+// summaryFrac is the value in force, overridable via KLOO_SUMMARY_BUDGET_FRAC.
+//
+// It has an escape hatch because it is the piece that changes behaviour most and
+// its value (0.25) is bounded by measurement but not tuned by a sweep. lowWaterFrac
+// shipped in v0.25.5 without one and promptly looked wrong under a paired bench,
+// with no way to back it out short of a new build.
+//
+// Sign convention: a value in (0,1] is used verbatim; <= 0 or > 1 DISABLES the
+// summary budget, restoring the unbounded append-only summary. Disabling it is the
+// pre-v0.25.6 behaviour, in which compaction reclaims nothing on a long run.
+var summaryFrac = summaryBudgetFrac
+
+// SetSummaryBudgetFrac overrides the summary's share of the compaction trigger.
+// Out-of-range values disable the budget rather than producing a summary of zero.
+func SetSummaryBudgetFrac(f float64) { summaryFrac = f }
+
+// SummaryBudgetFrac reports the value in force, for `kloo doctor`. A non-positive
+// return means the summary is unbounded.
+func SummaryBudgetFrac() float64 {
+	if summaryFrac <= 0 || summaryFrac > 1 {
+		return 0
+	}
+	return summaryFrac
+}
+
 // smartVerify reports whether the verify same-failure marker is on
 // (KLOO_SMART_VERIFY=1): when a failing verify is IDENTICAL to the previous turn's,
 // prepend a note telling the model its last change had no effect and to try a
@@ -411,7 +436,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// the only thing that can reclaim space from it.
 	// Not counted as a separate compaction: it is part of the same shedding event,
 	// and double-counting it would misreport the ⟲ counter the UI and the bench read.
-	w.collapseSummary(int(float64(triggerTokens(window))*summaryBudgetFrac), in.estimate)
+	w.collapseSummary(int(float64(triggerTokens(window))*SummaryBudgetFrac()), in.estimate)
 	tail = allTail[w.folded:]
 	entries := w.summaryEntries()
 

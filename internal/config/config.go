@@ -161,6 +161,10 @@ const (
 	// not scale with it, so on a large window the fractions alone mean "accumulate
 	// for thirty turns before shedding".
 	EnvWorkingSetTokens = "KLOO_WORKING_SET_TOKENS"
+	// EnvSummaryBudgetFrac is the running summary's share of the compaction trigger
+	// (built-in 0.25). Out of (0,1] DISABLES the budget, restoring the unbounded
+	// append-only summary in which compaction reclaims nothing on a long run.
+	EnvSummaryBudgetFrac = "KLOO_SUMMARY_BUDGET_FRAC"
 	// EnvPromptCache selects the prompt-caching mode (same as --prompt-cache).
 	EnvPromptCache          = "KLOO_PROMPT_CACHE"
 	EnvLLMMaxRetries        = "KLOO_LLM_MAX_RETRIES"
@@ -263,6 +267,8 @@ type Config struct {
 	// WorkingSetTokens: absolute cap on the compaction trigger. 0 ⇒ built-in,
 	// negative ⇒ disabled.
 	WorkingSetTokens int
+	// SummaryBudgetFrac: the summary's share of the trigger. 0 ⇒ built-in 0.25.
+	SummaryBudgetFrac float64
 	// MCPServers is the parsed mcpServers block (empty map when none configured).
 	// internal/mcp consumes these to dial servers; internal/config never imports
 	// the SDK. Path/env values in command/args/env are already expanded.
@@ -985,6 +991,13 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if v := getenv(EnvWorkingSetTokens); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.WorkingSetTokens = n
+		}
+	}
+	// Again no positivity guard: an out-of-range value is how the summary budget is
+	// switched off, so rejecting it would swallow the only way to back it out.
+	if v := getenv(EnvSummaryBudgetFrac); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			cfg.SummaryBudgetFrac = f
 		}
 	}
 	if v := getenv(EnvLLMMaxRetries); v != "" {

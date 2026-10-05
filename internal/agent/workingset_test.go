@@ -72,3 +72,49 @@ func TestWorkingSetCapNeverRaisesTheTrigger(t *testing.T) {
 		t.Fatalf("huge cap: trigger %d, want the unchanged fraction %d", got, frac)
 	}
 }
+
+// Both halves of the fix must be backable-out WITHOUT a new build. lowWaterFrac
+// shipped in v0.25.5 with no switch and promptly looked wrong under a paired
+// bench, which left no way to revert it in the field.
+func TestSummaryBudgetHasAnEscapeHatch(t *testing.T) {
+	t.Cleanup(func() { SetSummaryBudgetFrac(summaryBudgetFrac) })
+
+	if got := SummaryBudgetFrac(); got != summaryBudgetFrac {
+		t.Fatalf("default = %v, want the built-in %v", got, summaryBudgetFrac)
+	}
+	// Out of (0,1] disables rather than producing a summary budget of zero tokens,
+	// which would collapse the summary to nothing on every turn.
+	for _, off := range []float64{0, -1, 1.5} {
+		SetSummaryBudgetFrac(off)
+		if got := SummaryBudgetFrac(); got != 0 {
+			t.Fatalf("SetSummaryBudgetFrac(%v) = %v, want 0 (disabled)", off, got)
+		}
+	}
+	SetSummaryBudgetFrac(0.5)
+	if got := SummaryBudgetFrac(); got != 0.5 {
+		t.Fatalf("explicit 0.5 = %v", got)
+	}
+}
+
+// Disabling the budget must restore the unbounded summary exactly — the
+// pre-v0.25.6 behaviour — so a revert is a revert and not a third mode.
+func TestDisablingTheSummaryBudgetLeavesTheSummaryUnbounded(t *testing.T) {
+	t.Cleanup(func() { SetSummaryBudgetFrac(summaryBudgetFrac) })
+	SetSummaryBudgetFrac(-1)
+
+	// Compute the budget the way Assemble does, rather than passing one in: the
+	// disable works by the FRACTION resolving to 0, so a test that supplies its own
+	// budget bypasses the thing it is checking.
+	budget := int(float64(CompactTriggerTokens(UsableWindow(131072))) * SummaryBudgetFrac())
+	if budget != 0 {
+		t.Fatalf("disabled fraction still produced a budget of %d", budget)
+	}
+
+	w := &workingMemory{foldedEntries: []string{"OBS one", "OBS two", "OBS three"}}
+	if w.collapseSummary(budget, func(s string) int { return len(s) }) {
+		t.Fatal("collapsed with the budget disabled")
+	}
+	if len(w.foldedEntries) != 3 || w.droppedEntries != 0 {
+		t.Fatalf("entries touched with the budget disabled: %q dropped=%d", w.foldedEntries, w.droppedEntries)
+	}
+}

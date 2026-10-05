@@ -89,6 +89,7 @@ type resolvedConfigDiagnostic struct {
 	UsablePromptTokens     int               `json:"usable_prompt_tokens"`
 	CompactAtTokens        int               `json:"compact_at_tokens"`
 	WorkingSetTokens       int               `json:"working_set_tokens"`
+	SummaryBudgetFrac      float64           `json:"summary_budget_frac"`
 	ExploreAbortRounds     int               `json:"explore_abort_rounds"`
 	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
 	Temperature            float64           `json:"temperature"`
@@ -209,6 +210,9 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 	// the user would actually get, not the built-in defaults.
 	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
 	agent.SetWorkingSetTokens(cfg.WorkingSetTokens)
+	if cfg.SummaryBudgetFrac != 0 {
+		agent.SetSummaryBudgetFrac(cfg.SummaryBudgetFrac)
+	}
 	cwd, _ := os.Getwd()
 	path := profilePath
 	source := "flag"
@@ -290,6 +294,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		UsablePromptTokens:   agent.UsableWindow(cfg.MaxContextTokens),
 		CompactAtTokens:      agent.CompactTriggerTokens(agent.UsableWindow(cfg.MaxContextTokens)),
 		WorkingSetTokens:     agent.WorkingSetTokens(),
+		SummaryBudgetFrac:    agent.SummaryBudgetFrac(),
 		ExploreAbortRounds:   effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
 		RepeatAbortRounds:    effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
 		Temperature:          cfg.Temperature,
@@ -412,6 +417,11 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 			diag.WorkingSetTokens, int(diag.CompactTriggerFrac*float64(diag.UsablePromptTokens)))
 	default:
 		fmt.Fprintf(out, "working_set: %d tokens (not binding — the fraction is tighter)\n", diag.WorkingSetTokens)
+	}
+	if f := diag.SummaryBudgetFrac; f <= 0 {
+		fmt.Fprintf(out, "summary_budget: disabled (the running summary is unbounded)\n")
+	} else {
+		fmt.Fprintf(out, "summary_budget: %.2f of compact_at = %d tokens\n", f, int(f*float64(diag.CompactAtTokens)))
 	}
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
