@@ -24,6 +24,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	// The context fractions multiply and decide how much of --ctx kloo actually
 	// works in; apply them before anything budgets against the window.
 	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	agent.SetWorkingSetTokens(cfg.WorkingSetTokens)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err

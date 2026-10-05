@@ -34,7 +34,7 @@ func writeProfile(t *testing.T, body string) string {
 // DefaultMaxTokens (0) no longer means "unbounded" — config reads 0 as "compute it
 // from the context window", so every fixture at the default ctx lands here. Spelled
 // via ComputeRunTokenBudget rather than a literal so the two cannot drift.
-var computedRunBudgetForTest = ComputeRunTokenBudget(DefaultMaxContextTokens, 0, 0)
+var computedRunBudgetForTest = ComputeRunTokenBudget(DefaultMaxContextTokens, 0, 0, 0)
 
 func TestResolve(t *testing.T) {
 	cases := []struct {

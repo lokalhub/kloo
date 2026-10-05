@@ -399,8 +399,16 @@ func assemble(task llm.Message, summaryEntries []string, pins, tail []llm.Messag
 	return out
 }
 
-// triggerTokens is the soft compaction trigger: compactTriggerFrac × window.
-func triggerTokens(window int) int { return int(triggerFrac * float64(window)) }
+// triggerTokens is the soft compaction trigger: compactTriggerFrac × window,
+// then bounded by the absolute working-set cap (workingset.go).
+//
+// The fraction alone scales the trigger with the declared window, but the useful
+// working set does not scale with it — so on a large window the fraction means
+// "accumulate for thirty turns before shedding anything". capWorkingSet only ever
+// lowers the result, so a window already tighter than the cap is untouched.
+func triggerTokens(window int) int {
+	return capWorkingSet(int(triggerFrac * float64(window)))
+}
 
 // summaryTokens is the token cost of the summary slot for the given entries
 // (0 when there are none).

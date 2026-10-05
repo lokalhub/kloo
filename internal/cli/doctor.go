@@ -88,6 +88,7 @@ type resolvedConfigDiagnostic struct {
 	CompactTriggerFrac     float64           `json:"compact_trigger_frac"`
 	UsablePromptTokens     int               `json:"usable_prompt_tokens"`
 	CompactAtTokens        int               `json:"compact_at_tokens"`
+	WorkingSetTokens       int               `json:"working_set_tokens"`
 	ExploreAbortRounds     int               `json:"explore_abort_rounds"`
 	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
 	Temperature            float64           `json:"temperature"`
@@ -207,6 +208,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 	// Apply the configured fractions first so the numbers below describe the run
 	// the user would actually get, not the built-in defaults.
 	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	agent.SetWorkingSetTokens(cfg.WorkingSetTokens)
 	cwd, _ := os.Getwd()
 	path := profilePath
 	source := "flag"
@@ -287,6 +289,7 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		CompactTriggerFrac:   doctorTriggerFrac(cfg),
 		UsablePromptTokens:   agent.UsableWindow(cfg.MaxContextTokens),
 		CompactAtTokens:      agent.CompactTriggerTokens(agent.UsableWindow(cfg.MaxContextTokens)),
+		WorkingSetTokens:     agent.WorkingSetTokens(),
 		ExploreAbortRounds:   effectiveRepeatRounds(cfg.ExploreAbortRounds, agent.DefaultExploreAbortRounds),
 		RepeatAbortRounds:    effectiveRepeatRounds(cfg.RepeatAbortRounds, agent.DefaultRepeatAbortRounds),
 		Temperature:          cfg.Temperature,
@@ -398,6 +401,18 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 		diag.Ctx, diag.UsablePromptTokens, diag.UsableWindowFrac,
 		diag.CompactAtTokens, diag.CompactTriggerFrac,
 		100*float64(diag.CompactAtTokens)/float64(max(diag.Ctx, 1)))
+	// compact_at now has two possible sources, and which one is binding changes the
+	// behaviour completely — so name it rather than leaving the reader to multiply
+	// the fractions and wonder why the product does not match.
+	switch {
+	case diag.WorkingSetTokens <= 0:
+		fmt.Fprintf(out, "working_set: disabled (compact_at is the fraction alone)\n")
+	case diag.CompactAtTokens >= diag.WorkingSetTokens:
+		fmt.Fprintf(out, "working_set: %d tokens (BINDING — holds the prompt here instead of %d)\n",
+			diag.WorkingSetTokens, int(diag.CompactTriggerFrac*float64(diag.UsablePromptTokens)))
+	default:
+		fmt.Fprintf(out, "working_set: %d tokens (not binding — the fraction is tighter)\n", diag.WorkingSetTokens)
+	}
 	fmt.Fprintf(out, "temperature: %g\n", diag.Temperature)
 	fmt.Fprintf(out, "no_think: %t\n", diag.NoThink)
 	fmt.Fprintf(out, "tool_format: %s\n", diag.ToolFormat)

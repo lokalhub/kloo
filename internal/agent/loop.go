@@ -293,6 +293,21 @@ type Loop struct {
 	// instead of dispatching it. An edit releases it immediately; otherwise it
 	// decays, so a model that will not edit can never be trapped. See forceEdit().
 	editOnlyLeft int
+	// editsImpossible latches once the SCOPE has refused a write this run. The
+	// force-edit rail then stops arming, because forcing an edit the policy will
+	// reject cannot produce one.
+	//
+	// Measured on a read-only question against kloo's own tree under
+	// --read-only '**': the explore rail armed force-edit, which WITHHELD read_file
+	// (errEditOnlyTurn), the model then attempted two writes — including inventing a
+	// docs/ file nobody asked for — and both were denied. Four turns of a 25-turn
+	// run spent making a write that was impossible from the start, with the model's
+	// ability to read taken away to compel it.
+	//
+	// A scope denial is the exact, general signal: it covers deny, read_only and
+	// outside_allow alike, needs no guess about whether a glob is universal, and
+	// cannot fire on a run where writes are genuinely available.
+	editsImpossible bool
 	// lastPromptMsgs is the previous turn's prompt, kept to measure how much of this
 	// turn's is a byte-identical prefix of it (reprefill.go). That suffix is what a
 	// provider's cache cannot serve and kloo pays for again every turn.
@@ -1149,6 +1164,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if scopeErr.Class == tools.ScopeClassReadOnly {
 				counters.ReadOnlyEdits++
 			}
+			// The scope has refused a write, so no amount of forcing will produce one.
+			// Latch it and release the rail NOW rather than spending the rest of its
+			// budget withholding the read tools.
+			l.editsImpossible = true
+			l.editOnlyLeft = 0
 			lastScopeDenial = &ScopeDenial{
 				Class:   scopeErr.Class,
 				Tool:    scopeErr.Tool,
@@ -1469,7 +1489,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 						"This is not a failing test — the file no longer compiles, so nothing can run at all:\n" + detail +
 						"\nFix THIS first, in the file you just edited, before anything else. If you added code that " +
 						"already existed, remove the duplicate you introduced rather than adding more."})
-					if forceEdit() {
+					if forceEdit() && !l.editsImpossible {
 						l.editOnlyLeft = editOnlyBudget
 					}
 				}
@@ -1818,7 +1838,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// never armed and the run was stopped with the file broken. A model
 				// that has already ignored one nudge this run does not get another
 				// free pass.
-				if forceEdit() && exploreNudges > 0 {
+				if forceEdit() && exploreNudges > 0 && !l.editsImpossible {
 					l.editOnlyLeft = editOnlyBudget
 				}
 				exploreNudges++

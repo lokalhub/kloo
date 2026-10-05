@@ -34,6 +34,17 @@ const (
 	// run the other way. TestRunBudgetFractionsMatchAgent pins them together.
 	defaultUsableFrac  = 0.80
 	defaultTriggerFrac = 0.70
+	// defaultWorkingSetCap mirrors agent's defaultWorkingSetTokens, the absolute
+	// bound on the compaction trigger. It is only the DEFAULT: the caller passes the
+	// configured value, because the cap is overridable and a budget sized from a cap
+	// the loop is not using would be wrong in exactly the case someone bothered to
+	// tune it.
+	//
+	// It matters because this budget is denominated in turns: at ctx 131072 the
+	// uncapped fraction gives 73399 a turn, and 40 turns of that lands on the 1.5M
+	// ceiling — only ~20 real turns. Capped, a turn costs 32768 and the budget buys
+	// the 40 turns it claims to.
+	defaultWorkingSetCap = 32768
 )
 
 // ComputeRunTokenBudget returns the cumulative token ceiling for a run on a model
@@ -42,7 +53,11 @@ const (
 // window <= 0 means the endpoint reported no context length and nothing supplied
 // one, so any budget derived from it would be a guess about a guess. Previous
 // behaviour stands rather than inventing a ceiling that could stop real work.
-func ComputeRunTokenBudget(window int, usableFrac, triggerFrac float64) int {
+// workingSet is the configured absolute cap on the compaction trigger, in the
+// same sign convention as everywhere else: 0 ⇒ the built-in default, negative ⇒
+// disabled, in which case the per-turn cost is the fraction alone and the ceiling
+// is what bounds a large window.
+func ComputeRunTokenBudget(window int, usableFrac, triggerFrac float64, workingSet int) int {
 	if window <= 0 {
 		return 0
 	}
@@ -52,7 +67,13 @@ func ComputeRunTokenBudget(window int, usableFrac, triggerFrac float64) int {
 	if triggerFrac <= 0 || triggerFrac > 1 {
 		triggerFrac = defaultTriggerFrac
 	}
+	if workingSet == 0 {
+		workingSet = defaultWorkingSetCap
+	}
 	perTurn := int(float64(window) * usableFrac * triggerFrac)
+	if workingSet > 0 && perTurn > workingSet {
+		perTurn = workingSet
+	}
 	budget := perTurn * runBudgetTurns
 	if budget < runBudgetFloor {
 		return runBudgetFloor

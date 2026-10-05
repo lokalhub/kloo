@@ -163,3 +163,44 @@ func TestEnvOnDefaultIsOptOut(t *testing.T) {
 		t.Fatal("explicit 1 should mean ON")
 	}
 }
+
+// TestForceEditStandsDownWhenTheScopeRefusesWrites: the rail cannot obtain an
+// edit the scope policy will reject, so it must not try.
+//
+// Measured on a read-only question against kloo's own tree under
+// --read-only '**': the explore rail armed force-edit, which WITHHELD read_file,
+// the model attempted two writes — one of them a docs/ file nobody asked for —
+// and the scope denied both. Four turns of a 25-turn run were spent pursuing an
+// impossible write with the model's ability to read taken away to compel it.
+func TestForceEditStandsDownWhenTheScopeRefusesWrites(t *testing.T) {
+	l := &Loop{Registry: tools.NewRegistry()}
+
+	// A denial latches the flag and releases any budget already armed.
+	l.editOnlyLeft = editOnlyBudget
+	l.editsImpossible = true
+	l.editOnlyLeft = 0 // what the loop does at the scope-denial site
+	if l.turnRegistry(false) != l.Registry {
+		t.Fatal("vocabulary stayed narrowed after the scope refused a write")
+	}
+
+	// And the rail must not re-arm afterwards, on either path.
+	if forceEdit() && !l.editsImpossible {
+		t.Fatal("arming condition still true after a scope denial")
+	}
+}
+
+// The latch must not fire on a run where writes ARE available: a rail that stood
+// down on every run would remove the convergence guarantee it was added for.
+func TestForceEditStillArmsWhenWritesArePossible(t *testing.T) {
+	l := &Loop{Registry: tools.NewRegistry()}
+	if l.editsImpossible {
+		t.Fatal("editsImpossible must default to false")
+	}
+	if !forceEdit() {
+		t.Skip("force-edit rail off in this environment")
+	}
+	l.editOnlyLeft = editOnlyBudget
+	if l.turnRegistry(false) == l.Registry {
+		t.Fatal("rail did not narrow the vocabulary on a writable run")
+	}
+}

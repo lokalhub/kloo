@@ -5,9 +5,9 @@ import "testing"
 // The whole point of computing it: a flat ceiling is wrong at both ends, because a
 // turn's cost is set by the window.
 func TestComputeRunTokenBudgetScalesWithTheWindow(t *testing.T) {
-	small := ComputeRunTokenBudget(8000, 0, 0)
-	mid := ComputeRunTokenBudget(32768, 0, 0)
-	large := ComputeRunTokenBudget(131072, 0, 0)
+	small := ComputeRunTokenBudget(8000, 0, 0, 0)
+	mid := ComputeRunTokenBudget(32768, 0, 0, 0)
+	large := ComputeRunTokenBudget(131072, 0, 0, 0)
 	if !(small <= mid && mid <= large) {
 		t.Fatalf("not monotonic in the window: 8k=%d 32k=%d 131k=%d", small, mid, large)
 	}
@@ -23,20 +23,42 @@ func TestComputeRunTokenBudgetFloorProtectsSmallWindows(t *testing.T) {
 	if raw >= runBudgetFloor {
 		t.Fatalf("test premise broken: raw %d is no longer below the floor", raw)
 	}
-	if got := ComputeRunTokenBudget(8000, 0, 0); got != runBudgetFloor {
+	if got := ComputeRunTokenBudget(8000, 0, 0, 0); got != runBudgetFloor {
 		t.Errorf("ctx 8000 = %d, want the floor %d", got, runBudgetFloor)
 	}
 }
 
 // A large window needs FEWER turns and the multiplier runs away: 40 x 73399 is
 // 2.9M, above the figure that prompted this work.
+//
+// Two different bounds now do that job, and which one binds depends on the
+// working-set cap:
+//
+//   - cap ON (the default): a turn costs the cap, so 40 turns is 1.31M and the
+//     budget buys the 40 turns it is denominated in.
+//   - cap OFF: a turn costs the fraction, 40 of them is 2.9M, and runBudgetCeiling
+//     is what keeps it off the ~2M that prompted this work.
+//
+// Both are asserted, because the ceiling is otherwise unreachable at the default
+// cap and a test that only covered the default would let it rot.
 func TestComputeRunTokenBudgetCeilingBoundsLargeWindows(t *testing.T) {
-	got := ComputeRunTokenBudget(131072, 0, 0)
-	if got != runBudgetCeiling {
-		t.Errorf("ctx 131072 = %d, want the ceiling %d", got, runBudgetCeiling)
+	capped := ComputeRunTokenBudget(131072, 0, 0, 0)
+	if want := defaultWorkingSetCap * runBudgetTurns; capped != want {
+		t.Errorf("ctx 131072 capped = %d, want %d (%d x %d turns)", capped, want, defaultWorkingSetCap, runBudgetTurns)
 	}
-	if got >= 2_000_000 {
-		t.Errorf("budget %d does not improve on the ~2M that prompted this", got)
+	if capped >= 2_000_000 {
+		t.Errorf("budget %d does not improve on the ~2M that prompted this", capped)
+	}
+
+	uncapped := ComputeRunTokenBudget(131072, 0, 0, -1)
+	if uncapped != runBudgetCeiling {
+		t.Errorf("ctx 131072 with the cap off = %d, want the ceiling %d", uncapped, runBudgetCeiling)
+	}
+	if uncapped >= 2_000_000 {
+		t.Errorf("budget %d does not improve on the ~2M that prompted this", uncapped)
+	}
+	if capped >= uncapped {
+		t.Errorf("the cap must tighten the budget, not loosen it: capped %d >= uncapped %d", capped, uncapped)
 	}
 }
 
@@ -45,7 +67,7 @@ func TestComputeRunTokenBudgetCeilingBoundsLargeWindows(t *testing.T) {
 // previous behaviour rather than inventing a ceiling that could stop real work.
 func TestComputeRunTokenBudgetUnknownWindowIsUnbounded(t *testing.T) {
 	for _, w := range []int{0, -1} {
-		if got := ComputeRunTokenBudget(w, 0, 0); got != 0 {
+		if got := ComputeRunTokenBudget(w, 0, 0, 0); got != 0 {
 			t.Errorf("window %d = %d, want 0 (unbounded)", w, got)
 		}
 	}
@@ -54,9 +76,9 @@ func TestComputeRunTokenBudgetUnknownWindowIsUnbounded(t *testing.T) {
 // Out-of-range fractions fall back to the defaults instead of producing a nonsense
 // budget, mirroring SetContextFractions.
 func TestComputeRunTokenBudgetIgnoresBadFractions(t *testing.T) {
-	want := ComputeRunTokenBudget(32768, 0, 0)
+	want := ComputeRunTokenBudget(32768, 0, 0, 0)
 	for _, bad := range [][2]float64{{-1, -1}, {0, 2}, {5, 0.7}} {
-		if got := ComputeRunTokenBudget(32768, bad[0], bad[1]); got != want {
+		if got := ComputeRunTokenBudget(32768, bad[0], bad[1], 0); got != want {
 			t.Errorf("fractions %v = %d, want the default %d", bad, got, want)
 		}
 	}
@@ -65,8 +87,8 @@ func TestComputeRunTokenBudgetIgnoresBadFractions(t *testing.T) {
 // A tighter trigger means cheaper turns, so the budget must follow it down — the
 // two numbers describe the same thing and must not drift apart.
 func TestComputeRunTokenBudgetHonoursCustomFractions(t *testing.T) {
-	tight := ComputeRunTokenBudget(32768, 0.80, 0.40)
-	loose := ComputeRunTokenBudget(32768, 0.80, 0.70)
+	tight := ComputeRunTokenBudget(32768, 0.80, 0.40, 0)
+	loose := ComputeRunTokenBudget(32768, 0.80, 0.70, 0)
 	if tight >= loose {
 		t.Errorf("tight trigger = %d, loose = %d; a cheaper turn must mean a smaller budget", tight, loose)
 	}
