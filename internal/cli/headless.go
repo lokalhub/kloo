@@ -37,6 +37,10 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	// The context fractions multiply and decide how much of --ctx kloo actually
 	// works in; apply them before anything budgets against the window.
 	agent.SetContextFractions(cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	agent.SetWorkingSetTokens(cfg.WorkingSetTokens)
+	if cfg.SummaryBudgetFrac != 0 {
+		agent.SetSummaryBudgetFrac(cfg.SummaryBudgetFrac)
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return maybeBenchmarkSetupError(cfg, err)

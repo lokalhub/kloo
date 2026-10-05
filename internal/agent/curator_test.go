@@ -48,16 +48,34 @@ func TestSplitIsByteIdenticalForSmallWindows(t *testing.T) {
 	}
 }
 
-// TestSplitBoundsLargeWindows is the whole point: a huge window must raise the
-// compaction trigger WITHOUT raising what kloo assembles each turn.
+// TestSplitBoundsLargeWindows is the whole point: a huge window must not raise
+// what kloo assembles each turn.
+//
+// The capacity half of this test was INVERTED on purpose in v0.25.6. It used to
+// assert that a huge window raises the compaction trigger in proportion
+// ("compaction becomes rare"), and that turned out to be the bug the user was
+// reporting: at --ctx 131072 nothing was shed for twenty-five turns, the prompt
+// grew 83KB → 218KB, and the run spent 1.29M tokens answering one read-only
+// question. The trigger is now bounded absolutely by the working-set cap, so the
+// window buys headroom for the single call that needs it rather than licence to
+// accumulate. The proportional behaviour is still reachable with the cap off,
+// which is asserted here so the change stays reversible.
 func TestSplitBoundsLargeWindows(t *testing.T) {
 	const window = 900_000
 	const defaultCap = 32768
 
-	// Capacity scales with the window — compaction becomes rare.
-	if got, want := triggerTokens(window), 630_000; got != want {
-		t.Errorf("compaction trigger = %d, want %d", got, want)
+	// Capacity no longer scales with the window: the cap binds.
+	if got, want := triggerTokens(window), defaultWorkingSetTokens; got != want {
+		t.Errorf("compaction trigger = %d, want the working-set cap %d", got, want)
 	}
+	// ...and the old proportional trigger is one flag away.
+	func() {
+		t.Cleanup(func() { SetWorkingSetTokens(0) })
+		SetWorkingSetTokens(-1)
+		if got, want := triggerTokens(window), 630_000; got != want {
+			t.Errorf("compaction trigger with the cap off = %d, want %d", got, want)
+		}
+	}()
 	// Appetite does not.
 	// 6881, not 11468: the map budget is now a fraction of the COMPACTION TRIGGER
 	// rather than of the curator budget directly. The old value, combined with a hot

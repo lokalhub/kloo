@@ -763,6 +763,11 @@ func TestBudgetsScaleTogether(t *testing.T) {
 func TestContextFractionsAreConfigurableAndMultiply(t *testing.T) {
 	u0, t0 := ContextFractions()
 	t.Cleanup(func() { SetContextFractions(u0, t0) })
+	// This test is about the FRACTIONS' arithmetic. The absolute working-set cap
+	// (workingset.go) would bind at this window and mask it, so switch it off here;
+	// workingset_test.go owns the cap's own behaviour.
+	t.Cleanup(func() { SetWorkingSetTokens(0) })
+	SetWorkingSetTokens(-1)
 
 	const declared = 131072
 	if got := triggerTokens(usableWindow(declared)); got != 73399 {

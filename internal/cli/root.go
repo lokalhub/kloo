@@ -148,6 +148,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagSaturationMin    float64
 		flagUsableFrac       float64
 		flagTriggerFrac      float64
+		flagWorkingSet       int
 		flagPromptCache      string
 		flagStrictModel      bool
 		flagAllowedDirs      []string
@@ -255,6 +256,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("compact-trigger-frac") {
 				flags.CompactTriggerFrac = &flagTriggerFrac
+			}
+			if fs.Changed("working-set-tokens") {
+				flags.WorkingSetTokens = &flagWorkingSet
 			}
 			if fs.Changed("prompt-cache") {
 				if !config.IsPromptCacheMode(flagPromptCache) {
@@ -377,6 +381,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagExploreNudge, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
 	f.Float64Var(&flagUsableFrac, "usable-window-frac", 0, "fraction of --ctx usable as PROMPT, reserving the rest for the completion and tool schemas (0 ⇒ built-in 0.80)")
 	f.Float64Var(&flagTriggerFrac, "compact-trigger-frac", 0, "fraction of the usable window at which compaction STARTS (0 ⇒ built-in 0.70); multiplies with --usable-window-frac")
+	f.IntVar(&flagWorkingSet, "working-set-tokens", 0, "hold the assembled prompt near this many TOKENS regardless of --ctx, by bounding the compaction trigger (0 ⇒ built-in 32768, negative ⇒ disabled: the --compact-trigger-frac fraction alone)")
 	f.IntVar(&flagExploreTokenCap, "explore-token-cap", 0, "TOKENS a read-only span may spend before the exploration rail stops the run (0 ⇒ built-in backstop, negative ⇒ disabled) — the window-independent form of --explore-total-cap")
 	f.IntVar(&flagSaturationWindow, "explore-saturation-window", 0, "read-only turns in the sliding window used to detect that reads have stopped covering new ground (0 ⇒ built-in, negative ⇒ disabled)")
 	f.Float64Var(&flagSaturationMin, "explore-saturation-min", 0, "minimum share of that window which must cover NEW ground; below it the run is nudged, then stopped (0 ⇒ built-in)")
@@ -482,6 +487,9 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	if fs.Changed("compact-trigger-frac") {
 		flags.CompactTriggerFrac = &values.CompactTriggerFrac
 	}
+	if fs.Changed("working-set-tokens") {
+		flags.WorkingSetTokens = &values.WorkingSetTokens
+	}
 	if fs.Changed("prompt-cache") {
 		if !config.IsPromptCacheMode(values.PromptCache) {
 			return flags, fmt.Errorf("invalid --prompt-cache %q (want one of: %s)", values.PromptCache, strings.Join(config.PromptCacheModes(), ", "))
@@ -583,6 +591,7 @@ type configFlagValues struct {
 	ExploreTotalCap      int
 	UsableWindowFrac     float64
 	CompactTriggerFrac   float64
+	WorkingSetTokens     int
 	PromptCache          string
 	StrictModel          bool
 	AllowedDirs          []string
@@ -625,6 +634,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.IntVar(&v.ExploreNudgeRounds, "explore-nudge-rounds", 0, "read-only turns covering no new ground before the exploration rail nudges (0 ⇒ built-in default)")
 	f.Float64Var(&v.UsableWindowFrac, "usable-window-frac", 0, "fraction of --ctx usable as PROMPT (0 ⇒ built-in 0.80)")
 	f.Float64Var(&v.CompactTriggerFrac, "compact-trigger-frac", 0, "fraction of the usable window at which compaction starts (0 ⇒ built-in 0.70)")
+	f.IntVar(&v.WorkingSetTokens, "working-set-tokens", 0, "hold the assembled prompt near this many TOKENS regardless of --ctx, by bounding the compaction trigger (0 ⇒ built-in 32768, negative ⇒ disabled: the --compact-trigger-frac fraction alone)")
 	f.IntVar(&v.ExploreTotalCap, "explore-total-cap", 0, "consecutive read-only turns of ANY kind before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.ExploreAbortRounds, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.IntVar(&v.RepeatAbortRounds, "repeat-abort-rounds", 0, "identical consecutive MUTATING tool calls before the repetition rail halts the run as churn (0 ⇒ built-in default)")

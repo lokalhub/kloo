@@ -121,7 +121,7 @@ func TestBudgetResolvesFromConfigChain(t *testing.T) {
 	// still ships 0, and config now reads that as "compute it from the context
 	// window" — a run used to have NO token ceiling at all, which is how a question
 	// task reached ~2M tokens with only the step cap and the hour to stop it.
-	want := config.ComputeRunTokenBudget(cfg.MaxContextTokens, cfg.UsableWindowFrac, cfg.CompactTriggerFrac)
+	want := config.ComputeRunTokenBudget(cfg.MaxContextTokens, cfg.UsableWindowFrac, cfg.CompactTriggerFrac, 0)
 	if st.MaxTokens != want {
 		t.Errorf("budget MaxTokens = %d, want the computed %d for ctx %d", st.MaxTokens, want, cfg.MaxContextTokens)
 	}
