@@ -162,6 +162,109 @@ type workingMemory struct {
 	// so the summary is byte-stable and the boundary moves rarely.
 	folded        int
 	foldedEntries []string
+	// droppedEntries is how many of the OLDEST summary entries have been collapsed
+	// into the counted placeholder, so the summary itself stays bounded. Monotonic,
+	// like folded.
+	droppedEntries int
+}
+
+// summaryPlaceholder is the one line that stands in for collapsed entries. It
+// names the count so the model can see that earlier context existed, and says
+// what to do about it — the files are on disk and re-readable.
+func summaryPlaceholder(n int) string {
+	return fmt.Sprintf("[%d earlier steps dropped to bound this summary; re-read any file you still need]", n)
+}
+
+// collapseSummary bounds the running summary to `budget` tokens by dropping
+// entries, replacing them with one counted placeholder.
+//
+// It overshoots to lowWaterFrac of the budget for the same reason the fold
+// boundary does: collapsing to exactly the limit means the next entry crosses it
+// again, and every collapse rewrites the summary and so costs the whole prompt
+// below it on a prefix cache.
+//
+// DROP ORDER IS BY VALUE, NOT BY AGE. summarizeCold keeps an applied edit as "the
+// actionable record" — what this run has already changed — while padding
+// observations and command echoes are incidental. A plain oldest-first drop threw
+// the edit record away and kept the noise (caught by
+// TestMemoryB3ClassifyVerbatimVsStub), which is backwards: the edits are the one
+// part of the history that cannot be recovered by re-reading a file.
+//
+// So sheddable entries go first, oldest among them first; the actionable record is
+// only touched if dropping everything else still leaves the summary over budget.
+//
+// Returns true when anything was dropped.
+func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
+	if budget <= 0 || len(w.foldedEntries) == 0 {
+		return false
+	}
+	if summaryTokens(w.summaryEntries(), est) <= budget {
+		return false
+	}
+	target := int(float64(budget) * lowWaterFrac)
+	dropped := false
+	// Pass 1: the incidental entries, oldest first.
+	// Pass 2 (only if still over): the actionable record, oldest first.
+	for _, durable := range []bool{false, true} {
+		for summaryTokens(w.summaryEntries(), est) > target {
+			i := w.firstDroppable(durable)
+			if i < 0 {
+				break
+			}
+			// Keep at least one real entry: a summary that is nothing but a
+			// placeholder tells the model less than the step counter already does.
+			if len(w.foldedEntries) <= 1 {
+				return dropped
+			}
+			w.foldedEntries = append(w.foldedEntries[:i], w.foldedEntries[i+1:]...)
+			w.droppedEntries++
+			dropped = true
+		}
+	}
+	return dropped
+}
+
+// firstDroppable is the index of the oldest entry whose durability matches, or -1.
+func (w *workingMemory) firstDroppable(durable bool) int {
+	for i, e := range w.foldedEntries {
+		if durableSummaryEntry(e) == durable {
+			return i
+		}
+	}
+	return -1
+}
+
+// durableSummaryEntry reports whether an entry is the actionable record of a
+// change this run made, rather than an incidental observation.
+//
+// It keys off the shapes summarizeCold produces: an applied edit is rendered by
+// editSigFromArgs, and a verify failure carries the test output that explains why
+// the run is still going. Everything else — read stubs, command echoes, padding
+// observations — is recoverable from the workspace or simply noise.
+func durableSummaryEntry(entry string) bool {
+	switch {
+	case strings.HasPrefix(entry, tools.NameEditFile+" "), strings.HasPrefix(entry, tools.NameWriteFile+" "):
+		return true
+	case strings.Contains(entry, "FAIL"):
+		return true
+	case strings.HasPrefix(entry, "[read "):
+		// A read stub is ALREADY the compacted form of a whole file dump: one line
+		// naming what the run has looked at. Dropping it reclaims almost nothing and
+		// costs the model its map of where it has been — the worst trade available
+		// here, and it would push the model straight back into re-reading.
+		return true
+	default:
+		return false
+	}
+}
+
+// summaryEntries is the summary as rendered: the counted placeholder (when any
+// entries have been collapsed) followed by the entries still held.
+func (w *workingMemory) summaryEntries() []string {
+	if w.droppedEntries == 0 {
+		return w.foldedEntries
+	}
+	return append([]string{summaryPlaceholder(w.droppedEntries)}, w.foldedEntries...)
 }
 
 // lowWaterFrac is the hysteresis. When the fold boundary has to advance, it
@@ -172,6 +275,26 @@ type workingMemory struct {
 // dump crossed it immediately and the boundary moved again. Every move costs the
 // prefix below it, which on this endpoint is a full re-prefill.
 const lowWaterFrac = 0.60
+
+// summaryBudgetFrac is the RUNNING SUMMARY's own share of the compaction trigger.
+//
+// Without it the summary grows without bound, and compaction stops reclaiming
+// anything. summarizeCold keeps non-dump observations — run_command exit lines,
+// verify-fail tails, small tool outputs — verbatim up to maxKeepItemTokens (256),
+// so a cold message already under that cap is copied, not summarized. Fold 161
+// such messages and you get 161 entries of the same size. The monotonic fold
+// above then guarantees they are never revisited, so nothing can ever shrink them.
+//
+// Measured directly (TestWorkingSetCapActuallyShedsOnALargeWindow): 60714 tokens
+// of history at --ctx 131072 compacted from 241 messages to 80, and the assembled
+// prompt went from 60714 tokens to 60865 — the compaction ran and gave back
+// NOTHING, costing slightly more than it saved once the summary prefix is counted.
+//
+// So the summary gets a budget of its own, and the oldest entries collapse into a
+// counted placeholder when it is exceeded. The entries lost this way are the
+// oldest observations in the run; their file contents were already stubs that are
+// re-read from disk on demand, which is what makes them safe to drop.
+const summaryBudgetFrac = 0.25
 
 // smartVerify reports whether the verify same-failure marker is on
 // (KLOO_SMART_VERIFY=1): when a failing verify is IDENTICAL to the previous turn's,
@@ -284,8 +407,13 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// The tail is always everything after the boundary. When the boundary did not
 	// move, this turn is a pure APPEND to the previous prompt — which is the whole
 	// point: the compaction path running again must not by itself change the prompt.
+	// Bound the summary itself. The fold above is append-only by design, so this is
+	// the only thing that can reclaim space from it.
+	// Not counted as a separate compaction: it is part of the same shedding event,
+	// and double-counting it would misreport the ⟲ counter the UI and the bench read.
+	w.collapseSummary(int(float64(triggerTokens(window))*summaryBudgetFrac), in.estimate)
 	tail = allTail[w.folded:]
-	entries := w.foldedEntries
+	entries := w.summaryEntries()
 
 	// Shed in the fixed order until the hard ceiling holds (§2.4): the task and
 	// system base are the floor and never shed; window ≥ floor guarantees
