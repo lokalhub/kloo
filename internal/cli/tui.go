@@ -56,6 +56,12 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	if err != nil {
 		return err
 	}
+	// A resumed session runs on the model it was saved with. This must happen BEFORE
+	// anything derived from cfg is built — the client, the adapter, the token
+	// calibrator and runCfg all key off cfg.Model/Endpoint below.
+	if msg := restoreSessionRuntime(&cfg, baseFlags, getenv, profilePath, sess, opt.ResumeID != ""); msg != "" {
+		fmt.Fprintf(os.Stderr, "kloo: %s\n", msg)
+	}
 
 	adapter, err := tools.SelectAdapter(cfg.ToolFormat, tools.EndpointCaps{SupportsTools: true})
 	if err != nil {
@@ -259,7 +265,9 @@ func chooseSession(store *session.Store, cfg config.Config, verifyCmd, lintCmd s
 	}
 	// Default (and --new): a clean session. Lint is persisted beside Verify for
 	// resume parity.
-	return &session.Session{ID: session.NewID(now), Model: cfg.Model, Verify: verifyCmd, Lint: lintCmd, Created: now, Updated: now}, "", nil
+	return &session.Session{ID: session.NewID(now), Model: cfg.Model,
+		Provider: cfg.Provider, Endpoint: cfg.Endpoint,
+		Verify: verifyCmd, Lint: lintCmd, Created: now, Updated: now}, "", nil
 }
 
 func resumeBanner(s *session.Session) string {
