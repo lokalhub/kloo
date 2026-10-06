@@ -116,6 +116,9 @@ type Model struct {
 	// pastes holds long/multi-line pastes collapsed to placeholders in the input
 	// (paste.go); expanded to full text when the task is submitted.
 	pastes []pastedText
+	// images are attachments for the NEXT submission, sent as vision content parts
+	// rather than substituted into the prompt text (see pastedImage).
+	images []pastedImage
 
 	// source is the v1 task source (keyboard); the seam admits a future stdin
 	// source (source.go).
@@ -363,8 +366,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// A long/multi-line bracketed paste collapses to a placeholder instead of
 	// flooding the input (paste.go). Short pastes fall through to the input.
+	// An image paste (data URL) is stashed as a placeholder the model can read.
 	if msg.Paste {
-		if nm, handled := m.handlePaste(string(msg.Runes)); handled {
+		text := string(msg.Runes)
+		if nm, handled := m.handleImagePaste(text); handled {
+			return nm, nil
+		}
+		if nm, handled := m.handlePaste(text); handled {
 			return nm, nil
 		}
 	}
@@ -376,6 +384,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
+	case tea.KeyCtrlV:
+		// Attach the clipboard's IMAGE. This needs its own key because a terminal
+		// emits no paste event when the clipboard holds a PNG — there is nothing to
+		// intercept, so kloo has to go and read it (clipimage.go). Text is unaffected:
+		// Ctrl+Shift+V / middle-click still paste text through bracketed paste.
+		return m.pasteClipboardImage(), nil
 	case tea.KeyCtrlY:
 		// Copy the last assistant reply to the system clipboard (OSC 52). No external
 		// tool, works over SSH. Shift+drag native selection is the fallback where the

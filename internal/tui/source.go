@@ -46,5 +46,7 @@ type Runner interface {
 	// the program; it returns when the run ends (it sends a terminal reportMsg).
 	// runtime is the current model/client config (switchable via /model) applied
 	// to this run so /model takes effect on the next task.
-	Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string)
+	// images are attachments for the task message, as data URLs; they travel
+	// separately from task because they are sent as vision content parts, not text.
+	Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string, images []string)
 }
