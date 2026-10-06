@@ -135,3 +135,81 @@ func TestLowWaterFracIsRealHysteresis(t *testing.T) {
 		t.Fatalf("lowWaterFrac = %v — folding this deep discards history the model still needs", lowWaterFrac)
 	}
 }
+
+// TestHysteresisIsWorthItsValue measures what hysteresis actually controls —
+// how often the fold boundary moves and how many prompt bytes stop being a
+// byte-identical prefix of the previous turn when it does.
+//
+// This exists because a 4-pair partial bench sweep hinted that 0.60 was LOSING
+// and the value should go back to 1.00. That hint was wrong, and it was nearly
+// acted on. Measured deterministically over 60 turns at --ctx 131072:
+//
+//	frac   boundary moves   re-prefilled   peak change
+//	1.00   30               3.7 MB         121 KB
+//	0.85    6               0.8 MB         104 KB
+//	0.70    3               0.5 MB          85 KB
+//	0.60    3               0.4 MB          73 KB
+//	0.50    2               0.3 MB          61 KB
+//	0.35    2               0.3 MB          41 KB
+//
+// At 1.00 the boundary moves on every other turn — the exact oscillation the
+// monotonic fold was built to stop — and costs ~9x the re-prefill. 0.60 sits on
+// the flat part of the curve, so the precise value matters far less than not
+// being 1.0.
+//
+// It is also the lesson about instruments: this runs in ~2s with zero variance,
+// while the bench sweep it replaced needed hours of GPU and showed 3.2x
+// wall-clock spread across four pairs — enough noise to produce exactly the
+// wrong answer.
+func TestHysteresisIsWorthItsValue(t *testing.T) {
+	const window, turns = 131072, 60
+	build := func(n int) []llm.Message {
+		convo := []llm.Message{{Role: llm.RoleUser, Content: "trace the prompt assembly"}}
+		for i := range n {
+			convo = append(convo,
+				llm.Message{Role: llm.RoleAssistant, Content: fmt.Sprintf("turn %d: reading", i)},
+				llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf("tool read_file result:\n%s",
+					strings.Repeat(fmt.Sprintf("line %d of internal/agent/file_%d.go\n", i, i%7), 110))})
+		}
+		return convo
+	}
+	measure := func(frac float64) (moves, reprefill int) {
+		defer func(old float64) { lowWaterFrac = old }(lowWaterFrac)
+		lowWaterFrac = frac
+		w := NewWorkingMemory()
+		var prev []byte
+		prevFolded := 0
+		for n := 1; n <= turns; n++ {
+			in := MemoryInput{Task: "trace the prompt assembly", Convo: build(n), WindowTokens: window}
+			out, err := w.Assemble(in)
+			if err != nil {
+				t.Fatalf("frac %v turn %d: %v", frac, n, err)
+			}
+			cur := promptBytes(out)
+			if prev != nil {
+				reprefill += len(cur) - commonPrefixLen(prev, cur)
+			}
+			if w.folded != prevFolded {
+				moves, prevFolded = moves+1, w.folded
+			}
+			prev = cur
+		}
+		return moves, reprefill
+	}
+
+	shippedMoves, shippedBytes := measure(lowWaterFrac)
+	noneMoves, noneBytes := measure(1.0)
+	t.Logf("frac %.2f: %d boundary moves, %.1f MB re-prefilled", lowWaterFrac, shippedMoves, float64(shippedBytes)/1e6)
+	t.Logf("frac 1.00: %d boundary moves, %.1f MB re-prefilled", noneMoves, float64(noneBytes)/1e6)
+
+	// No hysteresis must be MATERIALLY worse, not marginally — otherwise the
+	// complexity is not paying for itself and the simpler 1.0 should win.
+	if noneBytes < shippedBytes*2 {
+		t.Errorf("hysteresis is not earning its keep: 1.00 re-prefills %d bytes vs %d at %.2f",
+			noneBytes, shippedBytes, lowWaterFrac)
+	}
+	if noneMoves <= shippedMoves {
+		t.Errorf("1.00 moved the boundary %d times vs %d at %.2f — hysteresis should move it LESS",
+			noneMoves, shippedMoves, lowWaterFrac)
+	}
+}
