@@ -21,7 +21,7 @@ func TestCardEditDiff(t *testing.T) {
 	msg := toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{
 		"path": "src/app/tabs/tabs.routes.ts",
 		"diff": editFileDiff,
-	}}, tools.Result{})
+	}}, tools.Result{}, nil)
 
 	m := apply(newSized(), msg)
 	v := m.View()
@@ -44,7 +44,7 @@ func TestCardEditDiff(t *testing.T) {
 // lines (no `-`), through the real bridge parse.
 func TestCardEditDiffNewFile(t *testing.T) {
 	diff := "```\n<<<<<<< SEARCH\n=======\nexport const Home = 1;\n>>>>>>> REPLACE\n```"
-	msg := toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{"path": "home.ts", "diff": diff}}, tools.Result{})
+	msg := toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{"path": "home.ts", "diff": diff}}, tools.Result{}, nil)
 	v := apply(newSized(), msg).View()
 	if !contains(v, "+ export const Home = 1;") {
 		t.Errorf("new-file edit should render the content as a + line:\n%s", v)

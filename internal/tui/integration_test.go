@@ -21,7 +21,7 @@ type scriptRunner struct {
 }
 
 func (r *scriptRunner) setSend(send func(tea.Msg)) { r.send = send }
-func (r *scriptRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
+func (r *scriptRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files, images []string) {
 	for _, msg := range r.steps {
 		r.send(msg)
 	}
@@ -38,9 +38,9 @@ func TestIntegrationFullRunFrame(t *testing.T) {
 		streamDeltaMsg{Content: "I'll update the tab routes first."},
 		streamDoneMsg{},
 		// The edit card goes through the REAL bridge parse (a fenced diff arg).
-		toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{"path": "src/app/tabs/tabs.routes.ts", "diff": editFileDiff}}, tools.Result{}),
+		toolEvent(tools.Call{Name: "edit_file", Args: map[string]any{"path": "src/app/tabs/tabs.routes.ts", "diff": editFileDiff}}, tools.Result{}, nil),
 		progressMsg{Model: "test-model", Step: 2, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000},
-		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 0}),
+		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 0}, nil),
 		reportMsg{Reason: "success", Steps: 2, Tokens: 1200, MaxTokens: 8000, Elapsed: "12s", VerifyCmd: "npm run build", VerifyExit: 0},
 	)
 	v := m.View()

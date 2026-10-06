@@ -60,6 +60,14 @@ type Loop struct {
 	// the usable window (the pre-split behaviour).
 	CuratorTokens int
 	System        string // system prompt
+	// TaskImages are image attachments for THIS run's task message (data URLs), set
+	// by the TUI when the user pastes a screenshot. They ride on the first user
+	// message as proper image content parts, so the working set never re-sends the
+	// pixels and the compaction fold never has to summarise a megabyte of base64.
+	//
+	// Attached to the task message ONLY: a screenshot is context for the request, and
+	// a model that re-reads it every turn is paying for it every turn.
+	TaskImages []string
 	// ChatSystem, when non-empty, enables the conversational gate: ONE no-tools
 	// model call before the agent loop that classifies the user's message as an
 	// actionable task (→ run the loop) or conversation (→ reply directly, no run).
@@ -662,7 +670,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		l.Registry.Register(taskTool{parent: l, depth: l.subagentDepth, spawns: l.subagentSpawns})
 	}
 
-	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
+	convo := []llm.Message{{Role: llm.RoleUser, Content: task, Images: l.TaskImages}}
 	// One-time, at step 0: show the test this run is graded against. See
 	// failingTestSource — the brief names the test but never shows it, which is
 	// circular when the required behaviour IS the bug.
@@ -1004,8 +1012,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// streamed to the transcript — stop calmly rather than error/churn.
 				return finish(ReasonAnswered, nil, nil, nil)
 			}
-			if errors.Is(err, tools.ErrMalformedToolCall) || strings.Contains(err.Error(), "no usable tool call") {
+			if errors.Is(err, tools.ErrMalformedToolCall) || errors.Is(err, ErrMalformedAfterRetry) {
 				counters.InvalidToolCalls++
+			}
+			// The model tried to act and could not produce syntax kloo can read, through
+			// the whole corrective budget. The ENDPOINT is fine — it answered every
+			// request — so this is not an internal error: don't roll the run's edits back
+			// and don't throw the exploration away. ReasonMalformedToolCall is an
+			// answerable stop, so the run closes with what it learned.
+			if errors.Is(err, ErrMalformedAfterRetry) {
+				l.observeUsage(usage)
+				return finish(ReasonMalformedToolCall, nil, nil, nil)
 			}
 			return finish(ReasonError, err, nil, nil)
 		}
@@ -1996,6 +2013,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	if l.Memory != nil {
 		h, merr := l.Memory.Assemble(MemoryInput{
 			Task:         task,
+			TaskImages:   l.TaskImages,
 			Convo:        convo,
 			History:      l.SessionHistory,
 			LastVerify:   lastVerify,
@@ -2108,33 +2126,52 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 				}
 			}
 		}
-		// One corrective re-prompt (the anti-spiral rail, mirrored from P02).
-		corrective := llm.Message{Role: llm.RoleUser, Content: l.Adapter.Corrective(perr)}
-		retryMsgs := append(append([]llm.Message{}, msgs...), msg, corrective)
-		resp2, err2 := l.complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: retryMsgs, Temperature: l.Temperature}))
-		if err2 != nil {
-			return tools.Call{}, nil, usage, msg, err2
-		}
-		msg2 := assistantMessage(resp2)
-		usage2 := estimateUsage(resp2.Usage, retryMsgs, msg2)
-		calls, perr = l.Adapter.ParseAll(msg2)
-		if perr == nil && len(calls) == 0 {
-			if err := runawayThinkingError(msg2); err != nil {
-				return tools.Call{}, nil, addUsage(usage, usage2), msg2, err
+		// Corrective re-prompts. A model that emits a MALFORMED tool call is trying to
+		// act and botching the syntax — the most common failure mode on a small local
+		// model, and the one kloo punished hardest: one strike and the run died as an
+		// internal error, discarding every step (measured: 16 steps / 469.4k tokens /
+		// 5m17s thrown away on glm-5.3-flash). An EMPTY turn — the model doing nothing
+		// at all — already gets maxEmptyTurnRecoveries attempts. Giving the model that
+		// is at least trying fewer chances than the model that isn't is backwards, so
+		// a malformed call now gets the same bounded budget.
+		//
+		// Each attempt re-sends the adapter's format-specific corrective against the
+		// LATEST botched output, so a model fumbling a different way each time is
+		// corrected on what it actually just wrote, not on its first mistake.
+		attemptMsgs := append([]llm.Message{}, msgs...)
+		lastMsg := msg
+		total := usage
+		for attempt := 0; attempt < maxMalformedRecoveries; attempt++ {
+			corrective := llm.Message{Role: llm.RoleUser, Content: l.Adapter.Corrective(perr)}
+			attemptMsgs = append(attemptMsgs, lastMsg, corrective)
+			resp2, err2 := l.complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: attemptMsgs, Temperature: l.Temperature}))
+			if err2 != nil {
+				return tools.Call{}, nil, total, lastMsg, err2
+			}
+			msg2 := assistantMessage(resp2)
+			total = addUsage(total, estimateUsage(resp2.Usage, attemptMsgs, msg2))
+			lastMsg = msg2
+			calls, perr = l.Adapter.ParseAll(msg2)
+			if perr == nil && len(calls) == 0 {
+				if err := runawayThinkingError(msg2); err != nil {
+					return tools.Call{}, nil, total, msg2, err
+				}
+				// NO tool call at all — the model answered in prose. That's a conversational
+				// reply, not a failure: surface it as a calm ReasonAnswered stop (the prose is
+				// already streamed) instead of erroring/churning. ErrNoToolCall signals this.
+				// Returned on the FIRST prose turn: re-prompting prose with a format
+				// corrective is answering a question the model did not ask, and the
+				// ErrNoToolCall rails upstream are the right handler for it.
+				return tools.Call{}, nil, total, msg2, ErrNoToolCall
+			}
+			if perr == nil {
+				return calls[0], calls[1:], total, msg2, nil
 			}
 		}
-		if perr != nil {
-			// A MALFORMED tool call after the nudge is a real error (the model tried to
-			// act but botched the format).
-			return tools.Call{}, nil, addUsage(usage, usage2), msg2, fmt.Errorf("agent: no usable tool call after re-prompt: %w", perr)
-		}
-		if len(calls) == 0 {
-			// NO tool call at all — the model answered in prose. That's a conversational
-			// reply, not a failure: surface it as a calm ReasonAnswered stop (the prose is
-			// already streamed) instead of erroring/churning. ErrNoToolCall signals this.
-			return tools.Call{}, nil, addUsage(usage, usage2), msg2, ErrNoToolCall
-		}
-		return calls[0], calls[1:], addUsage(usage, usage2), msg2, nil
+		// Still malformed after the whole budget. This is NOT ReasonError: the endpoint
+		// is healthy and answering, it is the FORMAT that kloo cannot read, so the run's
+		// work is kept and it still gets its closing answer (ErrMalformedAfterRetry).
+		return tools.Call{}, nil, total, lastMsg, fmt.Errorf("%w: %w", ErrMalformedAfterRetry, perr)
 	}
 	return calls[0], calls[1:], usage, msg, nil
 }
@@ -3139,6 +3176,12 @@ func stripANSI(s string) string {
 // must still stop, and each recovery costs one round-trip.
 const maxEmptyTurnRecoveries = 3
 
+// maxMalformedRecoveries bounds how many corrective re-prompts a turn spends on a
+// model that keeps emitting an unparseable tool call. It deliberately equals
+// maxEmptyTurnRecoveries: a model fumbling the syntax is at least trying to act,
+// and it used to get ONE attempt where a model returning nothing got three.
+const maxMalformedRecoveries = maxEmptyTurnRecoveries
+
 // emptyTurnRecovery reports whether an exhausted empty completion is recoverable
 // (KLOO_EMPTY_TURN_RECOVERY=1) rather than fatal.
 func emptyTurnRecovery() bool { return envOnDefault("KLOO_EMPTY_TURN_RECOVERY") }
@@ -3345,6 +3388,12 @@ func buildClobberCorrection(root, path string) llm.Message {
 // into a calm ReasonAnswered stop instead of ReasonError.
 var ErrNoToolCall = errors.New("agent: model replied without a tool call (conversational)")
 
+// ErrMalformedAfterRetry signals that the model emitted a tool call kloo could not
+// PARSE, and kept doing so across the whole corrective budget. It is deliberately
+// distinct from a transport/endpoint error: the host answered every time, so the
+// run keeps its work and still earns a closing answer (ReasonMalformedToolCall).
+var ErrMalformedAfterRetry = errors.New("agent: tool call format unreadable after corrective re-prompts")
+
 // chatSentinel is the exact token the gate model emits for an actionable task, so
 // the loop proceeds. Anything else is a conversational reply shown to the user.
 const chatSentinel = "TASK"
@@ -3361,7 +3410,17 @@ const chatSentinel = "TASK"
 func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage, gateErr error) {
 	msgs := []llm.Message{{Role: llm.RoleSystem, Content: l.ChatSystem}}
 	msgs = append(msgs, l.SessionHistory...)
-	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: task})
+	// The gate sees the attachments too. It is a MODEL CALL that answers the user
+	// directly whenever it decides the message is conversational, so without them it
+	// answers "do you see this image?" from the text alone — and says no, truthfully,
+	// because nothing was sent. The run then ends at step 0 having never reached the
+	// loop, which is where images were wired. Measured live: an attached screenshot,
+	// a confident "I can't see images in this session", and no way to tell from the
+	// transcript that the attachment was fine and the gate was the gap.
+	//
+	// Giving the gate the image also makes its CLASSIFICATION honest: "fix this" next
+	// to a screenshot of a stack trace is a task, and it cannot tell that blind.
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: task, Images: l.TaskImages})
 
 	resp, err := l.Client.Complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature}))
 	if err != nil {

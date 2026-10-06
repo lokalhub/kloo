@@ -122,6 +122,31 @@ selections, or where OSC 52 isn't supported, hold **`Shift`** while click-draggi
 that bypasses kloo's mouse capture (which the wheel-scroll needs) and uses the
 terminal's native selection + copy.
 
+### Pasting an image
+**`Ctrl-V`** attaches the image on your system clipboard to the next message. It
+needs its own key because a terminal sends **no paste event at all** when the
+clipboard holds a PNG — there is nothing for kloo to intercept, so kloo reads the
+clipboard itself via `wl-paste` (Wayland), `xclip`/`xsel` (X11) or `pngpaste`
+(macOS). If none is installed, or the clipboard holds no image, kloo says so
+rather than doing nothing.
+
+Two other routes work through ordinary paste: **dragging an image file** onto the
+terminal (which pastes its path) and pasting a `data:image/…;base64,…` URL.
+
+The input shows a short placeholder — `[#1 image png 410.2k]` — and that
+placeholder *is* the attachment: delete it and the image isn't sent. On submit the
+placeholder is stripped from your prompt and the image travels as an OpenAI
+**`image_url` content part** on the task message, never as text. That distinction
+is the whole feature: a data URL pasted into the prompt would be ~1.4 MiB of
+base64 that the model reads as noise, the tokenizer charges for, and the working
+set re-sends on **every turn**. As a content part it rides on the task message
+alone. Attachments are per-submission and are cleared when the run starts; images
+are capped at 5 MiB of base64, and anything larger is refused out loud.
+
+The model has to be vision-capable. kloo can't know that in advance — it sends
+the part and lets the endpoint answer, so a text-only model's complaint reaches
+you verbatim rather than being guessed at.
+
 ### Assistant prose (light markdown)
 Assistant text is run through a hand-rolled *light* markdown styler (not
 glamour/CommonMark): `#`/`##`/`###` headers, `-`/`*` bullets, inline `**bold**`,

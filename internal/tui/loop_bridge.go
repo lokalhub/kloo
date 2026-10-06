@@ -88,10 +88,13 @@ func (r *LoopRunner) setSend(send func(tea.Msg)) { r.send = send }
 // Start runs the loop for task and pumps its signals into the program. In
 // approve-each mode an edit is held via a confirmRequestMsg until the user
 // answers. It blocks until the run ends, then sends the terminal reportMsg.
-func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string) {
+func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string, images []string) {
 	if r.send == nil {
 		return
 	}
+	// Per-run, and cleared even when empty: an attachment from the LAST task must
+	// not silently ride along with this one.
+	r.loop.TaskImages = images
 
 	// Apply the current runtime config to the loop so THIS run's requests use the
 	// selected endpoint/key/model/tool adapter. Switches apply between runs only.
@@ -135,7 +138,7 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 		flushProse() // the prose streamed before this call belongs to this turn
 		disp = append(disp, session.DisplayItem{Kind: dispTool, Text: toolSummary(call, res, err)})
 		r.send(streamDoneMsg{}) // finalize any streamed assistant text for this turn
-		r.send(toolEvent(call, res))
+		r.send(toolEvent(call, res, err))
 	}
 	r.loop.OnRetry = func(attempt, max int, err error, wait time.Duration) {
 		// A transient model-call failure is being retried — show it as a dim line so a
@@ -407,7 +410,18 @@ func pinnedSection(ws tools.Workspace, files []string) string {
 // edit_file the raw `diff` arg (a fenced SEARCH/REPLACE block) is PARSED into
 // proper search/replace pairs so the card renders SEARCH as `-` and REPLACE as
 // `+` (not the raw fence/markers).
-func toolEvent(call tools.Call, res tools.Result) toolEventMsg {
+func toolEvent(call tools.Call, res tools.Result, err error) toolEventMsg {
+	ev := toolEventFor(call, res)
+	// Carry the failure reason onto the card. Dropping it is what made a refused
+	// write_file render as a bare chip with no path and no reason — the model is
+	// told why, and the human watching was not.
+	if err != nil {
+		ev.Err = humanizeError(err)
+	}
+	return ev
+}
+
+func toolEventFor(call tools.Call, res tools.Result) toolEventMsg {
 	switch call.Name {
 	case "edit_file":
 		path := str(call.Args["path"])
@@ -520,8 +534,13 @@ func humanizeError(err error) string {
 	case strings.Contains(low, "below the irreducible prompt floor"),
 		strings.Contains(low, "window too small"):
 		return "The context window is too small for the task + system prompt — raise maxContextTokens."
-	case strings.Contains(low, "no usable tool call"), strings.Contains(low, "no tool call"):
-		return "The model replied without a tool call kloo could use (it may have answered in prose or used an unsupported format). kloo runs actions, not chat — give it a concrete task."
+	// A PARSE failure and a prose reply are different problems with different fixes,
+	// and one message covering both sent the operator looking at the wrong one: this
+	// fires when the model DID try to call a tool and kloo could not read the syntax.
+	case strings.Contains(low, "tool call format unreadable"), strings.Contains(low, "no usable tool call"):
+		return "The model kept writing tool calls in a format kloo can't parse, through every corrective re-prompt. It's the syntax, not the task — serve the model with --jinja (native tool-calling), or switch models. The run's work was kept."
+	case strings.Contains(low, "no tool call"), strings.Contains(low, "without a tool call"):
+		return "The model answered in prose instead of calling a tool. kloo runs actions, not chat — give it a concrete task."
 	default:
 		return raw
 	}

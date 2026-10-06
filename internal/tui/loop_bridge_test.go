@@ -26,7 +26,7 @@ type blockingRunner struct {
 	release chan struct{}
 }
 
-func (r *blockingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
+func (r *blockingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files, images []string) {
 	r.starts++
 	<-r.release
 }
@@ -35,7 +35,7 @@ func (r *blockingRunner) Start(ctx context.Context, task string, runtime Runtime
 // can read it without racing the run goroutine).
 type recordingRunner struct{ got chan string }
 
-func (r *recordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files []string) {
+func (r *recordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files, images []string) {
 	r.got <- runtime.Model
 }
 
@@ -189,7 +189,7 @@ func TestLoopRunnerStatusWriterAndFailureNotice(t *testing.T) {
 			return proseClient{}
 		},
 	}
-	r.Start(context.Background(), "answer", runtime, ModeAuto, nil)
+	r.Start(context.Background(), "answer", runtime, ModeAuto, nil, nil)
 
 	if gotRuntime.Endpoint != runtime.Endpoint || gotRuntime.Model != runtime.Model {
 		t.Fatalf("status writer got runtime %+v, want %+v", gotRuntime, runtime)
@@ -255,7 +255,7 @@ func TestLoopRunnerRunHooksWrapTaskRun(t *testing.T) {
 			return proseClient{}
 		},
 	}
-	r.Start(context.Background(), "answer with memory", runtime, ModeAuto, nil)
+	r.Start(context.Background(), "answer with memory", runtime, ModeAuto, nil, nil)
 
 	if beforeTask != "answer with memory" || afterTask != "answer with memory" {
 		t.Fatalf("hooks saw tasks before=%q after=%q", beforeTask, afterTask)
@@ -414,7 +414,11 @@ func TestHumanizeError(t *testing.T) {
 		{"timeout", "llm: context deadline exceeded", "timed out"},
 		{"tool-format", "llm: stream error chunk: output does not match the expected peg-native format", "tool call"},
 		{"auth", "llm: 401 unauthorized", "Authentication failed"},
-		{"no-tool-call", "agent: no usable tool call after re-prompt: no tool call in reply", "without a tool call"},
+		// A parse failure and a prose reply are DIFFERENT problems, so they must not
+		// share one message: the parse case has to name the format, and only the prose
+		// case may say the model answered instead of acting.
+		{"malformed-tool-call", "agent: tool call format unreadable after corrective re-prompts: bad json", "format kloo can't parse"},
+		{"prose-no-tool-call", "agent: model replied without a tool call (conversational)", "answered in prose"},
 		{"passthrough", "some weird unrecognized failure", "some weird unrecognized failure"},
 	}
 	for _, c := range cases {
@@ -428,7 +432,7 @@ func TestHumanizeError(t *testing.T) {
 // + a count, never dump the whole file/listing into the transcript.
 func TestReadonlyToolEventIsCompact(t *testing.T) {
 	bigFile := strings.Repeat("some file line\n", 50)
-	rf := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "src/app.ts"}}, tools.Result{Output: bigFile})
+	rf := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "src/app.ts"}}, tools.Result{Output: bigFile}, nil)
 	if rf.Summary != "src/app.ts  · 50 lines" {
 		t.Errorf("read_file summary = %q, want path + count", rf.Summary)
 	}
@@ -437,13 +441,13 @@ func TestReadonlyToolEventIsCompact(t *testing.T) {
 	}
 
 	listing := ".angular/\nsrc/\npackage.json\n"
-	ld := toolEvent(tools.Call{Name: "list_dir", Args: map[string]any{"path": "."}}, tools.Result{Output: listing})
+	ld := toolEvent(tools.Call{Name: "list_dir", Args: map[string]any{"path": "."}}, tools.Result{Output: listing}, nil)
 	if ld.Summary != ".  · 3 entries" {
 		t.Errorf("list_dir summary = %q, want path + entry count", ld.Summary)
 	}
 
 	// Single result uses the singular unit.
-	one := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "x"}}, tools.Result{Output: "only line"})
+	one := toolEvent(tools.Call{Name: "read_file", Args: map[string]any{"path": "x"}}, tools.Result{Output: "only line"}, nil)
 	if one.Summary != "x  · 1 line" {
 		t.Errorf("single-line summary = %q, want singular", one.Summary)
 	}

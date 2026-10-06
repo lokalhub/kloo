@@ -14,7 +14,7 @@ import (
 // running (for a static active-run frame) without launching a real loop goroutine.
 type noopRunner struct{}
 
-func (noopRunner) Start(context.Context, string, RuntimeConfig, Mode, []string) {}
+func (noopRunner) Start(context.Context, string, RuntimeConfig, Mode, []string, []string) {}
 
 // activeModel builds a sized, RUNNING model with a task, a pinned summary, and a
 // few activity entries — the C8 active-run state used by the frame goldens.

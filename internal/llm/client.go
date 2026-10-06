@@ -321,6 +321,14 @@ func normalizeMessages(in []Message) []Message {
 			// still marks the same boundary. prev.CacheControl is necessarily nil
 			// here — a non-nil one fails the guard and never reaches this branch.
 			prev.CacheControl = m.CacheControl
+			// Same bug, second field: a merge that copies Content and ToolCalls and
+			// nothing else silently DESTROYS the incoming message's attachments.
+			// Measured live — a screenshot pasted on the SECOND turn of a session
+			// vanished, because session history ends with a user message and the new
+			// task message is also role=user, so the two merged here. The first turn
+			// of a session worked (nothing to merge with), which is what made it look
+			// like the image pipeline was fine.
+			prev.Images = append(prev.Images, m.Images...)
 			out[n-1] = prev
 			continue
 		}

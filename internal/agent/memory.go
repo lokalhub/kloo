@@ -360,7 +360,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	}
 
 	hotBudget := hotBudgetTokens(window)
-	task := llm.Message{Role: llm.RoleUser, Content: in.Task}
+	task := llm.Message{Role: llm.RoleUser, Content: in.Task, Images: in.TaskImages}
 	// #4: flag a verify failure identical to the previous turn's (opt-in).
 	repeatedVerify := false
 	if !in.LastVerify.Passed {

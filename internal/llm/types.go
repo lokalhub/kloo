@@ -96,6 +96,18 @@ type Message struct {
 	// cache_control. nil ⇒ the message serializes exactly as it always has, which
 	// is what keeps every endpoint that has never heard of this field unaffected.
 	CacheControl *CacheControl `json:"-"`
+	// Images carries image attachments as data URLs ("data:image/png;base64,…") or
+	// http(s) URLs. Tagged "-" for the same reason as CacheControl: it never
+	// serializes as a message key. MarshalJSON instead rewrites the message into the
+	// OpenAI-compatible content-parts form, one {"type":"image_url"} part per image
+	// after the text part, so a message with no images is byte-identical to what it
+	// has always been.
+	//
+	// It is a separate field rather than text because an image inlined into Content
+	// is a megabyte of base64 the model reads as gibberish, counts as tokens, and
+	// re-sends every single turn — which is the opposite of everything the working
+	// set and prompt-cache work is for.
+	Images []string `json:"-"`
 }
 
 // CacheControl is the prompt-cache breakpoint marker. "ephemeral" is the only
@@ -111,8 +123,16 @@ func CacheControlEphemeral() *CacheControl { return &CacheControl{Type: "ephemer
 // message is ever serialized this way.
 type contentPart struct {
 	Type         string        `json:"type"`
-	Text         string        `json:"text"`
+	Text         string        `json:"text,omitempty"`
+	ImageURL     *imageURL     `json:"image_url,omitempty"`
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// imageURL is the OpenAI vision image part's payload. "detail" is left off: the
+// providers that honour it all default to "auto", and the ones that don't reject
+// unknown keys.
+type imageURL struct {
+	URL string `json:"url"`
 }
 
 // markedMessage mirrors Message's serializable fields in the SAME key order, with
@@ -136,12 +156,22 @@ type markedMessage struct {
 func (m Message) MarshalJSON() ([]byte, error) {
 	// plain has no methods, so marshalling it cannot recurse back into this one.
 	type plain Message
-	if m.CacheControl == nil {
+	if m.CacheControl == nil && len(m.Images) == 0 {
 		return json.Marshal(plain(m))
+	}
+	// Text first, then one image part each. The cache breakpoint rides the TEXT part
+	// when there is one, so an image attachment cannot move where the prefix cache
+	// is cut.
+	parts := []contentPart{{Type: "text", Text: m.Content, CacheControl: m.CacheControl}}
+	for _, img := range m.Images {
+		if img == "" {
+			continue
+		}
+		parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: img}})
 	}
 	return json.Marshal(markedMessage{
 		Role:             m.Role,
-		Content:          []contentPart{{Type: "text", Text: m.Content, CacheControl: m.CacheControl}},
+		Content:          parts,
 		ReasoningContent: m.ReasoningContent,
 		Name:             m.Name,
 		ToolCalls:        m.ToolCalls,

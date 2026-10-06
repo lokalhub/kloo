@@ -246,7 +246,10 @@ diffs, command output, and assistant prose. Slash commands (type `/` for a
 filterable menu): `/add`, `/model`, `/models`, `/mode`; `Esc`/`Ctrl-C` interrupts;
 `Ctrl-O` expands truncated command output. **Scroll** the transcript with the
 mouse wheel or `PgUp`/`PgDn` — it sticks to the newest output unless you scroll
-up. **Copy:** `Ctrl-Y` copies the last assistant reply to the clipboard (OSC 52,
+up. **Paste an image:** `Ctrl-V` attaches the clipboard's image to your next message
+(via `wl-paste`/`xclip`/`pngpaste`), as a vision content part rather than text;
+dragging an image file onto the terminal works too.
+**Copy:** `Ctrl-Y` copies the last assistant reply to the clipboard (OSC 52,
 works over SSH); or **`Shift`+drag** for native terminal selection (the mouse-wheel
 scroll captures plain drag, so hold `Shift`). When a run stops on an error, the
 report shows a plain-language reason (e.g. "Couldn't reach the model endpoint…"),

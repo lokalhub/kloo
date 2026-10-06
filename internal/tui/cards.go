@@ -30,6 +30,11 @@ type toolEventMsg struct {
 	ExitCode int    // run_command exit code
 	Stderr   string // run_command captured stderr (failure body)
 	Summary  string // generic tools (read_file/list_dir/write_file)
+	// Err is the tool's failure reason, already humanized. It used to be dropped
+	// on the floor, which is how a REFUSED write_file rendered as an empty box
+	// with nothing but its own name in it — the single most confusing thing in a
+	// run transcript, because the box implied something happened.
+	Err string
 }
 
 // editsOf resolves the edit pairs from a tool event (Edits, else the single
@@ -68,7 +73,7 @@ func (m Model) handleToolEvent(msg toolEventMsg) (tea.Model, tea.Cmd) {
 		if summary == "" {
 			summary = msg.Path
 		}
-		it = genericCardItem{name: msg.Name, summary: summary}
+		it = genericCardItem{name: msg.Name, summary: summary, err: msg.Err}
 	}
 	return m.appendItem(it), nil
 }
@@ -263,6 +268,16 @@ func (r runCardItem) render(width int) string {
 	// Chip header (task 01): ⌘ run_command accent + dim command + result.
 	head := toolChip("run_command") + "  " + muted.Render(r.command) + "    " + marker
 
+	// A command that SUCCEEDED has no body to frame — the exit code is the whole
+	// story — so it gets the same indented one-liner as every other bodyless tool
+	// (see genericCardItem.render). A run that builds and tests repeatedly was
+	// spending two lines of border per green command for no information at all.
+	// The box is reserved for a FAILURE, where the stderr body needs framing and
+	// the red border is doing real work drawing the eye to it.
+	if ok {
+		return "  " + head
+	}
+
 	lines := []string{head}
 	if !ok {
 		// Dim stderr body (task 03), truncated unless expanded.
@@ -287,27 +302,55 @@ func (r runCardItem) render(width int) string {
 	return style.Render(strings.Join(lines, "\n"))
 }
 
-// genericCardItem renders a compact one-line card for non-edit/non-run tools: a
-// per-tool chip (glyph + name in the tool accent) + dim secondary summary.
+// genericCardItem renders a compact one-line entry for non-edit/non-run tools: a
+// per-tool chip (glyph + name in the tool accent) + dim secondary summary, and the
+// failure reason when the call did not succeed.
 type genericCardItem struct {
 	name    string
 	summary string
+	err     string
 }
 
+// A tool whose whole content fits on one line gets a line, never a box.
+//
+// Box-per-tool was fine when a run made three calls; a real run makes forty, and
+// forty full-width borders around a single word each is what the transcript turns
+// into — reported directly, with a screenshot of three empty write_file boxes in a
+// row. Every other agent CLI (Claude Code, grok, Codex) renders this as an indented
+// one-liner for the same reason: the border has to earn its two lines of vertical
+// space with content, and a chip plus a path is not content. Boxes are kept only
+// where there IS a body to frame — a diff, or a failing command's stderr.
 func (g genericCardItem) render(width int) string {
 	line := toolChip(g.name)
 	if s := strings.TrimSpace(g.summary); s != "" {
 		line += "  " + muted.Render(s)
 	}
-	// Read-only inspection tools (read_file/list_dir) are frequent and low-signal —
-	// render them as a plain indented line, NOT a bordered card, to cut visual
-	// noise (the one-line summary is enough). Mutations (write_file) keep the card
-	// box for emphasis.
-	switch g.name {
-	case "read_file", "list_dir", "read_dir", "search":
-		return "  " + line
+	// The reason a call failed is the one thing worth MORE than its name. Shown in
+	// the danger colour on the same line so a refused tool reads as refused instead
+	// of as a mysterious no-op.
+	if e := cardErrLine(g.err); e != "" {
+		line += "  " + danger.Render("✗ "+e)
 	}
-	return cardStyle(width, lipgloss.NormalBorder()).Render(line)
+	return "  " + line
+}
+
+// errLineCap bounds a failure reason rendered inline on a card line, so a tool that
+// fails with a wall of text does not push the transcript sideways.
+const errLineCap = 90
+
+// cardErrLine flattens a tool failure to a single bounded line.
+func cardErrLine(e string) string {
+	e = strings.TrimSpace(e)
+	if e == "" {
+		return ""
+	}
+	if i := strings.IndexByte(e, '\n'); i >= 0 {
+		e = strings.TrimSpace(e[:i])
+	}
+	if len(e) > errLineCap {
+		e = e[:errLineCap-1] + "…"
+	}
+	return e
 }
 
 // Diff line styles source their colour from the central palette (theme.go):

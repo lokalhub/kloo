@@ -40,7 +40,7 @@ func populatedFrame(m Model) string {
 		progressMsg{Model: "test-model", Step: 1, MaxSteps: 40, Tokens: 400, MaxTokens: 8000},
 		streamDeltaMsg{Content: "working on it"},
 		streamDoneMsg{},
-		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 1, Stderr: "boom"}),
+		toolEvent(tools.Call{Name: "run_command", Args: map[string]any{"command": "npm run build"}}, tools.Result{ExitCode: 1, Stderr: "boom"}, nil),
 		reportMsg{Reason: "error", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 1},
 	)
 	return m.View()

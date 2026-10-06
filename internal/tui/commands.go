@@ -242,7 +242,10 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	task := m.expandPastes(line) // the model receives the full pasted text
-	m.pastes = nil               // consumed by this submission
+	// Attached images leave the prompt text and travel as content parts.
+	task, images := m.takeImages(task)
+	m.pastes = nil // consumed by this submission
+	m.images = nil
 	// C8: start a fresh compact activity log + summary for the run (the full
 	// transcript still records everything, including the request itself).
 	m.latestSummary = ""
@@ -260,7 +263,7 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	runner := m.runner
 	return m, tea.Batch(
 		func() tea.Msg {
-			go runner.Start(ctx, task, runtime, mode, files)
+			go runner.Start(ctx, task, runtime, mode, files, images)
 			return nil
 		},
 		tickCmd(),
