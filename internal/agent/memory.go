@@ -274,7 +274,9 @@ func (w *workingMemory) summaryEntries() []string {
 // Shedding to exactly the limit is what produced the oscillation: the next read
 // dump crossed it immediately and the boundary moved again. Every move costs the
 // prefix below it, which on this endpoint is a full re-prefill.
-const lowWaterFrac = 0.60
+// It is a var only so TestHysteresisIsWorthItsValue can measure alternatives; it
+// is never set outside tests.
+var lowWaterFrac = 0.60
 
 // summaryBudgetFrac is the RUNNING SUMMARY's own share of the compaction trigger.
 //
