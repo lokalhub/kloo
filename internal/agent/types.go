@@ -78,6 +78,15 @@ const (
 	// which hid the single largest failure mode on kloo-bench behind a
 	// success-flavoured word.
 	ReasonExploreStop Reason = "explore-stop"
+
+	// ReasonMalformedToolCall is the model emitting a tool call kloo could not parse,
+	// repeatedly, through the whole corrective budget. It is NOT ReasonError: the
+	// endpoint is healthy — it answered every single time — so the tree is
+	// trustworthy and the work is kept. Reporting it as an internal error rolled
+	// back real edits and discarded a whole run for what is a FORMAT problem with
+	// one model, which also sent the operator looking at kloo instead of at the
+	// model's tool-call dialect.
+	ReasonMalformedToolCall Reason = "malformed-tool-call"
 )
 
 // StopPolicy is the resolved A7 hard-stop configuration the loop enforces. It
@@ -403,7 +412,12 @@ var ErrWindowTooSmall = errors.New("agent: maxContextTokens below the irreducibl
 // MemoryInput is everything WorkingMemory.Assemble needs for one turn. The loop
 // fills it from its live state; the assembler is pure given these inputs.
 type MemoryInput struct {
-	Task         string        // convo[0], the goal — always pinned, never dropped
+	Task string // convo[0], the goal — always pinned, never dropped
+	// TaskImages are image attachments on the task message. Carried here because
+	// Assemble REBUILDS the task message from Task text each turn; without this the
+	// attachment would survive exactly as long as the no-compaction fast path, then
+	// vanish the first time memory did any work.
+	TaskImages   []string
 	Convo        []llm.Message // full running transcript (Convo[0] is the task)
 	History      []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
 	LastVerify   VerifyResult  // pinned: the last real verify signal

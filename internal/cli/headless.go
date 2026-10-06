@@ -738,6 +738,18 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 		detail.Class = "explore_stop"
 		detail.Message = "the exploration rail ended the run: too many read-only turns without acting"
 		return "exploration_halt", detail
+	case agent.ReasonMalformedToolCall:
+		// Source is "model", not "internal": the endpoint answered every request and
+		// kloo parsed every one of them correctly — the model could not write a tool
+		// call in a dialect kloo reads. Classifying it as internal_error (the old
+		// default arm) blamed kloo for the model's output format.
+		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {
+			return verifyFailure(rep, detail)
+		}
+		detail.Source = "model"
+		detail.Class = "malformed_tool_call"
+		detail.Message = "the model kept emitting a tool call kloo could not parse, through every corrective re-prompt"
+		return "malformed_tool_call", detail
 	default:
 		detail.Class = "unknown_reason"
 		detail.Message = msg

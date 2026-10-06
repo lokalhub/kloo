@@ -124,9 +124,14 @@ func (l *Loop) finalAnswer(ctx context.Context, system, convo []llm.Message) (st
 // excluded because the endpoint is usually WHY the run stopped — a dead host or an
 // "upstream at capacity" 503 — and asking it again buys another timeout and
 // reports a second error on top of the first.
+//
+// ReasonMalformedToolCall is included for the mirror of that reason: the endpoint
+// answered every request, it is the tool-call SYNTAX kloo could not read. A closing
+// call asks for prose, which is the one thing such a model is still good at, so a
+// run that explored for minutes hands back its findings instead of a banner.
 func answerableStop(reason Reason) bool {
 	switch reason {
-	case ReasonBudgetExceeded, ReasonExploreStop, ReasonChurn, ReasonUnverified:
+	case ReasonBudgetExceeded, ReasonExploreStop, ReasonChurn, ReasonUnverified, ReasonMalformedToolCall:
 		return true
 	default:
 		return false
