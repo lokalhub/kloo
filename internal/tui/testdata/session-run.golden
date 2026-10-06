@@ -14,6 +14,8 @@
 
 
 
+
+
 k> kloo — autonomous coding for small local models
 
 ▸ you: make the three tabs Home/Apps/Profile, each name centered
@@ -27,9 +29,7 @@ k> kloo — autonomous coding for small local models
 │ + { path: 'home', loadComponent: ... }                                               │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ ⌘ run_command  npm run build    exit 0 ✓                                             │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+  ⌘ run_command  npm run build    exit 0 ✓
 
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │ ■ run stopped — COMPLETE                                                             │
