@@ -186,6 +186,16 @@ func (r *LoopRunner) applyRuntime(runtime RuntimeConfig) {
 		r.loop.Model = runtime.Model
 	}
 	r.loop.Endpoint = runtime.Endpoint
+	// Record the runtime TRIPLE on the session so a mid-session switch survives
+	// --resume. This is the only place that sees a /model or /profile change, and
+	// persist() writes whatever is here at the end of the run — so a switch that is
+	// not captured here is a switch that is silently lost on resume, which is the
+	// bug this fixes. Provider and Endpoint go with Model; see session.Session.
+	if r.sess != nil && runtime.Model != "" {
+		r.sess.Model = runtime.Model
+		r.sess.Provider = runtime.Provider
+		r.sess.Endpoint = runtime.Endpoint
+	}
 	if runtime.ContextTokens > 0 {
 		r.loop.ContextTokens = runtime.ContextTokens
 	}

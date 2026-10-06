@@ -21,10 +21,21 @@ import (
 
 // Session is one persisted conversation plus the metadata to list/resume it.
 type Session struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Model  string `json:"model"`
-	Verify string `json:"verify"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Model string `json:"model"`
+	// Provider and Endpoint travel WITH Model, because a model id is only meaningful
+	// against the endpoint that serves it. Persisting Model alone is what made
+	// restoring it unsafe: the saved id is the RESOLVED one (alias lookup is
+	// provider-scoped), so a session recorded on openrouter stored
+	// "deepseek/deepseek-v4-flash", and a resume that restored just the model sent
+	// that id to whatever endpoint the default provider resolved to.
+	//
+	// omitempty ⇒ a session file written before this loads unchanged, with both
+	// empty, which resume treats as "model not restorable" rather than guessing.
+	Provider string `json:"provider,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Verify   string `json:"verify"`
 	// Lint is the resolved fast advisory lint command for this session, persisted
 	// for resume parity beside Verify. omitempty ⇒ pre-existing session JSON without
 	// a "lint" key loads unchanged (back-compat).
