@@ -118,3 +118,34 @@ func TestDisablingTheSummaryBudgetLeavesTheSummaryUnbounded(t *testing.T) {
 		t.Fatalf("entries touched with the budget disabled: %q dropped=%d", w.foldedEntries, w.droppedEntries)
 	}
 }
+
+// TestWorkingSetCapBoundsWhatIsKept: lowering the cap must lower the amount of
+// history KEPT, not merely the point at which compaction is entered.
+//
+// This is the bug the live run exposed. The cap set the trigger and the hot budget
+// was computed independently from the window, so at --working-set-tokens 12000 the
+// trigger was 12000 while the tail was still allowed 26423. Compaction ran, found
+// nothing it was required to fold, and reported 0 compactions — with `kloo doctor`
+// claiming the cap was "BINDING — holds the prompt here".
+func TestWorkingSetCapBoundsWhatIsKept(t *testing.T) {
+	t.Cleanup(func() { SetWorkingSetTokens(0) })
+	const window = 104857 // the usable window at ctx 131072, as the loop passes it
+
+	SetWorkingSetTokens(0)
+	wide := hotBudgetTokens(window)
+
+	SetWorkingSetTokens(12000)
+	tight := hotBudgetTokens(window)
+
+	if tight >= wide {
+		t.Errorf("a tighter cap did not tighten the hot budget: %d >= %d", tight, wide)
+	}
+	if tight > 12000 {
+		t.Errorf("hot budget %d exceeds the working-set cap 12000 — the cap must bound what is kept", tight)
+	}
+	// The cap must bound it; the exact fraction is free to differ (the hot budget is
+	// still derived through usableWindow a second time — see hotBudgetTokens).
+	if tight > int(float64(12000)*hotBudgetFrac)+1 {
+		t.Errorf("hot budget %d is not bounded by the cap's share (%d)", tight, int(float64(12000)*hotBudgetFrac))
+	}
+}

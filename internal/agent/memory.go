@@ -131,9 +131,27 @@ func EffectiveCuratorBudget(window, configured int) int {
 // you already have, so a bigger window should keep more of it. Only the repo map
 // (which kloo re-assembles and re-pays for each turn) is appetite.
 func hotBudgetTokens(window int) int {
-	// Against the same base as the map: usable window, then the trigger. Using the
-	// RAW window here was half of why the two budgets overflowed the trigger.
-	return int(float64(usableWindow(window)) * triggerFrac * hotBudgetFrac)
+	// The working-set cap applies HERE too, and that is the fix.
+	//
+	// The cap used to lower only the TRIGGER — the point at which compaction is
+	// entered — and leave the amount KEPT derived straight from the window. So
+	// compaction was entered and then discovered it was not required to fold
+	// anything. Measured live, a 23-step run with --working-set-tokens 12000:
+	// trigger 12000, tail still allowed 26423, compactions 0, nothing shed, while
+	// `kloo doctor` reported "BINDING — holds the prompt here". It held it nowhere.
+	//
+	// At the default the number barely moves (26423 -> 26377 at ctx 131072), and at
+	// any window where the fraction is already tighter than the cap it does not move
+	// at all — so no benched small-ctx behaviour changes.
+	//
+	// NOT fixed here, deliberately: usableWindow is applied a SECOND time below.
+	// Assemble is handed the already-usable window (loop.go passes usableWindow(ctx))
+	// and triggerTokens treats it that way, so these two budgets disagree about what
+	// `window` means and the hot budget is ~20% smaller than the fractions describe.
+	// That is a real defect, but correcting it moves every small-ctx run, and there
+	// is no evidence that a larger hot budget there is better. Two changes with
+	// evidence for one is how a regression becomes unattributable.
+	return int(float64(capWorkingSet(int(float64(usableWindow(window))*triggerFrac), window)) * hotBudgetFrac)
 }
 
 // summaryPrefix labels the running-summary slot inserted right after the task.
