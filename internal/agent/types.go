@@ -203,8 +203,8 @@ const (
 	// and every file the failure implicates is one the edit scope forbids. kloo used
 	// to order an edit here; the corrective now says so plainly and demands nothing.
 	// Recorded so a run that was rescued this way is distinguishable from one where
-	// the situation never arose — the previous behaviour cost 1.5M tokens in silence
-	// (see baseline.go).
+	// the situation never arose — the previous behaviour spent whole step budgets, and
+	// on the unscoped variant of the same task 1.55M tokens, in silence (baseline.go).
 	RailVerifyOutOfScope Rail = "verify-out-of-scope"
 )
 

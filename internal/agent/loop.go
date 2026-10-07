@@ -2019,7 +2019,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// was an out-of-scope spec that was already red before the run, the
 				// corrective said "the code must change for the failing test to pass… do
 				// not read, do not search, do not call finish", and the model obeyed —
-				// 21 denied edits to login.page.ts, 1.5M tokens, every one off-task.
+				// every remaining step spent re-attempting a login.page.ts write the scope
+				// refused (and, on the UNSCOPED variant of the same task, 21 applied edits to
+				// that same unrelated file and 1.55M tokens).
+				//
 				// Consult the scope BEFORE composing the corrective, not after the model
 				// has been punished for doing as it was told.
 				exploreNudges++

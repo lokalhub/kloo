@@ -57,6 +57,47 @@ func TestRunSummaryCarriesTheVerifyBaseline(t *testing.T) {
 	}
 }
 
+// TestBaselineProbeCostReachesTheJSON: the baseline probe exists as a SEPARATE
+// counter precisely so its cost is visible (a baseline verify is a real per-run tax —
+// ~50s on the app this came from). It was declared, tagged and printed in the human
+// summary, and never assigned in the struct literal, so the two outputs contradicted
+// each other about the same run: human "baseline_verify_attempts=1", JSON
+// "baseline_verify_attempts":0.
+//
+// Asserted through the MARSHALLED JSON, not through agent.ToolCounters. A test that
+// reads the source struct cannot see a missing assignment in the thing that builds
+// the summary — which is exactly how this one got out.
+func TestBaselineProbeCostReachesTheJSON(t *testing.T) {
+	rep := &agent.Report{
+		Reason:       agent.ReasonSuccess,
+		FinalVerify:  agent.VerifyResult{Command: "npm test", Passed: true},
+		ToolCounters: agent.ToolCounters{VerifyAttempts: 2, BaselineVerifyAttempts: 1},
+	}
+	s := buildRunSummary(config.Config{Model: "m"}, "npm test", rep, time.Second, nil)
+	if s.ToolCounters == nil {
+		t.Fatal("no tool_counters block")
+	}
+	if s.ToolCounters.BaselineVerifyAttempts != 1 {
+		t.Fatalf("summary baseline_verify_attempts = %d, want 1", s.ToolCounters.BaselineVerifyAttempts)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"baseline_verify_attempts":1`) {
+		t.Fatalf("KLOO_RESULT_JSON does not carry the probe count:\n%s", b)
+	}
+	// And it must stay distinct from verify_attempts — the whole reason it is its own
+	// field is that folding it in would move every comparison that reads that one.
+	if !strings.Contains(string(b), `"verify_attempts":2`) {
+		t.Fatalf("verify_attempts was disturbed:\n%s", b)
+	}
+	// The human summary and the JSON must agree, which is the invariant that broke.
+	if line := formatToolCounters(rep.ToolCounters); !strings.Contains(line, "baseline_verify_attempts=1") {
+		t.Fatalf("human counters line lost the probe count: %q", line)
+	}
+}
+
 // TestRunSummaryOmitsTheBaselineWhenNoneWasTaken: an unscoped run takes no baseline,
 // and its JSON must be exactly what it was before baselines existed.
 func TestRunSummaryOmitsTheBaselineWhenNoneWasTaken(t *testing.T) {

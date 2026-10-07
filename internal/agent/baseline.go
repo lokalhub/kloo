@@ -29,9 +29,16 @@ import (
 //     the code must change for the failing test to pass. This turn, make your
 //     best edit… Do not read, do not search, do not run a command, do not call
 //     finish."
-//  3. The only failing test was the login one. So the model obeyed and edited
-//     login.page.ts — which the --allow scope DENIED. It had nowhere legal to go:
-//     21 consecutive denied edits to one file, 1,553,679 tokens, all off-task.
+//  3. The only failing test was the login one. So the model obeyed and went after
+//     it. On the UNSCOPED run of the same task that produced 21 consecutive edits
+//     to one unrelated file and 1,553,679 tokens, all off-task, with the login
+//     edits applied. On the SCOPED runs the write was denied instead (recorded
+//     off_scope_edits of 1, 1 and 2), and the chase burned the step budget against
+//     repeated denials with nowhere legal to go.
+//
+//     Both shapes are the same defect wearing different clothes: kloo told the
+//     model to fix something that was not its job, and the scope only decided
+//     whether the model got to waste the budget writing or waiting.
 //
 // kloo converted a pre-existing, out-of-scope test failure into a mandatory,
 // impossible, scope-violating instruction. Two defects, fixed together here
@@ -497,8 +504,9 @@ func (l *Loop) walkedFiles() []string {
 // What it must NOT do is as important as what it says. It does not demand an edit
 // (there is no legal edit that could help), it does not withhold the read tools
 // (the caller leaves editOnlyLeft alone), and it does not leave the model guessing
-// why its last attempt was denied. kloo spent 21 steps and 1.5M tokens learning
-// that the alternative does not work.
+// why its last attempt was denied — a denial that only says "no" leaves the model
+// exactly where it was, which is how the scoped runs spent their whole step budget
+// re-attempting a write the policy was never going to allow.
 func outOfScopeVerifyCorrective(unreachable, allowed []string) llm.Message {
 	var b strings.Builder
 	b.WriteString("About the failing verify: it was ALREADY FAILING before this run started, and it is NOT yours to fix. ")

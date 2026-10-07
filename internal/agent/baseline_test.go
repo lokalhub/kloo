@@ -16,9 +16,12 @@ import (
 // friendly at <=480px". The project's `npm test` was ALREADY red: one
 // committed-red spec, login.page.spec.ts:53, out of scope and unrelated. kloo saw
 // red, so the run could not succeed; the edit corrective ordered an edit anyway;
-// the only failing test was the login one; the model edited login.page.ts 21 times
-// and every attempt was denied by the scope. 1,553,679 tokens, all off-task, and a
-// correct SCSS patch scored success:false.
+// the only failing test was the login one; the model went after login.page.ts and
+// the scope denied every write (off_scope_edits of 1, 1 and 2 across the scoped
+// runs), so the chase burned the step budget instead. The UNSCOPED run of the same
+// task is the same defect unrestrained: 21 consecutive APPLIED edits to that one
+// unrelated file and 1,553,679 tokens. Either way a correct SCSS patch scored
+// success:false.
 //
 // incidentTree is that project in miniature: one file inside the allowed scope,
 // and a failing spec (plus the source it imports) outside it.
@@ -294,8 +297,8 @@ func TestEnvTriSignConvention(t *testing.T) {
 // On HEAD the corrective at that moment was editCorrective, which says "the code
 // must change for the failing test to pass … Do not read, do not search, do not
 // run a command, do not call finish" — an order the scope would refuse. The model
-// obeyed it 21 times. The corrective must instead say so plainly, demand nothing,
-// and leave the read tools alone.
+// obeyed, and kept obeying, until the step budget ran out. The corrective must
+// instead say so plainly, demand nothing, and leave the read tools alone.
 func TestOutOfScopeCorrectiveDoesNotDemandAnEdit(t *testing.T) {
 	reads := []string{
 		"frontend/src/app/pages/game/game.page.ts",

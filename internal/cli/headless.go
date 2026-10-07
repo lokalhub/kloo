@@ -615,24 +615,29 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		if cfg.BenchmarkMode || !toolCountersZero(rep.ToolCounters) {
 			tc := rep.ToolCounters
 			s.ToolCounters = &toolCountersSummary{
-				InvalidToolCalls:  tc.InvalidToolCalls,
-				RepeatedReadFile:  tc.RepeatedReadFile,
-				DedupedReads:      tc.DedupedReads,
-				FinalAnswers:      tc.FinalAnswers,
-				RepeatedEdits:     tc.RepeatedEdits,
-				FailedEdits:       tc.FailedEdits,
-				NoOpEdits:         tc.NoOpEdits,
-				ChurnBannedEdits:  tc.ChurnBannedEdits,
-				NoOpSigRefusals:   tc.NoOpSigRefusals,
-				VerifyAttempts:    tc.VerifyAttempts,
-				AutoDelegations:   tc.AutoDelegations,
-				SubagentSteps:     tc.SubagentSteps,
-				RescueDelegations: tc.RescueDelegations,
-				Restarts:          tc.Restarts,
-				RestartRescues:    tc.RestartRescues,
-				ToolErrors:        tc.ToolErrors,
-				OffScopeEdits:     tc.OffScopeEdits,
-				ReadOnlyEdits:     tc.ReadOnlyEdits,
+				InvalidToolCalls: tc.InvalidToolCalls,
+				RepeatedReadFile: tc.RepeatedReadFile,
+				DedupedReads:     tc.DedupedReads,
+				FinalAnswers:     tc.FinalAnswers,
+				RepeatedEdits:    tc.RepeatedEdits,
+				FailedEdits:      tc.FailedEdits,
+				NoOpEdits:        tc.NoOpEdits,
+				ChurnBannedEdits: tc.ChurnBannedEdits,
+				NoOpSigRefusals:  tc.NoOpSigRefusals,
+				VerifyAttempts:   tc.VerifyAttempts,
+				// Assigning this was missed when the field was added, so the JSON reported
+				// baseline_verify_attempts:0 on a run whose human summary said 1 — the two
+				// outputs contradicting each other about the same run. The whole point of a
+				// separate counter is that the baseline probe's cost is VISIBLE.
+				BaselineVerifyAttempts: tc.BaselineVerifyAttempts,
+				AutoDelegations:        tc.AutoDelegations,
+				SubagentSteps:          tc.SubagentSteps,
+				RescueDelegations:      tc.RescueDelegations,
+				Restarts:               tc.Restarts,
+				RestartRescues:         tc.RestartRescues,
+				ToolErrors:             tc.ToolErrors,
+				OffScopeEdits:          tc.OffScopeEdits,
+				ReadOnlyEdits:          tc.ReadOnlyEdits,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
