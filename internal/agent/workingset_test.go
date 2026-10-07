@@ -26,8 +26,8 @@ func TestWorkingSetCapBindsOnLargeWindows(t *testing.T) {
 	usable := UsableWindow(131072)
 	frac := int(compactTriggerFrac * float64(usable))
 	got := CompactTriggerTokens(usable)
-	if got != defaultWorkingSetTokens {
-		t.Fatalf("trigger %d, want the cap %d", got, defaultWorkingSetTokens)
+	if want := WorkingSetTokensFor(usable); got != want {
+		t.Fatalf("trigger %d, want the cap %d at this window", got, want)
 	}
 	if got >= frac {
 		t.Fatalf("cap %d did not lower the fractional trigger %d", got, frac)
@@ -111,7 +111,7 @@ func TestDisablingTheSummaryBudgetLeavesTheSummaryUnbounded(t *testing.T) {
 	}
 
 	w := &workingMemory{foldedEntries: []string{"OBS one", "OBS two", "OBS three"}}
-	if w.collapseSummary(budget, func(s string) int { return len(s) }) {
+	if w.collapseSummary(budget, func(s string) int { return len(s) }, nil) {
 		t.Fatal("collapsed with the budget disabled")
 	}
 	if len(w.foldedEntries) != 3 || w.droppedEntries != 0 {
