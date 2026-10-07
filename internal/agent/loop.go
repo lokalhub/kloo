@@ -293,6 +293,19 @@ type Loop struct {
 	// separate from VerifyResult.Command because protection must work before the
 	// first verify has ever run.
 	VerifyCmd string
+	// Scope is the model-facing write policy for this run (nil ⇒ unscoped). The
+	// write tools enforce it already; the LOOP needs it to answer a different
+	// question — before composing a corrective, is the file this failing test lives
+	// in one the model is even allowed to change? See baseline.go for the incident
+	// where it was not, and kloo ordered the edit anyway 21 times.
+	Scope *tools.ScopePolicy
+	// walkedCache memoises the workspace file list used to resolve paths printed by
+	// a test runner onto real files (baseline.go). One walk per run at most.
+	walkedCache []string
+	// verifyScopeNote is appended to the pinned last-verify block when the failing
+	// verify is one the scope policy will not let the model fix. Empty on every other
+	// turn, so the pin is byte-identical to before whenever it does not apply.
+	verifyScopeNote string
 	// curEditAnchor is the text the most recent edit targeted; the file pin centres
 	// its window on it (KLOO_PIN_WINDOW).
 	curEditAnchor string
@@ -657,6 +670,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
 	l.lastPromptMsgs, l.rePrefill = nil, RePrefillStats{}
 	l.toolCharsCache = 0
+	// The walked file list is per-RUN state, not per-process: the TUI reuses one
+	// Loop across submissions and the tree changes between them.
+	l.walkedCache = nil
 
 	// Subagents: register the delegation tool for THIS run. Opt-in, so a loop that
 	// does not enable it has a byte-identical vocabulary to before. spawned is
@@ -681,13 +697,28 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		convo = append(convo, llm.Message{Role: llm.RoleUser, Content: ts})
 	}
 	var (
-		snap        Snapshot
-		triedCkpt   bool
+		snap      Snapshot
+		triedCkpt bool
+		// baseline is the verify signal from BEFORE the agent's first edit: which
+		// tests this project was already failing when kloo was handed it. Zero value
+		// (Taken=false) until the first-edit hook takes it, and permanently so on a
+		// run that never edits or where it could not be taken — every consumer treats
+		// that as "no baseline" and behaves exactly as kloo did before. See
+		// baseline.go for the incident this exists for.
+		baseline    VerifyBaseline
 		lastVerify  VerifyResult
 		curEditPath string // file last targeted by an edit ⇒ re-read fresh for the pin
 		ignoredAll  []string
 		step        int
 		edited      bool // has the agent applied an edit this run? gates ReasonSuccess
+		// baselineEqual is set by each verify: this red is the SAME red the baseline
+		// recorded. Declared out here because the churn feed below needs it too.
+		baselineEqual bool
+		// baselineTolerated latches when the run is closed as a success on a verify
+		// that is STILL RED — because it is the same red the baseline recorded and the
+		// agent was never permitted to fix it. Reported, never inferred: a success on
+		// a red verify has to be visible as exactly that.
+		baselineTolerated bool
 
 		// repairAttempts counts the enriched repair observations emitted per edit
 		// target this run, so enrichment is bounded to repairLimit() per path. A fresh
@@ -819,6 +850,28 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
+	// ensureBaseline takes the pre-edit verify baseline at most once per run, from
+	// whichever site needs it first: the first-edit hook, or the explore nudge that
+	// is about to tell the model what to fix. Idempotent, and a no-op on a run that
+	// does not want a baseline (see baselineWanted) — which is every unscoped run, so
+	// nothing measured on kloo-bench pays for it.
+	//
+	// Both call sites are places where the tree is still the tree kloo was handed:
+	// the first-edit hook runs before the edit is applied, and the nudge sites reach
+	// here only before any edit has landed OR after the hook already ran.
+	ensureBaseline := func() {
+		if baseline.Taken || baseline.Skipped != "" || !l.baselineWanted() {
+			return
+		}
+		baseline = l.takeVerifyBaseline(ctx)
+		// Counted SEPARATELY, never folded into VerifyAttempts. A green project would
+		// otherwise silently gain one verify attempt per run, and every benchmark
+		// comparison that reads verify_attempts would shift under it for a probe the
+		// model never asked for. It is a real cost (on the incident's app `npm test`
+		// is ~50s) and it is reported as its own number so that cost is visible.
+		counters.BaselineVerifyAttempts++
+	}
+
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
 		l.onState(StateStop)
@@ -839,9 +892,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		st := l.Budget.Stats()
-		compactions := 0
+		compactions, distilled, distillFails := 0, 0, 0
 		if l.Memory != nil {
-			compactions = l.Memory.Stats().Compactions
+			ms := l.Memory.Stats()
+			compactions, distilled, distillFails = ms.Compactions, ms.Distilled, ms.DistillFailures
 		}
 		rep := &Report{
 			Reason:             reason,
@@ -856,6 +910,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			TokenRatio:         l.tokenRatio(),
 			Elapsed:            st.Elapsed,
 			Compactions:        compactions,
+			Distilled:          distilled,
+			DistillFailures:    distillFails,
 			RePrefill:          l.rePrefillStats(),
 			Ignored:            ignoredAll,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
@@ -867,6 +923,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			rep.RailFires = railFires
 		}
 		rep.Safety = safetyEv
+		if baseline.Taken || baseline.Skipped != "" {
+			rep.Baseline = &BaselineEvidence{
+				Attempted:   true,
+				Taken:       baseline.Taken,
+				Passed:      baseline.Passed,
+				Failing:     baseline.Failing,
+				Unreachable: baseline.Unreachable,
+				Tolerated:   baselineTolerated,
+				Skipped:     baseline.Skipped,
+			}
+		}
 		rep.LastScopeDenial = lastScopeDenial
 		rep.PatchOnlyReject = patchOnlyReject
 		if l.shouldRollback(reason, lastVerify) && snap.Taken && l.Checkpoint != nil {
@@ -943,6 +1010,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 
 		// ── ACT ─────────────────────────────────────────────────────────────
 		l.onState(StateAct)
+		// The pinned last-verify block (memory.go verifyPin) is re-sent on EVERY turn
+		// after the first red verify, which makes it — not the explore corrective — the
+		// first and most persistent thing pointing the model at a failing test. In the
+		// incident (baseline.go) captured prompts showed the out-of-scope failure pinned
+		// on 8 of 15 turns, reaching the model many turns before any corrective spoke.
+		// So the pin has to carry the reach verdict too. Recomputed each turn because
+		// both the baseline and the last verify can change; "" (the common case, and
+		// every green run) leaves the pin byte-identical to before.
+		l.verifyScopeNote = ""
+		if l.outOfReachForCorrective(baseline, lastVerify) {
+			l.verifyScopeNote = outOfScopeVerifyNote(baseline.Unreachable, l.Scope.AllowPatterns())
+		}
 		call, ignored, usage, msg, err := l.act(ctx, task, convo, lastVerify, curEditPath)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -1064,16 +1143,27 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if lastVerify.Err == nil && lastVerify.Passed {
 				return finish(ReasonSuccess, nil, nil, nil)
 			}
+			// A red verify the agent was NEVER PERMITTED to turn green is not a failed
+			// run. In the incident (baseline.go) the model produced the correct scoped
+			// patch and kloo scored it success:false because an out-of-scope spec that
+			// was already committed red was still red. The judgement keys off NEW
+			// failures: same red as the baseline, every implicated file denied by the
+			// scope, so the change stands on its own.
+			if edited && l.outOfReach(baseline, lastVerify) {
+				baselineTolerated = true
+				return finish(ReasonSuccess, nil, nil, nil)
+			}
 			return finish(ReasonAnswered, nil, nil, nil)
 		}
 
-		// Track the file under edit so next turn re-reads it fresh for the pin
-		// (working memory) instead of trusting the stale transcript copy.
+		// The file this turn TRIED to edit. Distinct from curEditPath, which names the
+		// last edit that actually LANDED — see where it is promoted after dispatch.
+		attemptedEditPath, attemptedAnchor := "", ""
 		if isEditTool(call.Name) {
-			curEditPath = str(call.Args["path"])
+			attemptedEditPath = str(call.Args["path"])
 			// Remember WHAT was edited, not just where: the pin window centres on it
 			// so a long file's pin follows the model to the region it is working in.
-			l.curEditAnchor = editAnchorOf(call)
+			attemptedAnchor = editAnchorOf(call)
 		}
 
 		// Lazy checkpoint before the first edit (read-only runs take none).
@@ -1083,6 +1173,21 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				snap = s
 			}
 			// A non-git workspace (ErrNotGitRepo) degrades silently to no rollback.
+		}
+
+		// Lazy verify BASELINE, taken at the same boundary as the checkpoint and for
+		// the same reason: this is the last moment the tree is still exactly the tree
+		// kloo was handed. A run that only reads never pays for it.
+		//
+		// It costs one verify command. Every failure to take it (no verifier, command
+		// missing, timeout, setup error) leaves baseline.Taken false, and every
+		// consumer below is written to behave exactly as it did before — the baseline
+		// improves a judgement, it is never a precondition for making one.
+		if isEditTool(call.Name) {
+			ensureBaseline()
+			if ctx.Err() != nil {
+				return finish(ReasonInterrupted, nil, nil, nil)
+			}
 		}
 
 		// ── APPLY ───────────────────────────────────────────────────────────
@@ -1423,6 +1528,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				"move this task forward now is a change to the source. Call the edit tool with your best " +
 				"attempt at the fix. If it is wrong, the test will say so and you can revise it."}
 		}
+		// A denied write while the only failing tests are OUT OF REACH. The bare
+		// "write denied" tells the model its attempt was wrong; it does not tell it the
+		// instruction it was following was wrong. In the incident the model repeated
+		// that attempt 21 times because nothing ever corrected the premise. Say the
+		// premise out loud instead of letting the counter climb.
+		if scopeErr != nil && l.outOfReachForCorrective(baseline, lastVerify) {
+			obs = llm.Message{Role: llm.RoleUser, Content: scopeErr.Message + "\n\n" +
+				outOfScopeVerifyCorrective(baseline.Unreachable, l.Scope.AllowPatterns()).Content}
+		}
 		if call.Name == tools.NameWriteFile && errors.Is(derr, errWriteClobber) {
 			// Replace the bare error with a guidance nudge: read the file first, then make
 			// a surgical edit_file — or write_file again only to truly replace all of it.
@@ -1440,6 +1554,20 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// the churn detector (which reads only Turn.VerifyOutput/Edit/Acted), a
 		// linter that emits identical text every turn CANNOT false-churn a
 		// progressing run (the prior constant-signal scar this plan must not redo).
+		// Promote the attempted path to "the file under edit" ONLY if the write landed.
+		//
+		// It used to be set unconditionally, before dispatch. So a DENIED edit — off
+		// scope, read-only, protected, churn-banned — still became the pinned "Current
+		// file under edit (re-read fresh from disk)" for every later turn. That is a
+		// self-reinforcing loop: the pin names a forbidden file, the model edits it, the
+		// write is refused, and the refusal re-pins it. Captured prompts from the
+		// incident run (baseline.go) show exactly that, with a login page kloo had just
+		// refused to write presented as the file being worked on. A refusal must not
+		// entrench its own target in working memory.
+		if isEditTool(call.Name) && derr == nil {
+			curEditPath, l.curEditAnchor = attemptedEditPath, attemptedAnchor
+		}
+
 		if isEditTool(call.Name) && derr == nil && l.Linter != nil {
 			lr := l.Linter.Lint(ctx, []string{curEditPath})
 			if lintMsg, ok := lintObservation(lr); ok { // ok == false when clean OR non-runnable
@@ -1487,6 +1615,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			counters.VerifyAttempts++
 			mutatedSinceVerify = false
 
+			// Is this the SAME red the baseline recorded? If so it is not new evidence:
+			// the rails that count repeated failure must not advance on it, or a run
+			// working correctly inside its scope is halted by a failure it never caused
+			// and cannot fix. False whenever there is no baseline, so an unscoped run's
+			// rails behave exactly as before.
+			baselineEqual = baseline.unchangedSince(lastVerify)
+			// Flake guard: a baseline-red test that is now PASSING leaves the excused set
+			// for good. Otherwise a flaky red at baseline would permanently excuse a real
+			// regression in the same test.
+			baseline.retire(failingAssertions(failingOutput(lastVerify)), lastVerify.Passed)
+
 			// A non-runnable verify command is an error outcome, never a false pass.
 			if lastVerify.Err != nil {
 				if ctx.Err() != nil {
@@ -1500,7 +1639,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// A05 the model never repaired it — it read sixteen more times and stopped.
 			// Say so in plain terms, quote the error, and arm the force-edit rail NOW
 			// rather than after another six read-only turns.
-			if buildBreakGuard() && !lastVerify.Passed {
+			// Not when the BASELINE output already matched the build-break signatures:
+			// "YOUR LAST EDIT BROKE THE BUILD" is then simply false, and a corrective
+			// that opens with a false accusation spends the model's turn on damage it
+			// did not do (baseline.go).
+			if buildBreakGuard() && !lastVerify.Passed && !baseline.BuildBroken {
 				if broken, detail := buildBreak(failingOutput(lastVerify)); broken {
 					convo = append(convo, llm.Message{Role: llm.RoleUser, Content: "YOUR LAST EDIT BROKE THE BUILD. " +
 						"This is not a failing test — the file no longer compiles, so nothing can run at all:\n" + detail +
@@ -1518,7 +1661,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// set and the streak reaches N, halt early rather than churning to the step
 			// budget. Independent of the churn rail (which stays the default backstop).
 			if l.StopOn.RepeatedVerify > 0 {
-				if lastVerify.Passed {
+				if lastVerify.Passed || baselineEqual {
 					verifyFailStreak, verifyFailKey = 0, ""
 				} else if key := normalizeChurn(failingOutput(lastVerify)); key != "" && key == verifyFailKey {
 					verifyFailStreak++
@@ -1553,8 +1696,13 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// a failure the model was never re-shown, advancing the repeated-failure rail
 		// on turns that produced no new evidence. VerifySkipped carries the turn
 		// instead, and churn.Observe handles it as neutral — see types.Turn.
+		//
+		// And a red that is IDENTICAL to the baseline's carries nothing either: the
+		// repeated-failure rail would read it as "same red build every step" and halt a
+		// run that is making correct, in-scope progress against a failure that was
+		// there before it started.
 		verifyOut := ""
-		if l.Verifier != nil && !verifySkipped {
+		if l.Verifier != nil && !verifySkipped && !baselineEqual {
 			verifyOut = failingOutput(lastVerify)
 		}
 		// #2 malformation-aware churn: a CORRECTABLE edit failure (got a corrective
@@ -1581,6 +1729,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// cut the model off before it could answer. Require an edit this run; an
 		// already-passing, no-edit run instead continues until the model answers
 		// (ReasonAnswered) or a budget/churn rail fires.
+		// UNCHANGED, deliberately, including for a baseline-tolerated red. A GREEN
+		// verify means the work is demonstrably done, so ending here is safe. A red that
+		// kloo has merely decided not to blame on the agent means something weaker —
+		// "the verify cannot judge this run" — and is no evidence the TASK is finished.
+		// Ending here on that would stop the run at its FIRST landed edit even when the
+		// task needs five, which is a worse failure than the one the baseline fixes.
+		// Tolerance therefore applies only where the model declares it is done: the
+		// finish branch above. That also keeps the mid-loop gate byte-identical.
 		if lastVerify.Passed && edited {
 			return finish(ReasonSuccess, nil, nil, nil)
 		}
@@ -1590,8 +1746,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// edit↔read flail that slips past the repetition/explore/churn rails. Halt it.
 		if editFailStreak >= l.editFailLimit() {
 			art := "edit_file kept failing to apply"
-			if curEditPath != "" {
-				art += " on " + curEditPath
+			// The ATTEMPTED path: this rail is about edits that never landed, so the
+			// last successful target (curEditPath) would name the wrong file.
+			if attemptedEditPath != "" {
+				art += " on " + attemptedEditPath
 			}
 			art += fmt.Sprintf(" (%d attempts, no valid edit landed)", editFailStreak)
 			return finish(ReasonChurn, nil, nil, &ChurnEvidence{Kind: ChurnEditFailed, Artifact: art})
@@ -1855,14 +2013,69 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// never armed and the run was stopped with the file broken. A model
 				// that has already ignored one nudge this run does not get another
 				// free pass.
-				if forceEdit() && exploreNudges > 0 && !l.editsImpossible {
+				//
+				// UNLESS the failure is out of reach. kloo must never order an edit it
+				// will then refuse: in the incident (baseline.go) the single failing test
+				// was an out-of-scope spec that was already red before the run, the
+				// corrective said "the code must change for the failing test to pass… do
+				// not read, do not search, do not call finish", and the model obeyed —
+				// every remaining step spent re-attempting a login.page.ts write the scope
+				// refused (and, on the UNSCOPED variant of the same task, 21 applied edits to
+				// that same unrelated file and 1.55M tokens).
+				//
+				// Consult the scope BEFORE composing the corrective, not after the model
+				// has been punished for doing as it was told.
+				exploreNudges++
+				// The scope question has to be answered BEFORE the corrective is composed,
+				// which means the baseline has to exist by now even on a run that has not
+				// edited yet — the incident's twelve-read opening is exactly that run.
+				//
+				// Not when the verify has already gone GREEN: there is then no failing test
+				// for the corrective to point at, so the probe would buy nothing and a
+				// baseline verify is a real cost (~50s on the app this came from).
+				if !lastVerify.Passed {
+					ensureBaseline()
+				}
+				if l.outOfReachForCorrective(baseline, lastVerify) {
+					// No edit is demanded, the read tools are NOT withheld (editOnlyLeft is
+					// left alone), and the model is told plainly that this red is not its
+					// job. It still has a task to finish and may need to read to finish it.
+					recordRail(RailVerifyOutOfScope)
+					convo = append(convo, outOfScopeVerifyCorrective(baseline.Unreachable, l.Scope.AllowPatterns()))
+					break
+				}
+				if forceEdit() && exploreNudges > 1 && !l.editsImpossible {
 					l.editOnlyLeft = editOnlyBudget
 				}
-				exploreNudges++
-				convo = append(convo, editCorrective(exploreStreak, edited,
-					failingAssertions(failingOutput(lastVerify)), l.verifyTestImports()))
+				// Only failures the agent could have caused, and could fix. A pre-existing
+				// The FULL failing list, baseline-red entries included. Reaching here means
+				// the failure is NOT out of reach — the agent can fix it, and usually the
+				// task IS to fix the test that was already red. Filtering the baseline's own
+				// failures out here was tried and is wrong: it strips the "Still failing: X"
+				// line that is the measured value of this corrective (kloo-bench A33, where
+				// the rail pushed as hard as it could and never said what was broken). The
+				// baseline's job among the correctives is the out-of-reach branch above, not
+				// pruning failures the agent should be fixing.
+				//
+				// exploreTotal, NOT exploreStreak. The nudge fires on exploreTotal; the
+				// message quoted exploreStreak, which is RESET by every read that covers
+				// new ground — so a run reading twelve distinct files was told "You have
+				// inspected 0 files without changing a single line." An incoherent number
+				// in the one message designed to be obeyed.
+				//
+				// And when NO verify has run yet — a read-only opening, which is the shape of
+				// the incident — the baseline is the only red signal there is. Without this
+				// the corrective fires with no failing list at all and says only "make your
+				// best edit to the source file you believe is wrong", which is no help to a
+				// model that does not know which file that is. Empty on a green baseline, so
+				// a healthy project's corrective is unchanged.
+				failing := failingAssertions(failingOutput(lastVerify))
+				if len(failing) == 0 && baseline.Taken && !baseline.Passed {
+					failing = baseline.Failing
+				}
+				convo = append(convo, editCorrective(exploreTotal, edited, failing, l.verifyTestImports()))
 			} else {
-				convo = append(convo, exploreCorrective(exploreStreak))
+				convo = append(convo, exploreCorrective(exploreTotal)) // see above: the nudge fires on exploreTotal
 			}
 		}
 
@@ -2012,19 +2225,21 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	var hist []llm.Message
 	if l.Memory != nil {
 		h, merr := l.Memory.Assemble(MemoryInput{
-			Task:         task,
-			TaskImages:   l.TaskImages,
-			Convo:        convo,
-			History:      l.SessionHistory,
-			LastVerify:   lastVerify,
-			EditPath:     curEditPath,
-			FreshFile:    l.reread(curEditPath),
-			EditAnchor:   l.curEditAnchor,
-			Exercises:    l.verifyTestImports(),
-			WindowTokens: win,
-			SystemTokens: nonHistoryTokens,
-			MapBudget:    mapBudget,
-			Estimate:     l.estimate,
+			Task:            task,
+			TaskImages:      l.TaskImages,
+			Distill:         l.distiller(ctx),
+			Convo:           convo,
+			History:         l.SessionHistory,
+			LastVerify:      lastVerify,
+			EditPath:        curEditPath,
+			FreshFile:       l.reread(curEditPath),
+			EditAnchor:      l.curEditAnchor,
+			Exercises:       l.verifyTestImports(),
+			VerifyScopeNote: l.verifyScopeNote,
+			WindowTokens:    win,
+			SystemTokens:    nonHistoryTokens,
+			MapBudget:       mapBudget,
+			Estimate:        l.estimate,
 		})
 		if merr != nil {
 			// ErrWindowTooSmall ⇒ a config error surfaced as a ReasonError stop.
@@ -3142,9 +3357,13 @@ func failingAssertions(out string) []string {
 		default:
 			continue
 		}
-		if i := strings.Index(name, " "); i > 0 && strings.Contains(name[:i], "/") {
-			name = strings.TrimSpace(name[i:]) // drop a leading file path
-		}
+		// The path STAYS. It used to be stripped when the first token looked like a
+		// file ("drop a leading file path"), which turned vitest's
+		// "× src/login/login.page.spec.ts > builds the google auth url" into
+		// "> builds the google auth url" — a failure named with the one piece of
+		// information that would let the model (and kloo's own scope check) see WHERE
+		// it lives deleted. It is also the identity the baseline compares on, so a
+		// stripped path makes two failures in different files look like one.
 		if name == "" || seen[name] {
 			continue
 		}

@@ -42,9 +42,14 @@ func TestComputeRunTokenBudgetFloorProtectsSmallWindows(t *testing.T) {
 // Both are asserted, because the ceiling is otherwise unreachable at the default
 // cap and a test that only covered the default would let it rot.
 func TestComputeRunTokenBudgetCeilingBoundsLargeWindows(t *testing.T) {
+	// At a large window the CEILING is what bounds the budget, with the cap on or
+	// off. That is a change: the cap used to be a flat 32768, so 40 turns landed at
+	// 1.31M, under the ceiling. Now the default cap follows the window (the
+	// geometric-mean curve), a turn at ctx 131072 costs 58617, and 40 of those is
+	// 2.34M — above the ceiling, which is therefore the binding constraint.
 	capped := ComputeRunTokenBudget(131072, 0, 0, 0)
-	if want := defaultWorkingSetCap * runBudgetTurns; capped != want {
-		t.Errorf("ctx 131072 capped = %d, want %d (%d x %d turns)", capped, want, defaultWorkingSetCap, runBudgetTurns)
+	if capped != runBudgetCeiling {
+		t.Errorf("ctx 131072 capped = %d, want the ceiling %d", capped, runBudgetCeiling)
 	}
 	if capped >= 2_000_000 {
 		t.Errorf("budget %d does not improve on the ~2M that prompted this", capped)
@@ -54,11 +59,16 @@ func TestComputeRunTokenBudgetCeilingBoundsLargeWindows(t *testing.T) {
 	if uncapped != runBudgetCeiling {
 		t.Errorf("ctx 131072 with the cap off = %d, want the ceiling %d", uncapped, runBudgetCeiling)
 	}
-	if uncapped >= 2_000_000 {
-		t.Errorf("budget %d does not improve on the ~2M that prompted this", uncapped)
+
+	// The cap still does its job where it is actually tighter: an EXPLICIT cap sizes
+	// the per-turn cost, and the budget follows it down. This is the arm an operator
+	// reaches for on a long task, so it is the one worth pinning.
+	tight := ComputeRunTokenBudget(131072, 0, 0, 12_000)
+	if want := 12_000 * runBudgetTurns; tight != want {
+		t.Errorf("explicit cap: budget = %d, want %d (%d x %d turns)", tight, want, 12_000, runBudgetTurns)
 	}
-	if capped >= uncapped {
-		t.Errorf("the cap must tighten the budget, not loosen it: capped %d >= uncapped %d", capped, uncapped)
+	if tight >= capped {
+		t.Errorf("a tighter cap must tighten the budget: %d >= %d", tight, capped)
 	}
 }
 

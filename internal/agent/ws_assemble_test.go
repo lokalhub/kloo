@@ -15,11 +15,16 @@ import (
 func TestWorkingSetCapActuallyShedsOnALargeWindow(t *testing.T) {
 	t.Cleanup(func() { SetWorkingSetTokens(0) })
 
-	// ~60k tokens of history: well past the 32768 cap, well under the 73399 the
-	// fraction alone allows at this window. So the cap is the ONLY thing that can
-	// trigger a compaction here.
+	// The history has to sit between the two bounds that exist at this window: past
+	// the CAP (now 65536 at ctx 131072 — the geometric-mean curve, not a flat
+	// 32768) and under the 73399 the fraction alone allows. Then the cap is the only
+	// thing that can trigger a compaction, which is what this test is about.
+	//
+	// The fixture was 240 messages when the cap was flat. That is now BELOW the cap
+	// at this window and correctly causes no shed — which is the whole point of the
+	// curve, so the fixture moves rather than the behaviour.
 	convo := []llm.Message{{Role: llm.RoleUser, Content: "trace the prompt"}}
-	for i := 0; i < 240; i++ {
+	for i := 0; i < 280; i++ {
 		convo = append(convo, llm.Message{Role: llm.RoleUser,
 			Content: fmt.Sprintf("read %d:\n%s", i, strings.Repeat("x ", 500))})
 	}
@@ -51,8 +56,8 @@ func TestWorkingSetCapActuallyShedsOnALargeWindow(t *testing.T) {
 	if onTok >= offTok {
 		t.Fatalf("cap did not shrink the assembled prompt: on=%d off=%d", onTok, offTok)
 	}
-	if onTok > defaultWorkingSetTokens {
-		t.Fatalf("capped prompt %d exceeds the working-set cap %d", onTok, defaultWorkingSetTokens)
+	if want := WorkingSetTokensFor(in.WindowTokens); onTok > want {
+		t.Fatalf("capped prompt %d exceeds the working-set cap %d at ctx %d", onTok, want, in.WindowTokens)
 	}
 	if w2.compactions == 0 {
 		t.Fatal("cap reported a lower trigger but no compaction ran")

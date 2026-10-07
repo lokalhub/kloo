@@ -104,15 +104,24 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	reloadProfile := buildReloadProfile(baseFlags, getenv, clientFactory)
 
 	loop := &agent.Loop{
-		Client:        client,
-		Adapter:       adapter,
-		Registry:      reg,
-		Verifier:      buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(os.Stderr)),
-		Linter:        buildLinter(ws, lintCmd, lintPerFile),
-		Budget:        agent.NewBudget(cfg, nil),
-		Churn:         agent.NewChurnDetector(cfg.ChurnRounds),
-		Checkpoint:    agent.NewGitCheckpointer(cwd),
-		Root:          ws.Root(),
+		Client:     client,
+		Adapter:    adapter,
+		Registry:   reg,
+		Verifier:   buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(os.Stderr)),
+		Linter:     buildLinter(ws, lintCmd, lintPerFile),
+		Budget:     agent.NewBudget(cfg, nil),
+		Churn:      agent.NewChurnDetector(cfg.ChurnRounds),
+		Checkpoint: agent.NewGitCheckpointer(cwd),
+		Root:       ws.Root(),
+		// VerifyCmd was missing here while headless set it, which silently disabled
+		// every behaviour keyed on knowing the verify command in INTERACTIVE use:
+		// protectedByVerify (the model could edit the very test it is graded on),
+		// failingTestSource and subsetTestWarning. The TUI is the path a human
+		// actually runs.
+		VerifyCmd: verifyCmd,
+		// The write scope the loop CONSULTS (the tools already enforce it) — see
+		// agent/baseline.go.
+		Scope:         ws.Scope(),
 		ContextTokens: cfg.MaxContextTokens,
 		CuratorTokens: cfg.CuratorBudgetTokens,
 		MapPosition:   cfg.MapPosition,

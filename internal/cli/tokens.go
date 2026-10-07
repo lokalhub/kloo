@@ -107,7 +107,11 @@ func measureTokens(text, source string, ctxTokens int, ratio float64) tokensResu
 		estimate = fmt.Sprintf("calibrated · %.2f chars/token, measured on a previous run", ratio)
 	}
 	usable := agent.UsableWindow(ctxTokens)
-	trigger := agent.CompactTriggerTokens(ctxTokens)
+	// The USABLE window, matching the loop (loop.go passes usableWindow(ctx) to the
+	// assembler) and `kloo doctor`. Passing the declared window here reported a
+	// trigger ~25% higher than the one that actually fires — invisible while the cap
+	// was a flat constant that clamped both, and wrong the moment it stopped being.
+	trigger := agent.CompactTriggerTokens(usable)
 	return tokensResult{
 		Source:          source,
 		Chars:           tokens.CountChars(text),

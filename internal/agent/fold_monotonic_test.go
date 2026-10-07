@@ -163,6 +163,12 @@ func TestLowWaterFracIsRealHysteresis(t *testing.T) {
 // wrong answer.
 func TestHysteresisIsWorthItsValue(t *testing.T) {
 	const window, turns = 131072, 60
+	// Pin the working set so this measures HYSTERESIS and nothing else. The cap now
+	// follows the window (workingset.go), and at this window it rose above what this
+	// fixture produces — so without the pin both arms fold zero times and the test
+	// silently compares nothing to nothing.
+	t.Cleanup(func() { SetWorkingSetTokens(0) })
+	SetWorkingSetTokens(32768)
 	build := func(n int) []llm.Message {
 		convo := []llm.Message{{Role: llm.RoleUser, Content: "trace the prompt assembly"}}
 		for i := range n {

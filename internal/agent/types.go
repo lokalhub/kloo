@@ -199,6 +199,13 @@ const (
 	// from one that never fired at all — the first bench round of this feature was
 	// unreadable for exactly that reason.
 	RailChurnEscalate Rail = "churn-escalate"
+	// RailVerifyOutOfScope: the verify is red, it was red before the run started,
+	// and every file the failure implicates is one the edit scope forbids. kloo used
+	// to order an edit here; the corrective now says so plainly and demands nothing.
+	// Recorded so a run that was rescued this way is distinguishable from one where
+	// the situation never arose — the previous behaviour spent whole step budgets, and
+	// on the unscoped variant of the same task 1.55M tokens, in silence (baseline.go).
+	RailVerifyOutOfScope Rail = "verify-out-of-scope"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —
@@ -239,6 +246,29 @@ type VerifyResult struct {
 	Postchecks []HookResult
 }
 
+// BaselineEvidence is the report-visible form of the pre-edit verify baseline
+// (agent/baseline.go). Attempted is true whenever kloo tried to take one, so a
+// baseline that could not be established is visible as a reason rather than as
+// silence.
+type BaselineEvidence struct {
+	Attempted bool
+	Taken     bool
+	Passed    bool
+	// Failing are the test identities that were ALREADY failing before the agent's
+	// first edit — the set no corrective may blame on the agent.
+	Failing []string
+	// Unreachable are the files that baseline failure implicates which the scope
+	// policy forbids the model to write. Non-empty ⇒ the red is not the agent's to
+	// fix.
+	Unreachable []string
+	// Tolerated records that the run was judged on the baseline rather than on a
+	// green verify: the verify is still red, it is the SAME red, and the agent was
+	// never permitted to fix it.
+	Tolerated bool
+	// Skipped says why no baseline was taken (empty when Taken).
+	Skipped string
+}
+
 // HookResult is one precheck/postcheck command's outcome within a LayeredVerifier
 // (B5). It is surfaced in the run summary so a benchmark can see each gate.
 type HookResult struct {
@@ -274,6 +304,12 @@ type ToolCounters struct {
 	// did not help is indistinguishable from one that never fired.
 	NoOpSigRefusals int
 	VerifyAttempts  int
+	// BaselineVerifyAttempts counts the PRE-EDIT baseline probes this run ran
+	// (agent/baseline.go). Deliberately NOT folded into VerifyAttempts: the probe is
+	// kloo's own, not a check the model asked for, and folding it in would shift
+	// verify_attempts by one on every run that takes a baseline — including green
+	// ones — and quietly move every benchmark comparison that reads it.
+	BaselineVerifyAttempts int
 	// AutoDelegations counts investigations kloo spawned on the model's behalf
 	// when it was reading without acting. Ships WITH the feature so an inert
 	// experiment is distinguishable from a failed one.
@@ -417,17 +453,28 @@ type MemoryInput struct {
 	// Assemble REBUILDS the task message from Task text each turn; without this the
 	// attachment would survive exactly as long as the no-compaction fast path, then
 	// vanish the first time memory did any work.
-	TaskImages   []string
-	Convo        []llm.Message // full running transcript (Convo[0] is the task)
-	History      []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
-	LastVerify   VerifyResult  // pinned: the last real verify signal
-	EditPath     string        // file currently under edit ("" if none)
-	FreshFile    string        // EditPath re-read from disk this turn (bounded)
-	EditAnchor   string        // text from the most recent edit, used to locate the region worth pinning (KLOO_PIN_WINDOW)
-	Exercises    []string      // source files the verify command's tests import, named when a repeated failure means the fix is in another file
-	WindowTokens int           // = cfg.MaxContextTokens (the hard ceiling)
-	SystemTokens int           // ApproxTokens(system prompt incl. repo map) already spent
-	MapBudget    int           // the repo-map token budget the loop used this turn (for Stats/observability)
+	TaskImages []string
+	// Distill, when non-nil, rewrites summary entries that no longer fit into one
+	// dense brief instead of deleting them (distill.go). nil ⇒ the previous
+	// behaviour: the oldest entries are dropped. It is a func rather than a client
+	// so the memory layer stays free of transport concerns, and so the caller owns
+	// the ctx the call is cancelled with.
+	Distill    func(entries []string) (string, error)
+	Convo      []llm.Message // full running transcript (Convo[0] is the task)
+	History    []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
+	LastVerify VerifyResult  // pinned: the last real verify signal
+	EditPath   string        // file currently under edit ("" if none)
+	FreshFile  string        // EditPath re-read from disk this turn (bounded)
+	EditAnchor string        // text from the most recent edit, used to locate the region worth pinning (KLOO_PIN_WINDOW)
+	Exercises  []string      // source files the verify command's tests import, named when a repeated failure means the fix is in another file
+	// VerifyScopeNote is appended to the pinned verify block when the failing verify
+	// is one the edit scope will not let the model fix (agent/baseline.go). Empty on
+	// every other turn, so the pin is byte-identical to before whenever it does not
+	// apply — including on every green run.
+	VerifyScopeNote string
+	WindowTokens    int // = cfg.MaxContextTokens (the hard ceiling)
+	SystemTokens    int // ApproxTokens(system prompt incl. repo map) already spent
+	MapBudget       int // the repo-map token budget the loop used this turn (for Stats/observability)
 	// Estimate sizes a string in tokens. The loop passes its calibrated estimator
 	// (learned from reported usage) so the assembler and the loop agree on the
 	// scale — mixing a calibrated system-prompt count with an uncalibrated history
@@ -450,6 +497,12 @@ type MemoryStats struct {
 	// per-turn pins. Everything above them is the stable prefix, which is what the
 	// prompt-cache breakpoint is placed at the end of.
 	PinnedMessages int
+	// Distilled is how many summary entries this run handed to the model to be
+	// rewritten as a brief instead of deleting; DistillFailures is how many times
+	// that call could not be used and they were dropped as before. Reported because
+	// a run quietly losing its own record should be visible, not inferred.
+	Distilled       int
+	DistillFailures int
 }
 
 // Snapshot identifies a checkpointed working-tree state.
@@ -505,6 +558,11 @@ type Report struct {
 	Churn           *ChurnEvidence
 	// Safety is set when the run ended via an A7 --stop-on rule (ReasonSafetyStop).
 	Safety *SafetyEvidence
+	// Baseline records the pre-edit verify baseline when one was taken (nil
+	// otherwise, so an unscoped run's report and JSON are unchanged). It is the only
+	// way to tell, after the fact, "the suite was already red and kloo knew it" from
+	// "kloo never looked".
+	Baseline *BaselineEvidence
 	// LastScopeDenial is the most recent scope denial this run (nil when none), so a
 	// run that was denied and then ended calmly (answered/unverified) can still be
 	// classified off_scope_edit in the headless JSON even without a --stop-on rule.
@@ -532,6 +590,11 @@ type Report struct {
 	// running summary this run (0 when memory is off or never triggered). The
 	// report/UI print it only when > 0, so the no-compaction output is unchanged.
 	Compactions int
+	// Distilled / DistillFailures mirror MemoryStats: how many summary entries this
+	// run had rewritten into a model-written brief instead of deleted, and how often
+	// that call could not be used.
+	Distilled       int
+	DistillFailures int
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
 	// RailFires tallies the SOFT recovery rails that fired this run (corrective

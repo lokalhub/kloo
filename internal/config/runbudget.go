@@ -1,5 +1,7 @@
 package config
 
+import "math"
+
 // The run's cumulative token budget.
 //
 // Every effort tier shipped MaxTokens: 0 ("unbounded"), and no flag reached
@@ -67,10 +69,16 @@ func ComputeRunTokenBudget(window int, usableFrac, triggerFrac float64, workingS
 	if triggerFrac <= 0 || triggerFrac > 1 {
 		triggerFrac = defaultTriggerFrac
 	}
+	// The per-turn cost is bounded by the SAME cap the loop applies, and at the
+	// default that cap follows the window (agent/workingset.go: the geometric mean
+	// of the usable window and the base). Keeping a flat 32768 here would size the
+	// budget from a per-turn cost the loop stopped using — too few turns on a large
+	// window, which is the error this whole budget exists to avoid.
+	usable := float64(window) * usableFrac
 	if workingSet == 0 {
-		workingSet = defaultWorkingSetCap
+		workingSet = int(math.Sqrt(usable * float64(defaultWorkingSetCap)))
 	}
-	perTurn := int(float64(window) * usableFrac * triggerFrac)
+	perTurn := int(usable * triggerFrac)
 	if workingSet > 0 && perTurn > workingSet {
 		perTurn = workingSet
 	}

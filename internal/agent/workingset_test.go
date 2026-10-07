@@ -26,8 +26,8 @@ func TestWorkingSetCapBindsOnLargeWindows(t *testing.T) {
 	usable := UsableWindow(131072)
 	frac := int(compactTriggerFrac * float64(usable))
 	got := CompactTriggerTokens(usable)
-	if got != defaultWorkingSetTokens {
-		t.Fatalf("trigger %d, want the cap %d", got, defaultWorkingSetTokens)
+	if want := WorkingSetTokensFor(usable); got != want {
+		t.Fatalf("trigger %d, want the cap %d at this window", got, want)
 	}
 	if got >= frac {
 		t.Fatalf("cap %d did not lower the fractional trigger %d", got, frac)
@@ -111,10 +111,41 @@ func TestDisablingTheSummaryBudgetLeavesTheSummaryUnbounded(t *testing.T) {
 	}
 
 	w := &workingMemory{foldedEntries: []string{"OBS one", "OBS two", "OBS three"}}
-	if w.collapseSummary(budget, func(s string) int { return len(s) }) {
+	if w.collapseSummary(budget, func(s string) int { return len(s) }, nil) {
 		t.Fatal("collapsed with the budget disabled")
 	}
 	if len(w.foldedEntries) != 3 || w.droppedEntries != 0 {
 		t.Fatalf("entries touched with the budget disabled: %q dropped=%d", w.foldedEntries, w.droppedEntries)
+	}
+}
+
+// TestWorkingSetCapBoundsWhatIsKept: lowering the cap must lower the amount of
+// history KEPT, not merely the point at which compaction is entered.
+//
+// This is the bug the live run exposed. The cap set the trigger and the hot budget
+// was computed independently from the window, so at --working-set-tokens 12000 the
+// trigger was 12000 while the tail was still allowed 26423. Compaction ran, found
+// nothing it was required to fold, and reported 0 compactions — with `kloo doctor`
+// claiming the cap was "BINDING — holds the prompt here".
+func TestWorkingSetCapBoundsWhatIsKept(t *testing.T) {
+	t.Cleanup(func() { SetWorkingSetTokens(0) })
+	const window = 104857 // the usable window at ctx 131072, as the loop passes it
+
+	SetWorkingSetTokens(0)
+	wide := hotBudgetTokens(window)
+
+	SetWorkingSetTokens(12000)
+	tight := hotBudgetTokens(window)
+
+	if tight >= wide {
+		t.Errorf("a tighter cap did not tighten the hot budget: %d >= %d", tight, wide)
+	}
+	if tight > 12000 {
+		t.Errorf("hot budget %d exceeds the working-set cap 12000 — the cap must bound what is kept", tight)
+	}
+	// The cap must bound it; the exact fraction is free to differ (the hot budget is
+	// still derived through usableWindow a second time — see hotBudgetTokens).
+	if tight > int(float64(12000)*hotBudgetFrac)+1 {
+		t.Errorf("hot budget %d is not bounded by the cap's share (%d)", tight, int(float64(12000)*hotBudgetFrac))
 	}
 }

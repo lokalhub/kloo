@@ -86,10 +86,14 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	systemPrompt += memoryRecallSystemSection(recall)
 
 	loop := &agent.Loop{
-		Client:                  llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
-		Adapter:                 adapter,
-		Registry:                reg,
-		VerifyCmd:               verifyCmd,
+		Client:    llm.New(cfg.Endpoint, cfg.Model, llm.WithAPIKey(cfg.APIKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout), llm.WithLogf(writerLogf(out))),
+		Adapter:   adapter,
+		Registry:  reg,
+		VerifyCmd: verifyCmd,
+		// The write scope the loop CONSULTS (the tools already enforce it). Needed
+		// before a corrective is composed, so kloo never orders an edit it will
+		// refuse — see agent/baseline.go for the run where it did, 21 times.
+		Scope:                   ws.Scope(),
 		Verifier:                buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
 		Linter:                  buildLinter(ws, lintCmd, lintPerFile),
 		Budget:                  agent.NewBudget(cfg, nil),
@@ -329,10 +333,34 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 		fmt.Fprintf(out, "  verify:  %q → exit %d (passed=%t)\n",
 			rep.FinalVerify.Command, rep.FinalVerify.ExitCode, rep.FinalVerify.Passed)
 	}
+	if bl := rep.Baseline; bl != nil {
+		switch {
+		case !bl.Taken:
+			fmt.Fprintf(out, "  baseline: not taken (%s)\n", bl.Skipped)
+		case bl.Passed:
+			fmt.Fprintf(out, "  baseline: verify green before the first edit\n")
+		default:
+			judged := ""
+			if bl.Tolerated {
+				judged = " — run judged against it, not against a green verify"
+			}
+			fmt.Fprintf(out, "  baseline: verify ALREADY RED before the first edit (%d known failure(s), %d out of scope)%s\n",
+				len(bl.Failing), len(bl.Unreachable), judged)
+		}
+	}
 	if rep.Compactions > 0 {
 		// Printed only when memory actually compacted, so a short run's report is
 		// byte-identical to pre-P00 (mirrors the optional budget/churn lines).
 		fmt.Fprintf(out, "  compactions: %d\n", rep.Compactions)
+	}
+	if rep.Distilled > 0 || rep.DistillFailures > 0 {
+		// What compaction actually did with what it shed: rewritten by the model, or
+		// deleted because the summariser could not be used.
+		fmt.Fprintf(out, "  distilled: %d entries into a brief", rep.Distilled)
+		if rep.DistillFailures > 0 {
+			fmt.Fprintf(out, " · %d dropped (summariser unavailable)", rep.DistillFailures)
+		}
+		fmt.Fprintln(out)
 	}
 	if rp := rep.RePrefill; rp.Turns > 0 {
 		fmt.Fprintf(out, "  re-prefill: %d tok/turn avg · peak %d tok · cached %.0f%%\n",
@@ -395,6 +423,29 @@ type verifySummary struct {
 	Ran bool `json:"ran"`
 	// Error carries why it could not run. Empty on a verify that genuinely failed.
 	Error string `json:"error,omitempty"`
+	// Baseline is the PRE-EDIT verify baseline, present only on a run that took one
+	// (a scoped run, or KLOO_VERIFY_BASELINE=1 — see agent/baseline.go). It is the
+	// machine-readable answer to "was this project already red when kloo started, and
+	// was the red kloo's to fix?", which a harness previously had no way to ask.
+	Baseline *baselineSummary `json:"baseline,omitempty"`
+}
+
+// baselineSummary is the JSON form of the pre-edit verify baseline. attempted is
+// true whenever kloo tried, so a baseline that could not be established appears as
+// a reason rather than as silence (the fail-open path).
+type baselineSummary struct {
+	Attempted bool `json:"attempted"`
+	Taken     bool `json:"taken"`
+	Passed    bool `json:"passed"`
+	// Failing are the test identities already failing before the agent's first edit.
+	Failing []string `json:"failing,omitempty"`
+	// Unreachable are the files that failure implicates which the edit scope forbids
+	// the model to write. Non-empty ⇒ the red was never the agent's to fix.
+	Unreachable []string `json:"unreachable,omitempty"`
+	// Tolerated: the run was judged against this baseline rather than against a green
+	// verify. The verify is STILL RED in that case, which is why it is reported.
+	Tolerated bool   `json:"tolerated"`
+	Skipped   string `json:"skipped,omitempty"`
 }
 
 type failureDetail struct {
@@ -407,19 +458,23 @@ type failureDetail struct {
 }
 
 type toolCountersSummary struct {
-	InvalidToolCalls  int `json:"invalid_tool_calls"`
-	RepeatedReadFile  int `json:"repeated_read_file"`
-	DedupedReads      int `json:"deduped_reads"`
-	FinalAnswers      int `json:"final_answers"`
-	RepeatedEdits     int `json:"repeated_edits"`
-	FailedEdits       int `json:"failed_edits"`
-	NoOpEdits         int `json:"no_op_edits"`
-	ChurnBannedEdits  int `json:"churn_banned_edits"`
-	NoOpSigRefusals   int `json:"noop_sig_refusals"`
-	VerifyAttempts    int `json:"verify_attempts"`
-	AutoDelegations   int `json:"auto_delegations"`
-	SubagentSteps     int `json:"subagent_steps"`
-	RescueDelegations int `json:"rescue_delegations"`
+	InvalidToolCalls int `json:"invalid_tool_calls"`
+	RepeatedReadFile int `json:"repeated_read_file"`
+	DedupedReads     int `json:"deduped_reads"`
+	FinalAnswers     int `json:"final_answers"`
+	RepeatedEdits    int `json:"repeated_edits"`
+	FailedEdits      int `json:"failed_edits"`
+	NoOpEdits        int `json:"no_op_edits"`
+	ChurnBannedEdits int `json:"churn_banned_edits"`
+	NoOpSigRefusals  int `json:"noop_sig_refusals"`
+	VerifyAttempts   int `json:"verify_attempts"`
+	// BaselineVerifyAttempts is the pre-edit baseline probe, reported separately so
+	// verify_attempts keeps meaning "checks run on the agent's work" and does not
+	// silently gain one on every run that takes a baseline.
+	BaselineVerifyAttempts int `json:"baseline_verify_attempts"`
+	AutoDelegations        int `json:"auto_delegations"`
+	SubagentSteps          int `json:"subagent_steps"`
+	RescueDelegations      int `json:"rescue_delegations"`
 	// Restarts / RestartRescues: a whole-run restart after a rail stopped a
 	// non-converging run, and how many of those second attempts succeeded. Without
 	// these in the JSON there is no way to tell a restart that never fired from one
@@ -444,6 +499,8 @@ type runSummary struct {
 	ElapsedSeconds float64 `json:"elapsed_seconds"`
 	TokensPerSec   float64 `json:"tokens_per_sec"`
 	Compactions    int     `json:"compactions"`
+	Distilled      int     `json:"distilled_entries,omitempty"`
+	DistillFails   int     `json:"distill_failures,omitempty"`
 	// Prompt-cache accounting. Omitted entirely when the provider reports none
 	// (most local servers), so a local run's JSON is byte-identical to before.
 	PromptTokens       int `json:"prompt_tokens,omitempty"`
@@ -504,6 +561,8 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		s.Steps = rep.Steps
 		s.Tokens = rep.TokensUsed
 		s.Compactions = rep.Compactions
+		s.Distilled = rep.Distilled
+		s.DistillFails = rep.DistillFailures
 		if rep.TokenRatio > 0 {
 			s.TokenRatio = round2(rep.TokenRatio)
 			// What a flat chars/4 would have implied, against what was really
@@ -535,6 +594,17 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 			if rep.FinalVerify.Err != nil {
 				vs.Error = rep.FinalVerify.Err.Error()
 			}
+			if bl := rep.Baseline; bl != nil {
+				vs.Baseline = &baselineSummary{
+					Attempted:   bl.Attempted,
+					Taken:       bl.Taken,
+					Passed:      bl.Passed,
+					Failing:     bl.Failing,
+					Unreachable: bl.Unreachable,
+					Tolerated:   bl.Tolerated,
+					Skipped:     bl.Skipped,
+				}
+			}
 			s.Verify = vs
 		}
 		if rep.Err != nil {
@@ -545,24 +615,29 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		if cfg.BenchmarkMode || !toolCountersZero(rep.ToolCounters) {
 			tc := rep.ToolCounters
 			s.ToolCounters = &toolCountersSummary{
-				InvalidToolCalls:  tc.InvalidToolCalls,
-				RepeatedReadFile:  tc.RepeatedReadFile,
-				DedupedReads:      tc.DedupedReads,
-				FinalAnswers:      tc.FinalAnswers,
-				RepeatedEdits:     tc.RepeatedEdits,
-				FailedEdits:       tc.FailedEdits,
-				NoOpEdits:         tc.NoOpEdits,
-				ChurnBannedEdits:  tc.ChurnBannedEdits,
-				NoOpSigRefusals:   tc.NoOpSigRefusals,
-				VerifyAttempts:    tc.VerifyAttempts,
-				AutoDelegations:   tc.AutoDelegations,
-				SubagentSteps:     tc.SubagentSteps,
-				RescueDelegations: tc.RescueDelegations,
-				Restarts:          tc.Restarts,
-				RestartRescues:    tc.RestartRescues,
-				ToolErrors:        tc.ToolErrors,
-				OffScopeEdits:     tc.OffScopeEdits,
-				ReadOnlyEdits:     tc.ReadOnlyEdits,
+				InvalidToolCalls: tc.InvalidToolCalls,
+				RepeatedReadFile: tc.RepeatedReadFile,
+				DedupedReads:     tc.DedupedReads,
+				FinalAnswers:     tc.FinalAnswers,
+				RepeatedEdits:    tc.RepeatedEdits,
+				FailedEdits:      tc.FailedEdits,
+				NoOpEdits:        tc.NoOpEdits,
+				ChurnBannedEdits: tc.ChurnBannedEdits,
+				NoOpSigRefusals:  tc.NoOpSigRefusals,
+				VerifyAttempts:   tc.VerifyAttempts,
+				// Assigning this was missed when the field was added, so the JSON reported
+				// baseline_verify_attempts:0 on a run whose human summary said 1 — the two
+				// outputs contradicting each other about the same run. The whole point of a
+				// separate counter is that the baseline probe's cost is VISIBLE.
+				BaselineVerifyAttempts: tc.BaselineVerifyAttempts,
+				AutoDelegations:        tc.AutoDelegations,
+				SubagentSteps:          tc.SubagentSteps,
+				RescueDelegations:      tc.RescueDelegations,
+				Restarts:               tc.Restarts,
+				RestartRescues:         tc.RestartRescues,
+				ToolErrors:             tc.ToolErrors,
+				OffScopeEdits:          tc.OffScopeEdits,
+				ReadOnlyEdits:          tc.ReadOnlyEdits,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
@@ -611,6 +686,13 @@ func correctionCount(railFires map[string]int) int {
 
 // finalReason returns the most specific terminal class for the run.
 func finalReason(s runSummary) string {
+	// A success reached on a STILL-RED verify is not the same outcome as a green one,
+	// and a harness must be able to tell them apart without parsing prose. This value
+	// can only appear on the new baseline-tolerated path (agent/baseline.go), so every
+	// pre-existing run reports exactly what it reported before.
+	if s.Verify != nil && s.Verify.Baseline != nil && s.Verify.Baseline.Tolerated {
+		return "success_baseline_tolerated"
+	}
 	if s.FailureDetail != nil && s.FailureDetail.Class != "" {
 		return s.FailureDetail.Class
 	}
@@ -760,7 +842,12 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 func verifyFailure(rep *agent.Report, detail *failureDetail) (string, *failureDetail) {
 	detail.Source = "verify"
 	detail.Class = "verify_failed"
-	line := firstNonEmptyLine(rep.FinalVerify.Stdout, rep.FinalVerify.Stderr)
+	// The FAILING line, not merely the first one. firstNonEmptyLine alone reported a
+	// PASSING assertion (or a runner banner) as the reason the run failed, because in
+	// every real test runner the first line of output is a header or a green tick —
+	// observed in a captured KLOO_RESULT_JSON. Fall back to the first non-empty line
+	// only when nothing in the output looks like a failure at all.
+	line := firstFailingLine(rep.FinalVerify.Stdout, rep.FinalVerify.Stderr)
 	if line != "" {
 		detail.Message = boundedString(line, 240)
 	}
@@ -926,6 +1013,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("churn_banned_edits", c.ChurnBannedEdits)
 	add("noop_sig_refusals", c.NoOpSigRefusals)
 	add("verify_attempts", c.VerifyAttempts)
+	add("baseline_verify_attempts", c.BaselineVerifyAttempts)
 	add("auto_delegations", c.AutoDelegations)
 	add("subagent_steps", c.SubagentSteps)
 	add("rescue_delegations", c.RescueDelegations)
@@ -935,6 +1023,50 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)
 	return strings.Join(parts, " ")
+}
+
+// failureLineMarkers are the shapes a test runner / compiler uses to mark a failure.
+// Deliberately broad and lowercase-matched: naming a wrong line is a reporting bug,
+// naming none falls back to the old behaviour.
+var failureLineMarkers = []string{"×", "✕", "✖", "fail", "error", "panic:", "assert", "expected"}
+
+// passLine reports whether a line is announcing a PASS, so it is never quoted as
+// the reason a run failed.
+func passLine(line string) bool {
+	for _, p := range []string{"✓", "√", "✔", "ok ", "PASS", "SUCCESS"} {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return strings.HasSuffix(line, "SUCCESS")
+}
+
+// firstFailingLine returns the first line that looks like a FAILURE; failing that,
+// the first line that at least is not announcing a pass; failing that, the first
+// non-empty line (the previous behaviour, so nothing ever reports an empty reason).
+func firstFailingLine(values ...string) string {
+	var neutral string
+	for _, v := range values {
+		for _, raw := range strings.Split(v, "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || passLine(line) {
+				continue
+			}
+			low := strings.ToLower(line)
+			for _, m := range failureLineMarkers {
+				if strings.Contains(low, m) {
+					return line
+				}
+			}
+			if neutral == "" {
+				neutral = line
+			}
+		}
+	}
+	if neutral != "" {
+		return neutral
+	}
+	return firstNonEmptyLine(values...)
 }
 
 func firstNonEmptyLine(values ...string) string {

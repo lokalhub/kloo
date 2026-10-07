@@ -64,9 +64,19 @@ func TestSplitBoundsLargeWindows(t *testing.T) {
 	const window = 900_000
 	const defaultCap = 32768
 
-	// Capacity no longer scales with the window: the cap binds.
-	if got, want := triggerTokens(window), defaultWorkingSetTokens; got != want {
+	// Capacity no longer scales with the window IN PROPORTION: the cap binds. It is
+	// not a flat constant either — a window-blind 32768 meant kloo used 3.6% of a
+	// 900k window, refusing context already paid for. The cap now follows the
+	// geometric-mean curve, so what is asserted is the curve's value at this window,
+	// and the property under test is unchanged: the trigger is far below the
+	// fraction, and sublinear in the window.
+	if got, want := triggerTokens(window), WorkingSetTokensFor(window); got != want {
 		t.Errorf("compaction trigger = %d, want the working-set cap %d", got, want)
+	}
+	// Sublinear, not merely bounded: the curve must stay far under the proportional
+	// trigger that caused the 1.29M-token run.
+	if got := triggerTokens(window); got >= 630_000/3 {
+		t.Errorf("trigger %d is not meaningfully below the proportional 630000", got)
 	}
 	// ...and the old proportional trigger is one flag away.
 	func() {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
@@ -130,9 +131,27 @@ func EffectiveCuratorBudget(window, configured int) int {
 // you already have, so a bigger window should keep more of it. Only the repo map
 // (which kloo re-assembles and re-pays for each turn) is appetite.
 func hotBudgetTokens(window int) int {
-	// Against the same base as the map: usable window, then the trigger. Using the
-	// RAW window here was half of why the two budgets overflowed the trigger.
-	return int(float64(usableWindow(window)) * triggerFrac * hotBudgetFrac)
+	// The working-set cap applies HERE too, and that is the fix.
+	//
+	// The cap used to lower only the TRIGGER — the point at which compaction is
+	// entered — and leave the amount KEPT derived straight from the window. So
+	// compaction was entered and then discovered it was not required to fold
+	// anything. Measured live, a 23-step run with --working-set-tokens 12000:
+	// trigger 12000, tail still allowed 26423, compactions 0, nothing shed, while
+	// `kloo doctor` reported "BINDING — holds the prompt here". It held it nowhere.
+	//
+	// At the default the number barely moves (26423 -> 26377 at ctx 131072), and at
+	// any window where the fraction is already tighter than the cap it does not move
+	// at all — so no benched small-ctx behaviour changes.
+	//
+	// NOT fixed here, deliberately: usableWindow is applied a SECOND time below.
+	// Assemble is handed the already-usable window (loop.go passes usableWindow(ctx))
+	// and triggerTokens treats it that way, so these two budgets disagree about what
+	// `window` means and the hot budget is ~20% smaller than the fractions describe.
+	// That is a real defect, but correcting it moves every small-ctx run, and there
+	// is no evidence that a larger hot budget there is better. Two changes with
+	// evidence for one is how a regression becomes unattributable.
+	return int(float64(capWorkingSet(int(float64(usableWindow(window))*triggerFrac), window)) * hotBudgetFrac)
 }
 
 // summaryPrefix labels the running-summary slot inserted right after the task.
@@ -166,6 +185,12 @@ type workingMemory struct {
 	// into the counted placeholder, so the summary itself stays bounded. Monotonic,
 	// like folded.
 	droppedEntries int
+	// distilled counts entries folded into a model-written brief; distillFailures
+	// counts the times the summariser could not be used and they were dropped
+	// instead. Both are reported so a run that is quietly losing its record is
+	// visible rather than inferred.
+	distilled       int
+	distillFailures int
 }
 
 // summaryPlaceholder is the one line that stands in for collapsed entries. It
@@ -194,7 +219,7 @@ func summaryPlaceholder(n int) string {
 // only touched if dropping everything else still leaves the summary over budget.
 //
 // Returns true when anything was dropped.
-func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
+func (w *workingMemory) collapseSummary(budget int, est func(string) int, distill func([]string) (string, error)) bool {
 	if budget <= 0 || len(w.foldedEntries) == 0 {
 		return false
 	}
@@ -203,6 +228,12 @@ func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
 	}
 	target := int(float64(budget) * lowWaterFrac)
 	dropped := false
+	// Entries leaving the summary are COLLECTED, not discarded on the spot: if a
+	// distiller is wired, they are handed to the model and come back as one brief.
+	// Collected in chronological order (firstDroppable walks oldest-first within a
+	// class, but the two classes interleave in time) so the brief reads as a
+	// narrative rather than a shuffled list.
+	var gone []leavingEntry
 	// Pass 1: the incidental entries, oldest first.
 	// Pass 2 (only if still over): the actionable record, oldest first.
 	for _, durable := range []bool{false, true} {
@@ -214,14 +245,76 @@ func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
 			// Keep at least one real entry: a summary that is nothing but a
 			// placeholder tells the model less than the step counter already does.
 			if len(w.foldedEntries) <= 1 {
-				return dropped
+				return w.finishCollapse(gone, dropped, distill)
+			}
+			// Only the INCIDENTAL entries are ever handed to the summariser. The
+			// actionable record — applied edits, failures, read stubs — is dropped the
+			// old way if it has to go, never rewritten by a model.
+			//
+			// This is not caution, it is measured. Given six entries, five of them read
+			// stubs, plus the rail's own line "You have inspected 3 files without
+			// changing a single line", qwen3.8-next wrote back:
+			//
+			//	"Edited frontend/src/app/pages/game/game.page.ts"
+			//
+			// Nothing had been edited. It inverted the one fact the input stated
+			// outright and wrote it into the agent's memory as history — which is
+			// exactly how a run convinces itself it is already finished. A summariser
+			// may compress narration; it may not restate the record of what was done.
+			if distillableSummaryEntry(w.foldedEntries[i]) {
+				gone = append(gone, leavingEntry{idx: w.absoluteIndex(i), text: w.foldedEntries[i]})
+			} else {
+				w.droppedEntries++
 			}
 			w.foldedEntries = append(w.foldedEntries[:i], w.foldedEntries[i+1:]...)
-			w.droppedEntries++
 			dropped = true
 		}
 	}
-	return dropped
+	return w.finishCollapse(gone, dropped, distill)
+}
+
+// leavingEntry is a summary entry on its way out, with the position it held, so a
+// set removed across both passes can be restored to the order it happened in.
+type leavingEntry struct {
+	idx  int
+	text string
+}
+
+// absoluteIndex converts an index into foldedEntries into a monotonically growing
+// position, so entries removed across both passes can be re-ordered back into the
+// order they happened before the brief is written.
+func (w *workingMemory) absoluteIndex(i int) int { return w.droppedEntries + i }
+
+// finishCollapse turns the removed entries into a model-written brief, or — when
+// there is no distiller, or it fails — accounts for them as dropped exactly as
+// before. This is the fail-open path: distillation can only ever ADD information
+// back relative to the old behaviour.
+func (w *workingMemory) finishCollapse(gone []leavingEntry, dropped bool, distill func([]string) (string, error)) bool {
+	if len(gone) == 0 {
+		return dropped
+	}
+	if distill == nil {
+		w.droppedEntries += len(gone)
+		return dropped
+	}
+	sort.SliceStable(gone, func(a, b int) bool { return gone[a].idx < gone[b].idx })
+	texts := make([]string, 0, len(gone))
+	for _, g := range gone {
+		texts = append(texts, g.text)
+	}
+	brief, err := distill(texts)
+	if err != nil || strings.TrimSpace(brief) == "" {
+		// Unchanged behaviour on failure: the entries are gone and counted.
+		w.droppedEntries += len(gone)
+		w.distillFailures++
+		return dropped
+	}
+	// The brief goes to the FRONT: it describes the oldest part of the run, and the
+	// summary reads oldest-first. A previous brief is itself in `gone` (it is
+	// durable, so it leaves last), which makes this a summary of summaries.
+	w.foldedEntries = append([]string{distilledEntry(brief)}, w.foldedEntries...)
+	w.distilled += len(gone)
+	return true
 }
 
 // firstDroppable is the index of the oldest entry whose durability matches, or -1.
@@ -241,11 +334,37 @@ func (w *workingMemory) firstDroppable(durable bool) int {
 // editSigFromArgs, and a verify failure carries the test output that explains why
 // the run is still going. Everything else — read stubs, command echoes, padding
 // observations — is recoverable from the workspace or simply noise.
+// distillableSummaryEntry reports whether an entry may be handed to the model to
+// be rewritten. It is a SEPARATE question from durability, which only decides the
+// order things leave in — conflating the two broke the summary-of-summaries, since
+// a brief must go last AND still be re-summarisable.
+//
+// The rule: the model may compress narration; it may not restate the RECORD of what
+// the run did. An applied edit, a failure and a read stub are facts with a specific
+// shape, already one line each, and rewriting them reclaims nothing while risking
+// everything.
+//
+// Measured, which is why this exists at all: handed five read stubs and the rail's
+// own "You have inspected 3 files without changing a single line",
+// qwen3.8-next wrote back "Edited frontend/src/app/pages/game/game.page.ts".
+// It inverted the one fact its input stated and filed it as history.
+func distillableSummaryEntry(entry string) bool {
+	if strings.HasPrefix(entry, distilledPrefix) {
+		return true // a brief is itself narration: fold it into the next one
+	}
+	return !durableSummaryEntry(entry)
+}
+
 func durableSummaryEntry(entry string) bool {
 	switch {
 	case strings.HasPrefix(entry, tools.NameEditFile+" "), strings.HasPrefix(entry, tools.NameWriteFile+" "):
 		return true
 	case strings.Contains(entry, "FAIL"):
+		return true
+	case strings.HasPrefix(entry, distilledPrefix):
+		// A brief is the compacted form of everything before it. Dropping it loses
+		// the whole early run at once, so it leaves last — at which point it is
+		// folded into the NEXT brief rather than deleted.
 		return true
 	case strings.HasPrefix(entry, "[read "):
 		// A read stub is ALREADY the compacted form of a whole file dump: one line
@@ -372,7 +491,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	} else {
 		w.prevVerify = ""
 	}
-	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify, in.Exercises)
+	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify, in.Exercises, in.VerifyScopeNote)
 	fp, hasFile := filePin(in.EditPath, in.FreshFile, in.EditAnchor)
 
 	// Recent tail: prior-session turns (oldest) followed by this run's transcript
@@ -400,12 +519,14 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	if window <= 0 || projectedFull <= triggerTokens(window) {
 		out := assemble(task, nil, pinMsgs, allTail)
 		w.stats = MemoryStats{
-			PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
-			WindowTokens:   window,
-			Compactions:    w.compactions,
-			MapBudget:      in.MapBudget,
-			HotBudget:      hotBudget,
-			PinnedMessages: len(pinMsgs),
+			PromptTokens:    in.SystemTokens + tokensOfWith(out, in.estimate),
+			WindowTokens:    window,
+			Compactions:     w.compactions,
+			MapBudget:       in.MapBudget,
+			HotBudget:       hotBudget,
+			PinnedMessages:  len(pinMsgs),
+			Distilled:       w.distilled,
+			DistillFailures: w.distillFailures,
 		}
 		return out, nil
 	}
@@ -438,7 +559,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// the only thing that can reclaim space from it.
 	// Not counted as a separate compaction: it is part of the same shedding event,
 	// and double-counting it would misreport the ⟲ counter the UI and the bench read.
-	w.collapseSummary(int(float64(triggerTokens(window))*SummaryBudgetFrac()), in.estimate)
+	w.collapseSummary(int(float64(triggerTokens(window))*SummaryBudgetFrac()), in.estimate, in.Distill)
 	tail = allTail[w.folded:]
 	entries := w.summaryEntries()
 
@@ -516,15 +637,17 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	finalPins := rebuildPins()
 	out := assemble(task, entries, finalPins, tail)
 	w.stats = MemoryStats{
-		PinnedMessages: len(finalPins),
-		PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
-		WindowTokens:   window,
-		Compactions:    w.compactions,
-		SummaryTokens:  summaryTokens(entries, in.estimate),
-		DroppedTurns:   w.folded, // messages folded into the summary so far (monotonic)
-		TrimmedTail:    tailTrimmed,
-		MapBudget:      in.MapBudget,
-		HotBudget:      hotBudget,
+		PinnedMessages:  len(finalPins),
+		PromptTokens:    in.SystemTokens + tokensOfWith(out, in.estimate),
+		WindowTokens:    window,
+		Compactions:     w.compactions,
+		SummaryTokens:   summaryTokens(entries, in.estimate),
+		DroppedTurns:    w.folded, // messages folded into the summary so far (monotonic)
+		TrimmedTail:     tailTrimmed,
+		MapBudget:       in.MapBudget,
+		HotBudget:       hotBudget,
+		Distilled:       w.distilled,
+		DistillFailures: w.distillFailures,
 	}
 	return out, nil
 }
@@ -562,7 +685,7 @@ func assemble(task llm.Message, summaryEntries []string, pins, tail []llm.Messag
 // "accumulate for thirty turns before shedding anything". capWorkingSet only ever
 // lowers the result, so a window already tighter than the cap is untouched.
 func triggerTokens(window int) int {
-	return capWorkingSet(int(triggerFrac * float64(window)))
+	return capWorkingSet(int(triggerFrac*float64(window)), window)
 }
 
 // summaryTokens is the token cost of the summary slot for the given entries
@@ -600,13 +723,23 @@ func tokensOf(msgs []llm.Message) int {
 // pass/fail + exit code, and (on failure) the failing output verbatim — the one
 // signal the loop trusts, kept whole so the model sees exactly what failed.
 // Returns false when there is no verify signal yet.
-func verifyPin(v VerifyResult, repeated bool, exercises []string) (llm.Message, bool) {
+func verifyPin(v VerifyResult, repeated bool, exercises []string, scopeNote string) (llm.Message, bool) {
 	if v.Command == "" {
 		return llm.Message{}, false
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Last verify: %s\npassed=%t exit=%d", v.Command, v.Passed, v.ExitCode)
 	if !v.Passed {
+		// The reach verdict goes FIRST, above the failing output, because the output is
+		// what makes the failure look actionable. This pin is re-sent every turn for the
+		// rest of the run, so if it is silent about reach it is the most persistent
+		// instruction kloo gives — and in the incident (baseline.go) it pointed at an
+		// out-of-scope spec on 8 of 15 turns, long before any corrective spoke. Empty
+		// note ⇒ byte-identical to the pin as it was.
+		if scopeNote != "" {
+			b.WriteString("\n")
+			b.WriteString(scopeNote)
+		}
 		if repeated {
 			// #4: the failure is IDENTICAL to last turn — the model's change had no
 			// effect. Steer it off the repeat loop toward a different diagnosis.
