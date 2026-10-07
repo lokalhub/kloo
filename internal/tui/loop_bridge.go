@@ -116,6 +116,12 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 		if r.loop.Memory != nil {
 			r.send(memoryMsg{Compactions: r.loop.Memory.Stats().Compactions})
 		}
+		// Window occupancy from the last assembled prompt. A pure read of what
+		// buildPrompt already measured — it assembles nothing and costs the prompt
+		// nothing (agent/contextgauge.go).
+		if g := r.loop.ContextGauge(); g.Usable > 0 && g.Used > 0 {
+			r.send(contextMsg{Used: g.Used, Usable: g.Usable})
+		}
 	}
 	// Capture a compact, human-readable display log of THIS run for resume: the
 	// prompt, the assistant's prose per turn, and a one-line summary per tool call.

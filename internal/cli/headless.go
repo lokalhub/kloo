@@ -524,6 +524,18 @@ type runSummary struct {
 	// RailFires tallies the soft recovery rails that fired (corrective injected, run
 	// continued), keyed by rail name. Omitted when none fired, so a clean run's JSON is
 	// unchanged. Lets a benchmark assert a run's self-corrections (e.g. confirm-finish=1).
+	// Memory is the process-memory accounting: the ceiling in force, the peak
+	// resident set, and the last map assembly's content load. Emitted on EVERY run,
+	// not only one the ceiling stopped, because the peak against the ceiling is what
+	// says whether the ceiling is set sensibly — and because the previous OOM, at
+	// 44 GB, produced no record of anything at all (agent/memguard.go).
+	Memory *agent.MemoryGuardStats `json:"memory,omitempty"`
+	// Context is the window occupancy of the run's LAST assembled prompt, measured
+	// from that prompt rather than derived from the budget constants
+	// (agent/contextgauge.go). It makes "what was in the window when this run ended"
+	// answerable from the JSON instead of from a cumulative-spend counter that
+	// routinely exceeds the window by 10x.
+	Context      *agent.ContextGauge  `json:"context,omitempty"`
 	RailFires    map[string]int       `json:"rail_fires,omitempty"`
 	ToolCounters *toolCountersSummary `json:"tool_counters,omitempty"`
 	// B5 layered verifier hooks: the precheck/postcheck gates attempted for the
@@ -563,6 +575,15 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		s.Compactions = rep.Compactions
 		s.Distilled = rep.Distilled
 		s.DistillFails = rep.DistillFailures
+		mem := rep.Memory
+		s.Memory = &mem
+		if gauge := rep.Context; gauge.Messages > 0 {
+			// Only when a prompt was actually assembled. A run that stopped at the chat
+			// gate never built one, and emitting a zeroed gauge would read as "the window
+			// was empty" rather than "nothing was measured".
+			g := gauge
+			s.Context = &g
+		}
 		if rep.TokenRatio > 0 {
 			s.TokenRatio = round2(rep.TokenRatio)
 			// What a flat chars/4 would have implied, against what was really

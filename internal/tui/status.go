@@ -19,7 +19,15 @@ type statusData struct {
 	tokens      int
 	maxTokens   int
 	compactions int // working-memory compactions this run (⟲ marker; 0 ⇒ hidden)
-	mode        Mode
+	// ctxUsed / ctxUsable are WINDOW OCCUPANCY from the last assembled prompt
+	// (agent.ContextGauge) — not the token counter beside them, which is cumulative
+	// spend against the RUN budget and routinely exceeds the window by 10x because
+	// the whole prompt is counted every turn. Having only the second number on screen
+	// is why "how full is my context" was unanswerable. 0 ⇒ hidden, so a run with no
+	// gauge yet renders exactly as before.
+	ctxUsed   int
+	ctxUsable int
+	mode      Mode
 }
 
 // progressMsg is a loop-progress snapshot pumped into the program each step.
@@ -29,6 +37,20 @@ type progressMsg struct {
 	MaxSteps  int
 	Tokens    int
 	MaxTokens int
+}
+
+// contextMsg carries window occupancy to the status line. Like memoryMsg it rides
+// the existing progress plumbing and is nil-safe: no message is sent when nothing has
+// been assembled, so the field stays hidden and the header renders as before.
+type contextMsg struct {
+	Used   int
+	Usable int
+}
+
+// handleContext updates the occupancy field from a contextMsg.
+func (m Model) handleContext(msg contextMsg) (tea.Model, tea.Cmd) {
+	m.status.ctxUsed, m.status.ctxUsable = msg.Used, msg.Usable
+	return m, nil
 }
 
 // memoryMsg carries the working-memory compaction count for the status line. It
@@ -111,6 +133,13 @@ func (m Model) renderHeader() string {
 		tok = human(s.tokens) + "/" + human(s.maxTokens) + " tok"
 	}
 	right := fmt.Sprintf("%s · %s", step, tok)
+	// Window occupancy, beside the cumulative spend and deliberately labelled
+	// differently: `ctx 25%` is how full the window is right now, `14.4k/200k tok` is
+	// what the run has spent in total. They were previously indistinguishable because
+	// only the second one existed.
+	if s.ctxUsable > 0 && s.ctxUsed > 0 {
+		right += fmt.Sprintf(" · ctx %d%%", 100*s.ctxUsed/s.ctxUsable)
+	}
 	if s.compactions > 0 {
 		// Working memory folded the transcript this run — surfaced only when it
 		// actually happened, so a no-compaction run renders identically to before.
