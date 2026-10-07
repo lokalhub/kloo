@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
@@ -90,6 +91,7 @@ func (l *Loop) distiller(ctx context.Context) func([]string) (string, error) {
 			return "", fmt.Errorf("agent: distiller returned nothing")
 		}
 		l.observeUsage(resp.Usage)
+		logDistillation(entries, out)
 		return out, nil
 	}
 }
@@ -102,4 +104,24 @@ const distilledPrefix = "[earlier in this run] "
 // distilledEntry wraps a brief as a summary entry.
 func distilledEntry(brief string) string {
 	return distilledPrefix + strings.TrimSpace(brief)
+}
+
+// logDistillation appends what the summariser was given and what it wrote to
+// KLOO_DISTILL_LOG, when set. This pass REWRITES the run's own memory, and a
+// rewrite you cannot inspect is one you cannot trust: the only way to know whether
+// a brief kept the facts or quietly invented them is to read it next to its input.
+// Off unless the variable is set, and a logging failure is ignored — observability
+// must never be able to break the run it is observing.
+func logDistillation(entries []string, brief string) {
+	path := os.Getenv("KLOO_DISTILL_LOG")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "\n=== distilled %d entries -> %d chars ===\n--- in ---\n%s\n--- brief ---\n%s\n",
+		len(entries), len(brief), strings.Join(entries, "\n"), brief)
 }
