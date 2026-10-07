@@ -289,6 +289,13 @@ func TestEditCorrectiveReportsTheCounterTheNudgeFiredOn(t *testing.T) {
 	if !strings.Contains(corrective, "inspected 6 files") {
 		t.Fatalf("corrective does not report the six read-only turns it fired on:\n%s", corrective)
 	}
+	// And the baseline must NOT have pruned the failing list here. The failure is
+	// reachable, so it is the agent's to fix, and "Still failing: X" is the measured
+	// value of this corrective (kloo-bench A33). A baseline that silently removed it
+	// would trade one regression for another.
+	if !strings.Contains(corrective, "login.page.spec.ts") {
+		t.Fatalf("the corrective no longer names the reachable failure it must fix:\n%s", corrective)
+	}
 }
 
 // TestFailingAssertionKeepsItsPath: vitest names a failure as

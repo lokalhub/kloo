@@ -2045,14 +2045,32 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					l.editOnlyLeft = editOnlyBudget
 				}
 				// Only failures the agent could have caused, and could fix. A pre-existing
-				// red presented as "still failing" reads as an instruction to fix it.
+				// The FULL failing list, baseline-red entries included. Reaching here means
+				// the failure is NOT out of reach — the agent can fix it, and usually the
+				// task IS to fix the test that was already red. Filtering the baseline's own
+				// failures out here was tried and is wrong: it strips the "Still failing: X"
+				// line that is the measured value of this corrective (kloo-bench A33, where
+				// the rail pushed as hard as it could and never said what was broken). The
+				// baseline's job among the correctives is the out-of-reach branch above, not
+				// pruning failures the agent should be fixing.
+				//
 				// exploreTotal, NOT exploreStreak. The nudge fires on exploreTotal; the
 				// message quoted exploreStreak, which is RESET by every read that covers
 				// new ground — so a run reading twelve distinct files was told "You have
 				// inspected 0 files without changing a single line." An incoherent number
 				// in the one message designed to be obeyed.
-				convo = append(convo, editCorrective(exploreTotal, edited,
-					baseline.newFailures(failingAssertions(failingOutput(lastVerify))), l.verifyTestImports()))
+				//
+				// And when NO verify has run yet — a read-only opening, which is the shape of
+				// the incident — the baseline is the only red signal there is. Without this
+				// the corrective fires with no failing list at all and says only "make your
+				// best edit to the source file you believe is wrong", which is no help to a
+				// model that does not know which file that is. Empty on a green baseline, so
+				// a healthy project's corrective is unchanged.
+				failing := failingAssertions(failingOutput(lastVerify))
+				if len(failing) == 0 && baseline.Taken && !baseline.Passed {
+					failing = baseline.Failing
+				}
+				convo = append(convo, editCorrective(exploreTotal, edited, failing, l.verifyTestImports()))
 			} else {
 				convo = append(convo, exploreCorrective(exploreTotal)) // see above: the nudge fires on exploreTotal
 			}
