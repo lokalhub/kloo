@@ -70,6 +70,12 @@ func (w Workspace) WithPatchOnly(on bool) Workspace {
 	return w
 }
 
+// Scope returns the model-facing write policy attached to this workspace (nil when
+// none). Exposed so the agent loop can ask whether a file is writable BEFORE it
+// composes a corrective telling the model to write it — the write path's own check
+// answers the same question, but only after the model has already been denied.
+func (w Workspace) Scope() *ScopePolicy { return w.scope }
+
 // ScopeActive reports whether a scope policy constrains this workspace's writes.
 func (w Workspace) ScopeActive() bool { return w.scope.Active() }
 

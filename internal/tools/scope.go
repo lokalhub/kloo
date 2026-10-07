@@ -112,6 +112,25 @@ func (p *ScopePolicy) Active() bool {
 	return p != nil && (len(p.allow) > 0 || len(p.deny) > 0 || len(p.readOnly) > 0)
 }
 
+// AllowPatterns returns the allow globs as configured, for a message that has to
+// tell the model what it MAY change. Added for the out-of-scope verify corrective
+// (agent/baseline.go): a corrective that only says "that file is denied" leaves the
+// model to guess where it is allowed to work, and in the incident that motivated it
+// the model guessed wrong 21 times in a row.
+//
+// A nil/empty allow set returns nil — "everything in the jail except what deny and
+// read_only remove", which is not expressible as a list of allow patterns.
+func (p *ScopePolicy) AllowPatterns() []string {
+	if p == nil || len(p.allow) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p.allow))
+	for _, g := range p.allow {
+		out = append(out, g.pattern)
+	}
+	return out
+}
+
 // CanWrite evaluates whether tool may write relPath under this policy. Precedence
 // is deterministic and documented (A2): deny, then read_only, then outside_allow.
 // An empty allow set means "everything in the jail is allowed" unless deny/read_only
