@@ -70,8 +70,22 @@ func TestMemCeilingSignConvention(t *testing.T) {
 		{"off", 0},
 		{"disabled", 0},
 		{"2048", 2048 << 20},
-		{"1", 1 << 20},
+		{"64", 64 << 20}, // the smallest value that can mean a real intent
 		{"nonsense", -1}, // unreadable ⇒ the default, never a silent disable
+		// A QUANTITY knob must not inherit envTri's boolean words. envTri maps
+		// on/true/yes/always to 1, and reading that as 1 MiB gave a ceiling every live
+		// process is already over — so KLOO_MEM_CEILING_MB=on aborted every run at step
+		// one. `=on` is a very plausible thing to type at a guard that is already on by
+		// default, so it must mean "use the default", not "fail everything".
+		{"on", -1},
+		{"true", -1},
+		{"yes", -1},
+		{"always", -1},
+		{"default", -1},
+		// Likewise a positive number too small to be anyone's intent: it can only break
+		// every run, so it degrades to the default rather than bricking the tool.
+		{"1", -1},
+		{"63", -1},
 	}
 	for _, tc := range cases {
 		t.Setenv(EnvMemCeilingMB, tc.env)
@@ -131,13 +145,20 @@ func TestDefaultMemCeilingTracksTheBudgetTheProcessIsUnder(t *testing.T) {
 // and could take the desktop down. So a trip must name the limit, the observation,
 // and the way out — without a rebuild.
 func TestMemCeilingTripsCleanlyWithAnActionableMessage(t *testing.T) {
-	// 1 MiB ceiling: any live process is over it, so the trip is observed rather than
-	// simulated, and nothing is allocated to get there.
-	t.Setenv(EnvMemCeilingMB, "1")
+	// The trip is proved by REPORTING a large resident set, not by reaching one.
+	// Nothing is allocated: a guard whose test must allocate 8 GiB to prove it works
+	// is a guard nobody runs, on a machine that has already had one unplanned restart.
+	defer func(saved func() (uint64, error)) { rssProbe = saved }(rssProbe)
+	rssProbe = func() (uint64, error) { return 9 << 30, nil } // 9 GiB
+
+	t.Setenv(EnvMemCeilingMB, "") // the computed default, 8 GiB on a large box
 	l := &Loop{}
 	rss, over := l.observeRSS()
 	if !over {
-		t.Fatalf("a 1 MiB ceiling must trip; rss was %d", rss)
+		t.Fatalf("9 GiB resident must trip the default ceiling (%d); rss read as %d", memCeilingBytes(), rss)
+	}
+	if rss != 9<<30 {
+		t.Errorf("rss = %d, want the injected 9 GiB", rss)
 	}
 	if l.peakRSS == 0 || l.peakRSS < rss {
 		t.Errorf("peak RSS not recorded: peak %d, rss %d", l.peakRSS, rss)
@@ -161,6 +182,43 @@ func TestMemCeilingTripsCleanlyWithAnActionableMessage(t *testing.T) {
 	st := (&Loop{}).memoryStats()
 	if st.CeilingBytes <= 0 || st.CeilingSource != "default" || st.RSSBytes == 0 {
 		t.Errorf("memoryStats incomplete on a normal run: %+v", st)
+	}
+}
+
+// TestMemCeilingStopLineIsWellFormed: the report renders evidence as
+// "(limit %s, observed %s)", so putting the advice paragraph into Observed stranded
+// the limit after a slash at the end of a wall of text. Limit and Observed stay
+// short; the advice gets its own line.
+func TestMemCeilingStopLineIsWellFormed(t *testing.T) {
+	rep := &Report{
+		Reason: ReasonBudgetExceeded,
+		Steps:  1,
+		Budget: &BudgetEvidence{Kind: BudgetMemory, Limit: "8.00 GiB", Observed: "9.00 GiB resident"},
+	}
+	s := rep.String()
+	if !strings.Contains(s, "(limit 8.00 GiB, observed 9.00 GiB resident)") {
+		t.Errorf("the limit/observed clause is malformed:\n%s", s)
+	}
+	// The advice must be present, and on a line of its own rather than inside the
+	// parenthetical.
+	lines := strings.Split(s, "\n")
+	var adviceLine string
+	for _, ln := range lines {
+		if strings.Contains(ln, EnvMemCeilingMB) {
+			adviceLine = ln
+		}
+	}
+	if adviceLine == "" {
+		t.Fatalf("the stop does not say how to act on it:\n%s", s)
+	}
+	if strings.Contains(adviceLine, "observed ") {
+		t.Errorf("the advice is still inside the limit/observed clause:\n%s", adviceLine)
+	}
+	// Another budget kind must be byte-identical to before — the advice is memory-only.
+	other := &Report{Reason: ReasonBudgetExceeded, Steps: 1,
+		Budget: &BudgetEvidence{Kind: BudgetSteps, Limit: "80", Observed: "81"}}
+	if strings.Contains(other.String(), EnvMemCeilingMB) {
+		t.Error("a steps-budget stop gained memory advice")
 	}
 }
 
@@ -203,11 +261,34 @@ func TestRepoMapContentLoadIsAggregateBounded(t *testing.T) {
 	}
 
 	// The default must be a NO-OP on every workspace measured: kloo's own tree loads
-	// 2.6 MiB and the largest real one to hand 535 MiB, both far under 1 GiB. So this
-	// cannot change any benchmark number.
+	// 2.6 MiB of mappable source and the largest real one to hand 535 MiB, both under
+	// 512 MiB... except the second, which is why the margin below matters rather than
+	// the no-op claim being absolute. It cannot change a benchmark number, since no
+	// bench repo is remotely this size.
 	t.Setenv(EnvRepoMapContentMB, "")
 	if b := repoMapContentBudget(); b != repoMapContentBudgetBytes {
 		t.Errorf("default budget = %d, want %d", b, repoMapContentBudgetBytes)
+	}
+	// THE TWO DEFAULTS MUST BE CONSISTENT WITH EACH OTHER. At the pessimistic end of
+	// the measured amplification (7.8x of source bytes), the map default must not
+	// imply a peak at or above the process ceiling — otherwise a workspace that
+	// legitimately saturates the map budget trips the memory guard as a CONSEQUENCE
+	// of the map budget, and the user reads that as a bug in kloo. A 1 GiB map budget
+	// failed exactly this check, which is why it is 512 MiB.
+	const worstAmplification = 7.8
+	t.Setenv(EnvMemCeilingMB, "")
+	ceiling := memCeilingBytes()
+	if ceiling <= 0 {
+		t.Skip("no ceiling in force on this platform")
+	}
+	budget := int64(repoMapContentBudgetBytes)
+	impliedPeak := int64(float64(budget) * worstAmplification)
+	if impliedPeak >= ceiling {
+		t.Errorf("the map content default (%d B) implies a peak of ~%d B at %.1fx, which is at or above the %d B memory ceiling — a legitimate large workspace would trip the guard because of the map default",
+			budget, impliedPeak, worstAmplification, ceiling)
+	}
+	if margin := float64(ceiling) / float64(impliedPeak); margin < 1.9 {
+		t.Errorf("margin between the implied map peak and the memory ceiling is only %.2fx, want >= 2x", margin)
 	}
 	full := loadMapContents(files, 1<<20, read)
 	if len(full.Contents) != len(files) || full.Skipped != 0 {

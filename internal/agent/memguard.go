@@ -116,7 +116,7 @@ const memCeilingFloorMB = 1024
 // KLOO_MEM_CEILING_MB being negative, or by this platform having no readable
 // /proc/self/status, in which case the value is academic).
 func memCeilingBytes() int64 {
-	switch n := envTri(EnvMemCeilingMB); {
+	switch n := envQuantityTri(EnvMemCeilingMB, minSensibleCeilingMB); {
 	case n < 0:
 		return 0 // explicitly disabled
 	case n > 0:
@@ -125,6 +125,42 @@ func memCeilingBytes() int64 {
 		return int64(defaultMemCeilingMB(totalRAMBytes())) << 20
 	}
 }
+
+// envQuantityTri is envTri for a knob whose positive values are a QUANTITY rather
+// than a flag.
+//
+// envTri maps the word forms on/true/yes/always to 1, which is right for a
+// forced-on boolean and catastrophic here: KLOO_MEM_CEILING_MB=on asked for a 1 MiB
+// ceiling, which every live process is already over, so it aborted every run at step
+// one. And `=on` is a very plausible thing to type at a guard — more so because the
+// guard is already on by default, which makes `=on` a no-op in the user's mind.
+//
+// So the affirmative words mean "use the built-in default" (0), which is what
+// someone typing them wants. The negatives still disable. A bare number is still
+// taken verbatim, and anything unreadable still degrades to the default rather than
+// to a silent disable.
+// minMB is the smallest positive value that could describe a real intent; below it
+// the value is treated as the default rather than as an instruction to fail
+// everything.
+func envQuantityTri(name string, minMB int) int {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "on", "true", "yes", "always", "default":
+		return 0
+	}
+	n := envTri(name)
+	if n > 0 && n < minMB {
+		// A positive value this small cannot be what anyone wants; it can only break
+		// every run. Fall back to the default rather than bricking the tool on a typo —
+		// the same fail-toward-working choice envTri makes for unreadable input.
+		return 0
+	}
+	return n
+}
+
+// minSensibleCeilingMB is the smallest memory ceiling that could describe a real
+// intent. kloo's baseline RSS is ~10 MiB and one repo-map assembly on its own tree is
+// ~24 MiB, so anything below this stops step one on every workspace.
+const minSensibleCeilingMB = 64
 
 // defaultMemCeilingMB computes the default from the machine's RAM. totalBytes of 0
 // (unreadable /proc/meminfo) falls back to the flat cap, which is the pre-existing
@@ -154,7 +190,7 @@ func MemCeilingSource() string {
 	switch {
 	case memCeilingBytes() == 0:
 		return "disabled"
-	case envTri(EnvMemCeilingMB) > 0:
+	case envQuantityTri(EnvMemCeilingMB, minSensibleCeilingMB) > 0:
 		return "env"
 	default:
 		return "default"
@@ -203,7 +239,7 @@ func (l *Loop) memoryStats() MemoryGuardStats {
 	switch {
 	case ceiling == 0:
 		source = "disabled"
-	case envTri(EnvMemCeilingMB) > 0:
+	case envQuantityTri(EnvMemCeilingMB, minSensibleCeilingMB) > 0:
 		source = "env"
 	}
 	return MemoryGuardStats{
@@ -225,7 +261,14 @@ var ErrNoRSS = errors.New("agent: no VmRSS available on this platform")
 // VmRSS, not VmHWM: the ceiling is about what kloo is holding NOW, so a run that
 // peaked during one repo-map assembly and gave the memory back should not be
 // stopped for it on step 300.
-func processRSS() (uint64, error) { return rssFrom("/proc/self/status") }
+func processRSS() (uint64, error) { return rssProbe() }
+
+// rssProbe is the reading in force. A var so a test can exercise the CEILING
+// without allocating: the trip is proved by reporting a large RSS, not by reaching
+// one. The machine this was written on had already had one unplanned restart, and a
+// guard whose test must allocate 8 GiB to prove it works is a guard nobody runs.
+// Never set outside tests.
+var rssProbe = func() (uint64, error) { return rssFrom("/proc/self/status") }
 
 // rssFrom is processRSS with the path injected, so the parser is tested against
 // real /proc text fixtures without needing a process of a given size — and so the
@@ -323,6 +366,16 @@ func meminfoTotalBytes() uint64 {
 // first (memory.max, the modern unified hierarchy), then the v1 location. 0 when
 // neither exists or the limit is "max" / absurdly large, which is how both
 // hierarchies spell "no limit" (v1 uses a sentinel near 2^63).
+//
+// KNOWN LIMITATION, stated rather than implied: only the ROOT of the mounted
+// hierarchy is read. A limit applied to a NESTED cgroup — `systemd-run
+// -p MemoryMax=`, or a k8s pod whose cgroupfs is not namespaced to the container —
+// is invisible here, because finding it means resolving this process's own path from
+// /proc/self/cgroup and walking up. The common container case (a namespaced
+// hierarchy, where the container's limit IS the root) is covered. Where it is not,
+// the default simply falls back to the host share, which is the pre-existing
+// behaviour and never tighter than it should be — so the failure mode is a ceiling
+// that is too loose, not one that stops a legitimate run.
 var cgroupMemoryPaths = []string{
 	"/sys/fs/cgroup/memory.max",
 	"/sys/fs/cgroup/memory/memory.limit_in_bytes",

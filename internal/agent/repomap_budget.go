@@ -48,18 +48,28 @@ import (
 // repoMapContentBudgetBytes bounds the TOTAL bytes of workspace source held in
 // memory for one map assembly.
 //
-// 1 GiB is chosen to be a NO-OP on every workspace measured, so this cannot change
-// the map — and therefore cannot change a benchmark number — for any tree anyone has
-// run kloo against: kloo's own tree loads 2.6 MiB and the largest real workspace to
-// hand loads 535 MiB, both comfortably under. It only binds where the old code was
-// heading for the kernel: at the measured 2.9x-7.8x amplification, 1 GiB of content
-// is ~3-8 GB of peak RSS, which is the same order as the 8 GiB process ceiling in
-// memguard.go rather than the 44 GB that killed it.
+// 512 MiB is chosen to be a NO-OP on every workspace measured — kloo's own tree
+// loads 2.6 MiB and the largest real workspace to hand loads 535 MiB of mappable
+// source — while keeping a margin against the PROCESS ceiling next door.
+//
+// THE TWO DEFAULTS HAVE TO BE CONSISTENT WITH EACH OTHER, which is why this is not
+// 1 GiB. At the pessimistic end of the measured amplification (7.4-7.8x of source
+// bytes), 1 GiB of content is ~7.5-8 GB of peak RSS — i.e. right at the 8 GiB
+// memory ceiling. A workspace that legitimately saturated the map default would then
+// trip the memory guard as a CONSEQUENCE of the map default, and the user would
+// correctly read that as a bug in kloo. 512 MiB restores a 2x margin at the
+// pessimistic constant (~4 GB against an 8 GiB ceiling) and ~1.5 GB at the constant
+// measured on real source.
 //
 // Sign convention as everywhere else in kloo (workingset.go, memguard.go): 0 means
 // the built-in default and a negative value disables the cap, restoring the
 // pre-v0.26 unbounded load.
-const repoMapContentBudgetBytes = 1 << 30 // 1 GiB
+const repoMapContentBudgetBytes = 512 << 20 // 512 MiB
+
+// minSensibleMapContentMB is the floor on an explicit setting, for the same reason
+// the memory ceiling has one: KLOO_MAP_CONTENT_MB=on parsed through envTri would mean
+// 1 MiB and silently reduce the repo map to a handful of files.
+const minSensibleMapContentMB = 1
 
 // EnvRepoMapContentMB backs the cap out in the field with no rebuild, in MiB.
 // 0/unset ⇒ the default above, negative ⇒ disabled (unbounded, the old behaviour).
@@ -67,7 +77,7 @@ const EnvRepoMapContentMB = "KLOO_MAP_CONTENT_MB"
 
 // repoMapContentBudget resolves the cap in bytes. 0 ⇒ no cap.
 func repoMapContentBudget() int64 {
-	switch n := envTri(EnvRepoMapContentMB); {
+	switch n := envQuantityTri(EnvRepoMapContentMB, minSensibleMapContentMB); {
 	case n < 0:
 		return 0
 	case n > 0:

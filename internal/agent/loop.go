@@ -1004,10 +1004,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// "kloo stopped itself", which is the entire point: being OOM-killed at 44 GB
 		// gave the user no diagnosis at all (memguard.go).
 		if rss, over := l.observeRSS(); over {
+			// Limit and Observed stay SHORT. The report renders them as
+			// "(limit %s, observed %s)", so putting the advice paragraph in Observed
+			// stranded the limit after a slash at the end of a wall of text. The advice
+			// is a line of its own in Report.String().
 			return finish(ReasonBudgetExceeded, nil, &BudgetEvidence{
 				Kind:     BudgetMemory,
 				Limit:    humanBytes(uint64(memCeilingBytes())),
-				Observed: humanBytes(rss) + " resident — " + memCeilingAdvice(),
+				Observed: humanBytes(rss) + " resident",
 			}, nil)
 		}
 		if churned, kind := l.Churn.Check(); churned {
@@ -2169,7 +2173,18 @@ func (l *Loop) treeFingerprint() string {
 // buildPrompt assembles ONE turn's complete request: the system prompt, the repo
 // map at its configured position, the history from working memory, the per-turn
 // pins and the tool schemas. It is the whole of what act() used to do before the
-// model call, extracted VERBATIM so that there is exactly one prompt-assembly path.
+// model call, so that there is exactly one prompt-assembly path.
+//
+// IT WAS RESTRUCTURED, NOT MOVED VERBATIM — check it rather than trusting this
+// comment. The message list used to be built as
+// `append([]llm.Message{sys}, hist...)` followed by a splice of the pinned map at
+// index 2; it is now a sequence of ps.add calls with an explicit `len(hist) > 0`
+// guard (standing in for the old splice's `len(msgs) >= 2`) and an explicit
+// `rest[:len(rest)-pins]` split to label history against pins. That is order- and
+// byte-equivalent, and master's TestMapPositionTailKeepsSystemStable,
+// TestShedOrderUnchangedByPinPlacement and the prefix-stability tests are what hold
+// it so. A comment claiming "verbatim" on the hot assembly path would tell the next
+// reviewer not to look.
 //
 // It was extracted for `kloo context` (contextgauge.go), and extraction rather than
 // reimplementation is the entire point: a gauge that rebuilt the prompt from the
@@ -2348,7 +2363,15 @@ func (l *Loop) buildPrompt(ctx context.Context, task string, convo []llm.Message
 		// MemoryStats.PinnedMessages reports. Clamped, because a stale stat must
 		// mislabel a message at worst, never slice out of range.
 		rest := hist[1:]
+		// Clamped on BOTH sides. The comment used to promise "never slice out of
+		// range" while guarding only the high side, and a negative PinnedMessages
+		// would panic at rest[:len(rest)-pins]. Not reachable today — MemoryStats
+		// counts a slice length — but a mislabelled message is the correct worst case
+		// for an instrument, not a crash in the prompt path it observes.
 		pins := pinnedMessages(l.Memory)
+		if pins < 0 {
+			pins = 0
+		}
 		if pins > len(rest) {
 			pins = len(rest)
 		}
@@ -2385,7 +2408,8 @@ func (l *Loop) buildPrompt(ctx context.Context, task string, convo []llm.Message
 	// Nothing below this line is sent.
 	// The schemas are sized through the SAME cached-chars → calibrated-tokens path
 	// that outputCap uses, rather than being re-marshalled for the gauge.
-	l.lastGauge = ps.gauge(l.estimatedPromptTokens(l.toolSchemaChars(req.Tools)), l.estimate)
+	schemaChars := l.toolSchemaChars(req.Tools)
+	l.lastGauge = ps.gauge(l.estimatedPromptTokens(schemaChars), schemaChars, l.estimate)
 	l.lastGauge.Ratio, l.lastGauge.Calibrated = l.gaugeRatio()
 	l.lastGauge.RSSBytes, _ = processRSS()
 	l.lastGauge.CeilingBytes = memCeilingBytes()

@@ -162,13 +162,19 @@ func measureContext(cfg config.Config, task, source string) (contextResult, erro
 	g := loop.ContextGauge()
 
 	res := contextResult{Task: task, Source: source, Model: cfg.Model, Gauge: g}
-	if !g.Calibrated {
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"token counts are ESTIMATED at %.2f chars/token (uncalibrated — no previous run in this workspace measured this model)", g.Ratio))
-	} else {
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"token counts are estimated at %.2f chars/token, measured on a previous run in this workspace", g.Ratio))
+	// Report the EFFECTIVE rate this prompt was charged at, derived from it, not the
+	// base constant. The base alone said "4.00 chars/token" while the estimator
+	// actually charged 3.82-3.88, because it bills high-entropy words at ~1.8 and a
+	// repo map is almost entirely paths and identifiers. A number announcing a
+	// precision it does not have is this feature's own failure mode.
+	basis := "uncalibrated — no previous run in this workspace measured this model"
+	if g.Calibrated {
+		basis = "calibrated against reported usage on a previous run in this workspace"
 	}
+	res.Notes = append(res.Notes, fmt.Sprintf(
+		"token counts are ESTIMATED: %s chars at an effective %.2f chars/token (base %.2f, %s); "+
+			"the estimator bills high-entropy text nearer 1.8, so the effective rate sits below the base",
+		commas(g.Chars), g.EffectiveRatio, g.Ratio, basis))
 	res.Notes = append(res.Notes,
 		"schema figure covers the BUILT-IN tools only — this command connects no MCP server, and MCP tools add to every request")
 	res.Notes = append(res.Notes,
@@ -207,8 +213,13 @@ func writeContextHuman(out io.Writer, res contextResult) {
 	mapNote := fmt.Sprintf("(%s)", g.MapPlacement)
 	if g.MapBudget > 0 {
 		mapNote = fmt.Sprintf("(%s; budget %s", g.MapPlacement, commas(g.MapBudget))
-		if g.MapOverBudgetPct > 0 {
-			mapNote += fmt.Sprintf(" — OVER by %d%%", g.MapOverBudgetPct)
+		// Printed whenever it is over, however slightly. The overshoot was computed and
+		// then never rendered, which is the measure-then-hide failure this whole
+		// feature exists to correct. A sub-1% excess is two estimators disagreeing
+		// (see ContextGauge.MapOverBudget) — saying "+104, 0.5%" is informative; saying
+		// nothing is not.
+		if g.MapOverBudget > 0 {
+			mapNote += fmt.Sprintf(" — over by %s (%.2f%%)", commas(g.MapOverBudget), g.MapOverBudgetPct)
 		}
 		mapNote += ")"
 	}

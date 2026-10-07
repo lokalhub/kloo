@@ -95,15 +95,82 @@ func TestContextGaugeIsMeasuredNotDerivedFromBudgets(t *testing.T) {
 	}
 }
 
-// TestContextGaugeAddsNoBytesToThePrompt is the zero-cost property. A ~22k repo map
-// re-prefilling every call was the worst performance bug kloo has had, and on the
-// user's endpoint a changed prompt HEAD costs ~15x. The gauge must be invisible to
-// the request.
+// TestContextGaugeReportsTheEffectiveNotTheNominalRatio: the first cut announced
+// "4.00 chars/token", which is the BASE constant and not what anything was charged.
+// tokens.EstimateAt bills high-entropy words at ~1.8 (estimate.go: Go source measured
+// at 3.75, go.sum hashes at 1.78), and a repo map is almost entirely long paths and
+// identifiers, so the effective rate lands below the base. A gauge announcing a
+// precision it does not have is this feature's own failure mode.
+func TestContextGaugeReportsTheEffectiveNotTheNominalRatio(t *testing.T) {
+	root := gaugeWorkspace(t)
+	l := gaugeLoop(t, root, 131072)
+	if _, _, err := l.BuildPromptForMeasurement(context.Background(), "make helper return 42"); err != nil {
+		t.Fatal(err)
+	}
+	g := l.ContextGauge()
+
+	if g.Chars <= 0 {
+		t.Fatal("Chars = 0; the effective ratio cannot be derived without it")
+	}
+	if g.EffectiveRatio <= 0 {
+		t.Fatal("EffectiveRatio = 0")
+	}
+	// Derived from THIS prompt, so it must reproduce exactly.
+	if want := float64(g.Chars) / float64(g.Used); g.EffectiveRatio != want {
+		t.Errorf("EffectiveRatio = %v, want Chars/Used = %v", g.EffectiveRatio, want)
+	}
+	// And it must actually differ from the nominal base, or the report is still just
+	// quoting a constant.
+	if g.EffectiveRatio >= g.Ratio {
+		t.Errorf("effective %.3f is not below the base %.3f — the entropy-aware estimator should bill a code-heavy prompt harder",
+			g.EffectiveRatio, g.Ratio)
+	}
+	if g.EffectiveRatio < 2.0 || g.EffectiveRatio > g.Ratio {
+		t.Errorf("effective ratio %.3f is implausible for a source-code prompt", g.EffectiveRatio)
+	}
+}
+
+// TestContextGaugeSurfacesTheMapOvershoot: the overshoot was computed and then never
+// rendered, and as an int it truncated a real 0.47% to 0 — measure-then-hide, which is
+// the thing this feature exists to correct.
+func TestContextGaugeSurfacesTheMapOvershoot(t *testing.T) {
+	ps := promptSections{MapBudget: 22019, Usable: 104857, Window: 131072}
+	// A map 104 tokens over its budget: the real measured overshoot.
+	ps.MapSection = strings.Repeat("x", 4*22123)
+	ps.add(sectSystem, llm.Message{Role: llm.RoleSystem, Content: "sys"})
+	g := ps.gauge(0, 0, func(s string) int { return len(s) / 4 })
+
+	if g.MapOverBudget != 104 {
+		t.Errorf("MapOverBudget = %d, want 104", g.MapOverBudget)
+	}
+	// A float, so a sub-1% overshoot is visible instead of truncated to zero.
+	if g.MapOverBudgetPct <= 0 || g.MapOverBudgetPct >= 1 {
+		t.Errorf("MapOverBudgetPct = %v, want a small positive fraction of a percent", g.MapOverBudgetPct)
+	}
+	// Within budget reports nothing, so the field cannot be read as noise.
+	ps.MapSection = strings.Repeat("x", 4*1000)
+	if under := ps.gauge(0, 0, func(s string) int { return len(s) / 4 }); under.MapOverBudget != 0 || under.MapOverBudgetPct != 0 {
+		t.Errorf("a map within budget reported an overshoot: %d / %v", under.MapOverBudget, under.MapOverBudgetPct)
+	}
+}
+
+// TestGaugeLabellingCarriesNoPromptContent is the zero-cost property, named for what
+// it actually guards. A ~22k repo map re-prefilling every call was the worst
+// performance bug kloo has had, and on the user's endpoint a changed prompt HEAD
+// costs ~15x, so the gauge must be invisible to the request.
 //
-// Proved by assembling the same turn with and without reading the gauge and
-// comparing the prompt byte for byte, and by asserting the labelling arrays carry no
-// content of their own.
-func TestContextGaugeAddsNoBytesToThePrompt(t *testing.T) {
+// IT WAS CALLED TestContextGaugeAddsNoBytesToThePrompt AND THAT NAME WAS A LIE.
+// Comparing two assemblies of the same build cannot detect an addition: buildPrompt
+// always computes the gauge, so both arms contain it and are identical by
+// construction. Review proved it by injecting 19 bytes into the system prompt — this
+// test passed. What catches that is a GOLDEN BYTE COUNT over a fixed fixture
+// (asserted below) plus master's pre-existing TestMapPositionTailKeepsSystemStable,
+// which did catch the mutation.
+//
+// What this test does guard, and what is worth guarding: the labels are metadata that
+// can never become prompt text, and reading the gauge has no side effect on the
+// request.
+func TestGaugeLabellingCarriesNoPromptContent(t *testing.T) {
 	root := gaugeWorkspace(t)
 	task := "make helper return 42"
 	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
@@ -153,6 +220,24 @@ func TestContextGaugeAddsNoBytesToThePrompt(t *testing.T) {
 		if len(m.Content) > 32 && strings.Contains(g.MapPlacement+g.Binding, m.Content[:32]) {
 			t.Error("the gauge is carrying prompt content")
 		}
+	}
+
+	// THE GOLDEN BYTE COUNT — the part that can actually catch an addition. The fixture
+	// is fixed, so the assembled non-map prompt has an exact size; anything the gauge
+	// (or anything else) appends to the system prompt or the hot set moves it. The repo
+	// map is excluded because it legitimately varies with the tree and the estimator,
+	// which is precisely why a whole-prompt golden would be unmaintainable here.
+	nonMap := 0
+	for i, m := range ps1.Msgs {
+		if ps1.Kinds[i] != sectMap {
+			nonMap += len(m.Content)
+		}
+	}
+	const wantNonMapBytes = 755 // system (fixture) + task; update ONLY with an explanation
+	if nonMap != wantNonMapBytes {
+		t.Errorf("non-map prompt bytes = %d, want %d — something was added to or removed from the prompt. "+
+			"If that was deliberate, say what in the commit; if not, the gauge is participating in the prompt.",
+			nonMap, wantNonMapBytes)
 	}
 }
 

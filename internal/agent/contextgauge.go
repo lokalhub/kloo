@@ -164,10 +164,25 @@ type ContextGauge struct {
 
 	// RepoMapTokens is what the map actually costs this turn; MapBudget is what it
 	// was authorised to cost. MapOverBudgetPct is how far over, 0 when within.
-	RepoMapTokens    int    `json:"repo_map_tokens"`
-	MapBudget        int    `json:"map_budget"`
-	MapOverBudgetPct int    `json:"map_over_budget_pct"`
-	MapPlacement     string `json:"map_placement"`
+	RepoMapTokens int `json:"repo_map_tokens"`
+	MapBudget     int `json:"map_budget"`
+	// MapOverBudget is RepoMapTokens - MapBudget when positive, and
+	// MapOverBudgetPct the same as a percentage — a FLOAT, because the real overshoot
+	// is a fraction of a percent and an int truncated it to 0, which is how a
+	// measured number came to be computed and then hidden.
+	//
+	// A small PROPORTIONAL overshoot is two estimators disagreeing, not an unenforced
+	// cap. Measured across a 3.2x change in the curator budget: 6,881 budget / 6,912
+	// actual (+0.45%) and 22,019 / 22,123 (+0.47%). An unenforced cap would overshoot
+	// by whatever the next file happened to be, not by a constant fraction.
+	// repomap.Assemble stays within budget by summing PER-ENTRY estimates; this gauge
+	// re-estimates the concatenated whole, and tokens.Estimate is not additive over
+	// concatenation. repoMapSection also prepends a 37-char header the budget was
+	// never charged for. So it is reported, and reported as small, rather than either
+	// hidden or alarming.
+	MapOverBudget    int     `json:"map_over_budget"`
+	MapOverBudgetPct float64 `json:"map_over_budget_pct"`
+	MapPlacement     string  `json:"map_placement"`
 
 	// PinnedHotTokens is everything regenerated every turn; HistoryTokens is the
 	// accumulated conversation. The split is the one memory.go works in and it is
@@ -192,12 +207,25 @@ type ContextGauge struct {
 
 	Messages int `json:"messages"`
 
-	// Ratio is the chars-per-token the estimator is using and Calibrated whether it
-	// was MEASURED against reported usage on a previous run in this workspace or is
-	// the flat chars/4 assumption. `kloo tokens` already qualifies its number this
-	// way; an unqualified token count invites being read as ground truth.
-	Ratio      float64 `json:"chars_per_token"`
-	Calibrated bool    `json:"calibrated"`
+	// Ratio is the BASE chars-per-token the estimator starts from, and Calibrated
+	// whether it was measured against reported usage on a previous run in this
+	// workspace or is the cold-start assumption.
+	//
+	// Ratio alone is not what this prompt was actually charged at, and saying it was
+	// would be this feature's own failure mode. tokens.EstimateAt charges
+	// high-entropy words at ~1.8 chars/token (estimate.go: Go source measured at
+	// 3.75, go.sum hashes at 1.78), and a repo map is almost nothing but long paths
+	// and identifiers — so the effective rate runs below the base. Measured on kloo's
+	// own tree: 8,659 chars of system prompt at 3.82, 85,940 chars of repo map at
+	// 3.88, against a base of 4.00.
+	//
+	// So Chars is reported and EffectiveRatio is Chars/Used — derived from this
+	// prompt rather than from a constant, which makes it the one ratio figure that
+	// cannot be wrong about this prompt.
+	Ratio          float64 `json:"base_chars_per_token"`
+	EffectiveRatio float64 `json:"effective_chars_per_token"`
+	Chars          int     `json:"chars"`
+	Calibrated     bool    `json:"calibrated"`
 
 	// ── NOT WINDOW OCCUPANCY ──────────────────────────────────────────────────
 	// RSSBytes is the process's resident set and CeilingBytes the memory guard in
@@ -217,7 +245,7 @@ type ContextGauge struct {
 // tool definitions sized with the same estimator as the messages, so both halves of
 // Used are on one scale — mixing a calibrated count with an uncalibrated one is the
 // bug MemoryInput.Estimate exists to prevent.
-func (ps promptSections) gauge(schemaTokens int, est func(string) int) ContextGauge {
+func (ps promptSections) gauge(schemaTokens, schemaChars int, est func(string) int) ContextGauge {
 	g := ContextGauge{
 		Window:       ps.Window,
 		Usable:       ps.Usable,
@@ -268,6 +296,12 @@ func (ps promptSections) gauge(schemaTokens int, est func(string) int) ContextGa
 		g.Used += est(m.Content)
 	}
 	g.Used += schemaTokens
+	// Characters, over the SAME set the tokens were summed over, so the effective
+	// rate below is this prompt's own and not a constant's.
+	g.Chars = messageChars(ps.Msgs) + schemaChars
+	if g.Used > 0 {
+		g.EffectiveRatio = float64(g.Chars) / float64(g.Used)
+	}
 	g.Free = g.Usable - g.Used
 	g.FreeToCompaction = g.Trigger - g.Used
 	// Which budget binds. capWorkingSet only ever LOWERS the fractional trigger, so
@@ -283,7 +317,8 @@ func (ps promptSections) gauge(schemaTokens int, est func(string) int) ContextGa
 	}
 	g.Unattributed = g.Used - (g.SystemTokens + g.SchemaTokens + g.RepoMapTokens + g.PinnedHotTokens + g.HistoryTokens)
 	if g.RepoMapTokens > 0 && ps.MapBudget > 0 && g.RepoMapTokens > ps.MapBudget {
-		g.MapOverBudgetPct = int(100 * float64(g.RepoMapTokens-ps.MapBudget) / float64(ps.MapBudget))
+		g.MapOverBudget = g.RepoMapTokens - ps.MapBudget
+		g.MapOverBudgetPct = 100 * float64(g.MapOverBudget) / float64(ps.MapBudget)
 	}
 	return g
 }
