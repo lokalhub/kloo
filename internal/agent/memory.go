@@ -491,7 +491,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	} else {
 		w.prevVerify = ""
 	}
-	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify, in.Exercises)
+	vp, hasVerify := verifyPin(in.LastVerify, repeatedVerify, in.Exercises, in.VerifyScopeNote)
 	fp, hasFile := filePin(in.EditPath, in.FreshFile, in.EditAnchor)
 
 	// Recent tail: prior-session turns (oldest) followed by this run's transcript
@@ -723,13 +723,23 @@ func tokensOf(msgs []llm.Message) int {
 // pass/fail + exit code, and (on failure) the failing output verbatim — the one
 // signal the loop trusts, kept whole so the model sees exactly what failed.
 // Returns false when there is no verify signal yet.
-func verifyPin(v VerifyResult, repeated bool, exercises []string) (llm.Message, bool) {
+func verifyPin(v VerifyResult, repeated bool, exercises []string, scopeNote string) (llm.Message, bool) {
 	if v.Command == "" {
 		return llm.Message{}, false
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Last verify: %s\npassed=%t exit=%d", v.Command, v.Passed, v.ExitCode)
 	if !v.Passed {
+		// The reach verdict goes FIRST, above the failing output, because the output is
+		// what makes the failure look actionable. This pin is re-sent every turn for the
+		// rest of the run, so if it is silent about reach it is the most persistent
+		// instruction kloo gives — and in the incident (baseline.go) it pointed at an
+		// out-of-scope spec on 8 of 15 turns, long before any corrective spoke. Empty
+		// note ⇒ byte-identical to the pin as it was.
+		if scopeNote != "" {
+			b.WriteString("\n")
+			b.WriteString(scopeNote)
+		}
 		if repeated {
 			// #4: the failure is IDENTICAL to last turn — the model's change had no
 			// effect. Steer it off the repeat loop toward a different diagnosis.

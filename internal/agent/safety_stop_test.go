@@ -47,6 +47,10 @@ func newScopedLoop(t *testing.T, srv *llmtest.Server, seed map[string]string, al
 		Budget:   &stubBudget{tripAt: 50},
 		Churn:    &stubChurn{},
 		Root:     canon,
+		// The policy the loop CONSULTS, as production wires it (cli/headless.go,
+		// cli/tui.go). Without it a scoped loop in a test would answer "everything is
+		// writable" to its own scope questions and the scope-aware rails would be dead.
+		Scope:    ws.Scope(),
 		Endpoint: srv.URL + "/v1",
 		Model:    "test-model",
 		System:   "you are kloo",

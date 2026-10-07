@@ -20,7 +20,13 @@ func (r *Report) String() string {
 
 	switch r.Reason {
 	case ReasonSuccess:
-		b.WriteString(" — verification passed")
+		// " — verification passed" is a lie on a baseline-tolerated success: the verify
+		// is still red. Say which kind of success this was (agent/baseline.go).
+		if r.Baseline != nil && r.Baseline.Tolerated {
+			b.WriteString(" — the change stands; the verify is still red with the SAME failures it had before the run, and they are outside the allowed edit scope")
+		} else {
+			b.WriteString(" — verification passed")
+		}
 	case ReasonBudgetExceeded:
 		if r.Budget != nil {
 			fmt.Fprintf(&b, " — %s budget exceeded (limit %s, observed %s)", r.Budget.Kind, r.Budget.Limit, r.Budget.Observed)
@@ -53,6 +59,22 @@ func (r *Report) String() string {
 		}
 		if out := strings.TrimSpace(r.FinalVerify.Stdout + "\n" + r.FinalVerify.Stderr); out != "" {
 			fmt.Fprintf(&b, "\n  output: %s", firstLine(out))
+		}
+	}
+
+	// The pre-edit baseline, when one was taken. Printed only then, so an unscoped
+	// run's report is byte-identical to before.
+	if bl := r.Baseline; bl != nil {
+		switch {
+		case !bl.Taken:
+			fmt.Fprintf(&b, "\n  baseline: not taken (%s)", bl.Skipped)
+		case bl.Passed:
+			b.WriteString("\n  baseline: verify was GREEN before the first edit")
+		default:
+			fmt.Fprintf(&b, "\n  baseline: verify was ALREADY RED before the first edit (%d known failure(s))", len(bl.Failing))
+			if len(bl.Unreachable) > 0 {
+				fmt.Fprintf(&b, "; implicated files are outside the edit scope: %s", strings.Join(bl.Unreachable, ", "))
+			}
 		}
 	}
 

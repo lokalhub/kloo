@@ -13,7 +13,7 @@ import (
 // "try a DIFFERENT fix" — the wrong axis. What is needed is a different FILE.
 func TestRepeatedFailureNamesOtherFiles(t *testing.T) {
 	v := VerifyResult{Command: "vitest", Passed: false, Stdout: "× reassigned receipt exports the new branch code"}
-	msg, ok := verifyPin(v, true, []string{"src/modules/export/queries.ts", "src/modules/export/types.ts"})
+	msg, ok := verifyPin(v, true, []string{"src/modules/export/queries.ts", "src/modules/export/types.ts"}, "")
 	if !ok {
 		t.Fatal("no verify pin produced")
 	}
@@ -30,7 +30,7 @@ func TestRepeatedFailureNamesOtherFiles(t *testing.T) {
 // tried, which is the opposite of the desired behaviour.
 func TestFirstFailureDoesNotRedirect(t *testing.T) {
 	v := VerifyResult{Command: "vitest", Passed: false, Stdout: "× something"}
-	msg, _ := verifyPin(v, false, []string{"src/a.ts"})
+	msg, _ := verifyPin(v, false, []string{"src/a.ts"}, "")
 	if strings.Contains(msg.Content, "probably NOT in that file") {
 		t.Fatalf("redirected on a first failure: %q", msg.Content)
 	}
@@ -39,7 +39,7 @@ func TestFirstFailureDoesNotRedirect(t *testing.T) {
 // TestPassingVerifyNeverRedirects.
 func TestPassingVerifyNeverRedirects(t *testing.T) {
 	v := VerifyResult{Command: "vitest", Passed: true}
-	msg, _ := verifyPin(v, true, []string{"src/a.ts"})
+	msg, _ := verifyPin(v, true, []string{"src/a.ts"}, "")
 	if strings.Contains(msg.Content, "probably NOT in that file") {
 		t.Fatalf("redirected on a green verify: %q", msg.Content)
 	}
