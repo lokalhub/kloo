@@ -146,6 +146,11 @@ const (
 	BudgetSteps     BudgetKind = "steps"
 	BudgetTokens    BudgetKind = "tokens"
 	BudgetWallClock BudgetKind = "wall-clock"
+	// BudgetMemory: the process crossed its resident-memory ceiling (memguard.go).
+	// A budget rather than its own stop reason because it IS one — a ceiling on a
+	// resource, checked at the step boundary — and because routing it here gives it
+	// the report, the run JSON and the rollback path without inventing machinery.
+	BudgetMemory BudgetKind = "memory"
 )
 
 // ChurnKind names which churn signal fired.
@@ -595,6 +600,15 @@ type Report struct {
 	// that call could not be used.
 	Distilled       int
 	DistillFailures int
+	// Memory is the process-memory accounting: the ceiling in force, the highest
+	// resident set seen, and the last turn's repo-map content load. Reported on EVERY
+	// run, not only one the ceiling stopped, because "how close did this get" is what
+	// says whether the ceiling is set sensibly — and because the previous OOM at
+	// 44 GB left no record of anything at all (memguard.go).
+	Memory MemoryGuardStats
+	// Context is the window occupancy of the run's LAST assembled prompt, measured
+	// from that prompt rather than derived from the budget constants (contextgauge.go).
+	Context ContextGauge
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
 	// RailFires tallies the SOFT recovery rails that fired this run (corrective

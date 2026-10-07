@@ -343,6 +343,22 @@ type Loop struct {
 	// toolCharsCache memoises the marshalled size of the tool schemas, which do
 	// not change within a run.
 	toolCharsCache int
+	// lastGauge is the window occupancy of the most recent assembled prompt
+	// (contextgauge.go), recorded by buildPrompt so the status line and the run
+	// report can read it without re-assembling. Read-only to everyone else.
+	lastGauge ContextGauge
+	// mapContentBytes / mapContentSkipped are the last map assembly's content load:
+	// bytes of workspace source held, and how many files the aggregate budget shed.
+	// Reported so a map that has quietly stopped describing most of the repo is
+	// visible — the working-set cap reported itself "BINDING" while binding nothing
+	// for three releases, and that was only found by measuring a run.
+	mapContentBytes   int64
+	mapContentSkipped int
+	// peakRSS is the highest resident-set size seen at a step boundary, in bytes.
+	// Reported whether or not the ceiling trips, because "how close did this run
+	// get" is the number that says whether the ceiling is set sensibly — and
+	// because being OOM-killed at 44 GB left no diagnosis at all.
+	peakRSS uint64
 }
 
 func (l *Loop) onState(s State) {
@@ -914,6 +930,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			DistillFailures:    distillFails,
 			RePrefill:          l.rePrefillStats(),
 			Ignored:            ignoredAll,
+			Memory:             l.memoryStats(),
+			Context:            l.lastGauge,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
 			ToolCounters:       counters,
 			Summary:            finishSummary,
@@ -979,6 +997,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		}
 		if tripped, kind := l.Budget.Check(); tripped {
 			return finish(ReasonBudgetExceeded, nil, l.budgetEvidence(kind), nil)
+		}
+		// THE MEMORY CEILING, checked at the step boundary like every other budget.
+		// A fourth dimension of the same stop rather than new machinery, so it gets
+		// the report, the JSON and the rollback path for free — and so a trip reads as
+		// "kloo stopped itself", which is the entire point: being OOM-killed at 44 GB
+		// gave the user no diagnosis at all (memguard.go).
+		if rss, over := l.observeRSS(); over {
+			return finish(ReasonBudgetExceeded, nil, &BudgetEvidence{
+				Kind:     BudgetMemory,
+				Limit:    humanBytes(uint64(memCeilingBytes())),
+				Observed: humanBytes(rss) + " resident — " + memCeilingAdvice(),
+			}, nil)
 		}
 		if churned, kind := l.Churn.Check(); churned {
 			// ESCALATE INSTEAD OF HALT (KLOO_CHURN_ESCALATE). Measured on kloo-bench
@@ -2136,10 +2166,23 @@ func (l *Loop) treeFingerprint() string {
 	return strconv.FormatUint(h.Sum64(), 16)
 }
 
-// act runs one model turn: assemble per-step context, call the model, and reduce
-// to a single tool call (recording any extras as ignored). A malformed/no-call
-// reply gets exactly one corrective re-prompt before surfacing an error.
-func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVerify VerifyResult, curEditPath string) (tools.Call, []tools.Call, llm.Usage, llm.Message, error) {
+// buildPrompt assembles ONE turn's complete request: the system prompt, the repo
+// map at its configured position, the history from working memory, the per-turn
+// pins and the tool schemas. It is the whole of what act() used to do before the
+// model call, extracted VERBATIM so that there is exactly one prompt-assembly path.
+//
+// It was extracted for `kloo context` (contextgauge.go), and extraction rather than
+// reimplementation is the entire point: a gauge that rebuilt the prompt from the
+// budget constants would reproduce the fiction `kloo doctor` already tells about
+// hotBudgetTokens, which was wrong for three releases while doctor reported it as
+// "BINDING". The gauge measures THIS function's output or it measures nothing.
+//
+// It returns the prompt in labelled sections (promptSections) and also records the
+// measurement on the Loop, so the TUI status line and the run report can read the
+// last turn's occupancy without re-assembling anything. The labelling and the
+// measurement add NO bytes to the request: ps.Msgs is the request, and the gauge is
+// computed after markCacheBreakpoint from values that already exist.
+func (l *Loop) buildPrompt(ctx context.Context, task string, convo []llm.Message, lastVerify VerifyResult, curEditPath string) (promptSections, llm.ChatRequest, error) {
 	// Repo-map budget: the legacy path keeps the full window (byte-identical to
 	// pre-P00); the memory path caps it at mapBudgetTokens so the map can no
 	// longer eat the whole window (the Lead-1 fix — gated behind Memory != nil).
@@ -2213,6 +2256,18 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		}
 	}
 	sys := llm.Message{Role: llm.RoleSystem, Content: sysContent}
+	// Where the map ended up, for the gauge. Derived from the placement decision
+	// just made rather than from l.mapPosition(), because KLOO_NO_MAP and an empty
+	// map both resolve to "none" whatever the configured position says.
+	mapPlacement := "none"
+	switch {
+	case pinnedMap != "":
+		mapPlacement = "pinned"
+	case mapSection != "" && l.mapAtTail():
+		mapPlacement = "tail"
+	case mapSection != "":
+		mapPlacement = "system"
+	}
 	// The memory assembler budgets against everything that is NOT history, so the
 	// map counts wherever it sits — placement must not change the token math.
 	nonHistoryTokens := l.estimate(sysContent)
@@ -2243,7 +2298,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		})
 		if merr != nil {
 			// ErrWindowTooSmall ⇒ a config error surfaced as a ReasonError stop.
-			return tools.Call{}, nil, llm.Usage{}, llm.Message{}, merr
+			return promptSections{}, llm.ChatRequest{}, merr
 		}
 		hist = h
 	} else {
@@ -2258,18 +2313,58 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			tailMsgs = append(tailMsgs, llm.Message{Role: llm.RoleUser, Content: r})
 		}
 	}
-	msgs := append([]llm.Message{sys}, hist...)
+	// The prompt, assembled into LABELLED sections. ps.Msgs IS the request's message
+	// list; the labels ride beside it in a parallel []string that is never
+	// serialised, so the accounting costs the prompt exactly zero bytes
+	// (contextgauge.go, TestContextGaugeAddsNoBytesToThePrompt).
+	//
+	// Labelling here rather than classifying afterwards is not tidiness: by the time
+	// the todo list and the tail map have been appended, the per-turn pins are no
+	// longer the TRAILING messages that MemoryStats.PinnedMessages counts, so a
+	// post-hoc classifier would have to re-derive the layout from the same budget
+	// constants the gauge exists to be independent of.
+	ps := promptSections{
+		// Exactly one of the two is non-empty by the placement block above.
+		MapSection:   mapSection + pinnedMap,
+		MapPlacement: mapPlacement,
+		Window:       l.ContextTokens,
+		Usable:       win,
+		MapBudget:    mapBudget,
+	}
+	ps.add(sectSystem, sys)
 	// Pinned map: a FIXED index, immediately after the task (hist[0]), so it sits
-	// inside the cacheable prefix and never moves. Safe to splice here — unlike a
-	// tool result, the map belongs to no assistant turn.
-	if pinnedMap != "" && len(msgs) >= 2 {
-		out := append([]llm.Message{}, msgs[:2]...)
-		out = append(out, llm.Message{Role: llm.RoleUser, Content: pinnedMap})
-		msgs = append(out, msgs[2:]...)
+	// inside the cacheable prefix and never moves. Emitted in place here instead of
+	// being spliced in afterwards — unlike a tool result, the map belongs to no
+	// assistant turn. It is still DROPPED when there is no history at all, which is
+	// what the old splice did: it required len(msgs) >= 2 and silently did nothing
+	// below that.
+	if len(hist) > 0 {
+		ps.add(sectHot, hist[0]) // the task: pinned for the run, never dropped
+		if pinnedMap != "" {
+			ps.add(sectMap, llm.Message{Role: llm.RoleUser, Content: pinnedMap})
+		}
+		// Then the running-summary slot and the recent tail (accumulated history),
+		// and finally the per-turn pins, which are the trailing N that
+		// MemoryStats.PinnedMessages reports. Clamped, because a stale stat must
+		// mislabel a message at worst, never slice out of range.
+		rest := hist[1:]
+		pins := pinnedMessages(l.Memory)
+		if pins > len(rest) {
+			pins = len(rest)
+		}
+		ps.add(sectHistory, rest[:len(rest)-pins]...)
+		ps.add(sectHot, rest[len(rest)-pins:]...)
 	}
 	// Appended AFTER history, never spliced into it: a tool result must stay
 	// adjacent to the assistant message that requested it.
-	msgs = append(msgs, tailMsgs...)
+	for _, m := range tailMsgs {
+		if isMapMessage(m) {
+			ps.add(sectMap, m)
+			continue
+		}
+		ps.add(sectHot, m) // the todo list, re-rendered every turn
+	}
+	msgs := ps.Msgs
 	// Prompt-cache breakpoint: mark the LAST message of the stable prefix — the
 	// final tail message, immediately above the per-turn pins, which are rewritten
 	// every turn; a breakpoint below them would cache nothing and burn the slot.
@@ -2284,6 +2379,29 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		Messages:    msgs,
 		Temperature: l.Temperature,
 	}, l.turnRegistry(lastVerify.Passed)))
+	// MEASURE, LAST AND READ-ONLY. After markCacheBreakpoint and after
+	// BuildRequest, so the gauge sees the final prompt and cannot perturb it: it
+	// reads ps.Msgs and the marshalled schemas and writes one struct onto the Loop.
+	// Nothing below this line is sent.
+	// The schemas are sized through the SAME cached-chars → calibrated-tokens path
+	// that outputCap uses, rather than being re-marshalled for the gauge.
+	l.lastGauge = ps.gauge(l.estimatedPromptTokens(l.toolSchemaChars(req.Tools)), l.estimate)
+	l.lastGauge.Ratio, l.lastGauge.Calibrated = l.gaugeRatio()
+	l.lastGauge.RSSBytes, _ = processRSS()
+	l.lastGauge.CeilingBytes = memCeilingBytes()
+	return ps, req, nil
+}
+
+// act runs one model turn: assemble per-step context, call the model, and reduce
+// to a single tool call (recording any extras as ignored). A malformed/no-call
+// reply gets exactly one corrective re-prompt before surfacing an error.
+func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVerify VerifyResult, curEditPath string) (tools.Call, []tools.Call, llm.Usage, llm.Message, error) {
+	ps, req, aerr := l.buildPrompt(ctx, task, convo, lastVerify, curEditPath)
+	if aerr != nil {
+		// ErrWindowTooSmall ⇒ a config error surfaced as a ReasonError stop.
+		return tools.Call{}, nil, llm.Usage{}, llm.Message{}, aerr
+	}
+	msgs := ps.Msgs
 	// Measure what we actually SEND: messages PLUS the tool schemas, which the
 	// provider also counts in prompt_tokens. Counting message text alone made the
 	// measured ratio collapse to the clamp floor on short conversations, where the
@@ -2563,18 +2681,19 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 	// empty contract. (repomap excludes >1MiB at walk time; the cap here is a
 	// defensive guard against re-reading a huge file into memory — the OOM fixed
 	// in 171fcbf.)
+	// THE PER-FILE CAP WAS NEVER A BOUND ON THE SUM. This loop used to hold every
+	// mappable file's bytes at once, so the only bound was (file count) x 1 MiB.
+	// Measured: 535 MiB of real source loaded here peaks the process at 1.55 GB, and
+	// the growth is linear in the source bytes — which is the 44 GB kill, one level
+	// up from the per-file read that was blamed for it. loadMapContents adds the
+	// aggregate budget and sheds deterministically (repomap_budget.go).
 	contents := map[string][]byte{}
 	if ws, err := tools.NewWorkspace(l.Root); err == nil {
-		for _, f := range files {
-			if f.Size > repoMapFileCap {
-				continue
-			}
-			data, err := tools.ReadFile(ws, f.Path)
-			if err != nil {
-				continue
-			}
-			contents[f.Path] = []byte(data)
-		}
+		load := loadMapContents(files, repoMapFileCap, func(p string) (string, error) {
+			return tools.ReadFile(ws, p)
+		})
+		contents = load.Contents
+		l.mapContentSkipped, l.mapContentBytes = load.Skipped, load.Bytes
 	}
 
 	ranked := repomap.Rank(repomap.RankInput{Files: files, Symbols: byFile, Task: task, Contents: contents,
@@ -4023,6 +4142,18 @@ func (l *Loop) observeUsage(u llm.Usage) {
 		l.Tokens.Observe(l.lastPromptChars, u.PromptTokens)
 	}
 	l.lastPromptChars = 0
+}
+
+// gaugeRatio is the chars-per-token the gauge's numbers were produced at, and
+// whether it was measured or assumed. `kloo tokens` already qualifies its estimate
+// this way; a bare token count invites being read as ground truth, and the whole
+// reason this gauge exists is that an unqualified number ("headroom: 104848") was
+// believed.
+func (l *Loop) gaugeRatio() (float64, bool) {
+	if r := l.tokenRatio(); r > 0 {
+		return r, true
+	}
+	return tokens.DefaultCharsPerToken, false
 }
 
 // tokenRatio is the run's measured chars-per-token, or 0 when nothing was
