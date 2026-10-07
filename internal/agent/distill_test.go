@@ -170,3 +170,61 @@ func TestBriefSurvivesTheNextOverflow(t *testing.T) {
 		t.Errorf("the previous brief was not folded into the next one:\n%s", seen[len(seen)-1])
 	}
 }
+
+// TestTheRecordIsNeverHandedToTheModel is a regression test for a real, measured
+// hallucination, not a hypothetical.
+//
+// qwen3.8-next was given six summary entries — five read stubs and the exploration
+// rail's own line, "You have inspected 3 files without changing a single line" —
+// and wrote back:
+//
+//	"Edited frontend/src/app/pages/game/game.page.ts"
+//
+// Nothing had been edited. It inverted the one fact its input stated outright and
+// filed it into the agent's own memory as history, which is precisely how a run
+// talks itself into being finished before it has done anything.
+//
+// So the summariser never sees the record. It may compress narration; applied
+// edits, failures and read stubs are dropped the old way if they must go, never
+// rewritten.
+func TestTheRecordIsNeverHandedToTheModel(t *testing.T) {
+	record := []string{
+		"edit_file src/app/tabs.routes.ts",
+		"write_file src/app/new.ts",
+		"[read frontend/src/app/pages/game/game.page.scss: 159 lines, re-read on demand]",
+		"exit 1 FAIL src/app/file.spec.ts expected 'Home' got 'Tab 1'",
+	}
+	for _, entry := range record {
+		if distillableSummaryEntry(entry) {
+			t.Errorf("the record must never be rewritten by the model: %q", entry)
+		}
+	}
+
+	narration := []string{
+		"step 7 observation: looked at the themes folder",
+		"$ npm run build",
+		distilledEntry("read 12 files under src/app; build is green"),
+	}
+	for _, entry := range narration {
+		if !distillableSummaryEntry(entry) {
+			t.Errorf("narration should be compressible: %q", entry)
+		}
+	}
+
+	// End to end: a summary made ONLY of record entries must call the model zero
+	// times, however far over budget it is.
+	w := &workingMemory{foldedEntries: append([]string{}, record...)}
+	calls := 0
+	w.collapseSummary(1, func(s string) int { return len(s) }, func([]string) (string, error) {
+		calls++
+		return "Edited frontend/src/app/pages/game/game.page.ts", nil
+	})
+	if calls != 0 {
+		t.Errorf("the summariser was called %d time(s) on a summary that is pure record", calls)
+	}
+	for _, e := range w.summaryEntries() {
+		if strings.Contains(e, "Edited frontend") {
+			t.Fatalf("a fabricated edit reached the summary: %q", e)
+		}
+	}
+}

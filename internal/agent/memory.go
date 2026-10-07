@@ -247,7 +247,25 @@ func (w *workingMemory) collapseSummary(budget int, est func(string) int, distil
 			if len(w.foldedEntries) <= 1 {
 				return w.finishCollapse(gone, dropped, distill)
 			}
-			gone = append(gone, leavingEntry{idx: w.absoluteIndex(i), text: w.foldedEntries[i]})
+			// Only the INCIDENTAL entries are ever handed to the summariser. The
+			// actionable record — applied edits, failures, read stubs — is dropped the
+			// old way if it has to go, never rewritten by a model.
+			//
+			// This is not caution, it is measured. Given six entries, five of them read
+			// stubs, plus the rail's own line "You have inspected 3 files without
+			// changing a single line", qwen3.8-next wrote back:
+			//
+			//	"Edited frontend/src/app/pages/game/game.page.ts"
+			//
+			// Nothing had been edited. It inverted the one fact the input stated
+			// outright and wrote it into the agent's memory as history — which is
+			// exactly how a run convinces itself it is already finished. A summariser
+			// may compress narration; it may not restate the record of what was done.
+			if distillableSummaryEntry(w.foldedEntries[i]) {
+				gone = append(gone, leavingEntry{idx: w.absoluteIndex(i), text: w.foldedEntries[i]})
+			} else {
+				w.droppedEntries++
+			}
 			w.foldedEntries = append(w.foldedEntries[:i], w.foldedEntries[i+1:]...)
 			dropped = true
 		}
@@ -316,6 +334,27 @@ func (w *workingMemory) firstDroppable(durable bool) int {
 // editSigFromArgs, and a verify failure carries the test output that explains why
 // the run is still going. Everything else — read stubs, command echoes, padding
 // observations — is recoverable from the workspace or simply noise.
+// distillableSummaryEntry reports whether an entry may be handed to the model to
+// be rewritten. It is a SEPARATE question from durability, which only decides the
+// order things leave in — conflating the two broke the summary-of-summaries, since
+// a brief must go last AND still be re-summarisable.
+//
+// The rule: the model may compress narration; it may not restate the RECORD of what
+// the run did. An applied edit, a failure and a read stub are facts with a specific
+// shape, already one line each, and rewriting them reclaims nothing while risking
+// everything.
+//
+// Measured, which is why this exists at all: handed five read stubs and the rail's
+// own "You have inspected 3 files without changing a single line",
+// qwen3.8-next wrote back "Edited frontend/src/app/pages/game/game.page.ts".
+// It inverted the one fact its input stated and filed it as history.
+func distillableSummaryEntry(entry string) bool {
+	if strings.HasPrefix(entry, distilledPrefix) {
+		return true // a brief is itself narration: fold it into the next one
+	}
+	return !durableSummaryEntry(entry)
+}
+
 func durableSummaryEntry(entry string) bool {
 	switch {
 	case strings.HasPrefix(entry, tools.NameEditFile+" "), strings.HasPrefix(entry, tools.NameWriteFile+" "):
