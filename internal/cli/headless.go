@@ -334,6 +334,15 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 		// byte-identical to pre-P00 (mirrors the optional budget/churn lines).
 		fmt.Fprintf(out, "  compactions: %d\n", rep.Compactions)
 	}
+	if rep.Distilled > 0 || rep.DistillFailures > 0 {
+		// What compaction actually did with what it shed: rewritten by the model, or
+		// deleted because the summariser could not be used.
+		fmt.Fprintf(out, "  distilled: %d entries into a brief", rep.Distilled)
+		if rep.DistillFailures > 0 {
+			fmt.Fprintf(out, " · %d dropped (summariser unavailable)", rep.DistillFailures)
+		}
+		fmt.Fprintln(out)
+	}
 	if rp := rep.RePrefill; rp.Turns > 0 {
 		fmt.Fprintf(out, "  re-prefill: %d tok/turn avg · peak %d tok · cached %.0f%%\n",
 			rp.ChangedTokens/max(rp.Turns, 1), rp.PeakChangedBytes/4, rp.CachedFraction()*100)
@@ -444,6 +453,8 @@ type runSummary struct {
 	ElapsedSeconds float64 `json:"elapsed_seconds"`
 	TokensPerSec   float64 `json:"tokens_per_sec"`
 	Compactions    int     `json:"compactions"`
+	Distilled      int     `json:"distilled_entries,omitempty"`
+	DistillFails   int     `json:"distill_failures,omitempty"`
 	// Prompt-cache accounting. Omitted entirely when the provider reports none
 	// (most local servers), so a local run's JSON is byte-identical to before.
 	PromptTokens       int `json:"prompt_tokens,omitempty"`
@@ -504,6 +515,8 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		s.Steps = rep.Steps
 		s.Tokens = rep.TokensUsed
 		s.Compactions = rep.Compactions
+		s.Distilled = rep.Distilled
+		s.DistillFails = rep.DistillFailures
 		if rep.TokenRatio > 0 {
 			s.TokenRatio = round2(rep.TokenRatio)
 			// What a flat chars/4 would have implied, against what was really

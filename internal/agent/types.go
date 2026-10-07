@@ -417,7 +417,13 @@ type MemoryInput struct {
 	// Assemble REBUILDS the task message from Task text each turn; without this the
 	// attachment would survive exactly as long as the no-compaction fast path, then
 	// vanish the first time memory did any work.
-	TaskImages   []string
+	TaskImages []string
+	// Distill, when non-nil, rewrites summary entries that no longer fit into one
+	// dense brief instead of deleting them (distill.go). nil ⇒ the previous
+	// behaviour: the oldest entries are dropped. It is a func rather than a client
+	// so the memory layer stays free of transport concerns, and so the caller owns
+	// the ctx the call is cancelled with.
+	Distill      func(entries []string) (string, error)
 	Convo        []llm.Message // full running transcript (Convo[0] is the task)
 	History      []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
 	LastVerify   VerifyResult  // pinned: the last real verify signal
@@ -450,6 +456,12 @@ type MemoryStats struct {
 	// per-turn pins. Everything above them is the stable prefix, which is what the
 	// prompt-cache breakpoint is placed at the end of.
 	PinnedMessages int
+	// Distilled is how many summary entries this run handed to the model to be
+	// rewritten as a brief instead of deleting; DistillFailures is how many times
+	// that call could not be used and they were dropped as before. Reported because
+	// a run quietly losing its own record should be visible, not inferred.
+	Distilled       int
+	DistillFailures int
 }
 
 // Snapshot identifies a checkpointed working-tree state.
@@ -532,6 +544,11 @@ type Report struct {
 	// running summary this run (0 when memory is off or never triggered). The
 	// report/UI print it only when > 0, so the no-compaction output is unchanged.
 	Compactions int
+	// Distilled / DistillFailures mirror MemoryStats: how many summary entries this
+	// run had rewritten into a model-written brief instead of deleted, and how often
+	// that call could not be used.
+	Distilled       int
+	DistillFailures int
 	// Ignored records tool calls dropped by the one-tool-per-turn rail.
 	Ignored []string
 	// RailFires tallies the SOFT recovery rails that fired this run (corrective

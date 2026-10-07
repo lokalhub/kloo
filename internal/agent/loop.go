@@ -839,9 +839,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		st := l.Budget.Stats()
-		compactions := 0
+		compactions, distilled, distillFails := 0, 0, 0
 		if l.Memory != nil {
-			compactions = l.Memory.Stats().Compactions
+			ms := l.Memory.Stats()
+			compactions, distilled, distillFails = ms.Compactions, ms.Distilled, ms.DistillFailures
 		}
 		rep := &Report{
 			Reason:             reason,
@@ -856,6 +857,8 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			TokenRatio:         l.tokenRatio(),
 			Elapsed:            st.Elapsed,
 			Compactions:        compactions,
+			Distilled:          distilled,
+			DistillFailures:    distillFails,
 			RePrefill:          l.rePrefillStats(),
 			Ignored:            ignoredAll,
 			Transcript:         append([]llm.Message(nil), convo...), // this run's task + steps, for the session
@@ -2014,6 +2017,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 		h, merr := l.Memory.Assemble(MemoryInput{
 			Task:         task,
 			TaskImages:   l.TaskImages,
+			Distill:      l.distiller(ctx),
 			Convo:        convo,
 			History:      l.SessionHistory,
 			LastVerify:   lastVerify,

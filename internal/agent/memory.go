@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
@@ -166,6 +167,12 @@ type workingMemory struct {
 	// into the counted placeholder, so the summary itself stays bounded. Monotonic,
 	// like folded.
 	droppedEntries int
+	// distilled counts entries folded into a model-written brief; distillFailures
+	// counts the times the summariser could not be used and they were dropped
+	// instead. Both are reported so a run that is quietly losing its record is
+	// visible rather than inferred.
+	distilled       int
+	distillFailures int
 }
 
 // summaryPlaceholder is the one line that stands in for collapsed entries. It
@@ -194,7 +201,7 @@ func summaryPlaceholder(n int) string {
 // only touched if dropping everything else still leaves the summary over budget.
 //
 // Returns true when anything was dropped.
-func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
+func (w *workingMemory) collapseSummary(budget int, est func(string) int, distill func([]string) (string, error)) bool {
 	if budget <= 0 || len(w.foldedEntries) == 0 {
 		return false
 	}
@@ -203,6 +210,12 @@ func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
 	}
 	target := int(float64(budget) * lowWaterFrac)
 	dropped := false
+	// Entries leaving the summary are COLLECTED, not discarded on the spot: if a
+	// distiller is wired, they are handed to the model and come back as one brief.
+	// Collected in chronological order (firstDroppable walks oldest-first within a
+	// class, but the two classes interleave in time) so the brief reads as a
+	// narrative rather than a shuffled list.
+	var gone []leavingEntry
 	// Pass 1: the incidental entries, oldest first.
 	// Pass 2 (only if still over): the actionable record, oldest first.
 	for _, durable := range []bool{false, true} {
@@ -214,14 +227,58 @@ func (w *workingMemory) collapseSummary(budget int, est func(string) int) bool {
 			// Keep at least one real entry: a summary that is nothing but a
 			// placeholder tells the model less than the step counter already does.
 			if len(w.foldedEntries) <= 1 {
-				return dropped
+				return w.finishCollapse(gone, dropped, distill)
 			}
+			gone = append(gone, leavingEntry{idx: w.absoluteIndex(i), text: w.foldedEntries[i]})
 			w.foldedEntries = append(w.foldedEntries[:i], w.foldedEntries[i+1:]...)
-			w.droppedEntries++
 			dropped = true
 		}
 	}
-	return dropped
+	return w.finishCollapse(gone, dropped, distill)
+}
+
+// leavingEntry is a summary entry on its way out, with the position it held, so a
+// set removed across both passes can be restored to the order it happened in.
+type leavingEntry struct {
+	idx  int
+	text string
+}
+
+// absoluteIndex converts an index into foldedEntries into a monotonically growing
+// position, so entries removed across both passes can be re-ordered back into the
+// order they happened before the brief is written.
+func (w *workingMemory) absoluteIndex(i int) int { return w.droppedEntries + i }
+
+// finishCollapse turns the removed entries into a model-written brief, or — when
+// there is no distiller, or it fails — accounts for them as dropped exactly as
+// before. This is the fail-open path: distillation can only ever ADD information
+// back relative to the old behaviour.
+func (w *workingMemory) finishCollapse(gone []leavingEntry, dropped bool, distill func([]string) (string, error)) bool {
+	if len(gone) == 0 {
+		return dropped
+	}
+	if distill == nil {
+		w.droppedEntries += len(gone)
+		return dropped
+	}
+	sort.SliceStable(gone, func(a, b int) bool { return gone[a].idx < gone[b].idx })
+	texts := make([]string, 0, len(gone))
+	for _, g := range gone {
+		texts = append(texts, g.text)
+	}
+	brief, err := distill(texts)
+	if err != nil || strings.TrimSpace(brief) == "" {
+		// Unchanged behaviour on failure: the entries are gone and counted.
+		w.droppedEntries += len(gone)
+		w.distillFailures++
+		return dropped
+	}
+	// The brief goes to the FRONT: it describes the oldest part of the run, and the
+	// summary reads oldest-first. A previous brief is itself in `gone` (it is
+	// durable, so it leaves last), which makes this a summary of summaries.
+	w.foldedEntries = append([]string{distilledEntry(brief)}, w.foldedEntries...)
+	w.distilled += len(gone)
+	return true
 }
 
 // firstDroppable is the index of the oldest entry whose durability matches, or -1.
@@ -246,6 +303,11 @@ func durableSummaryEntry(entry string) bool {
 	case strings.HasPrefix(entry, tools.NameEditFile+" "), strings.HasPrefix(entry, tools.NameWriteFile+" "):
 		return true
 	case strings.Contains(entry, "FAIL"):
+		return true
+	case strings.HasPrefix(entry, distilledPrefix):
+		// A brief is the compacted form of everything before it. Dropping it loses
+		// the whole early run at once, so it leaves last — at which point it is
+		// folded into the NEXT brief rather than deleted.
 		return true
 	case strings.HasPrefix(entry, "[read "):
 		// A read stub is ALREADY the compacted form of a whole file dump: one line
@@ -400,12 +462,14 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	if window <= 0 || projectedFull <= triggerTokens(window) {
 		out := assemble(task, nil, pinMsgs, allTail)
 		w.stats = MemoryStats{
-			PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
-			WindowTokens:   window,
-			Compactions:    w.compactions,
-			MapBudget:      in.MapBudget,
-			HotBudget:      hotBudget,
-			PinnedMessages: len(pinMsgs),
+			PromptTokens:    in.SystemTokens + tokensOfWith(out, in.estimate),
+			WindowTokens:    window,
+			Compactions:     w.compactions,
+			MapBudget:       in.MapBudget,
+			HotBudget:       hotBudget,
+			PinnedMessages:  len(pinMsgs),
+			Distilled:       w.distilled,
+			DistillFailures: w.distillFailures,
 		}
 		return out, nil
 	}
@@ -438,7 +502,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// the only thing that can reclaim space from it.
 	// Not counted as a separate compaction: it is part of the same shedding event,
 	// and double-counting it would misreport the ⟲ counter the UI and the bench read.
-	w.collapseSummary(int(float64(triggerTokens(window))*SummaryBudgetFrac()), in.estimate)
+	w.collapseSummary(int(float64(triggerTokens(window))*SummaryBudgetFrac()), in.estimate, in.Distill)
 	tail = allTail[w.folded:]
 	entries := w.summaryEntries()
 
@@ -516,15 +580,17 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	finalPins := rebuildPins()
 	out := assemble(task, entries, finalPins, tail)
 	w.stats = MemoryStats{
-		PinnedMessages: len(finalPins),
-		PromptTokens:   in.SystemTokens + tokensOfWith(out, in.estimate),
-		WindowTokens:   window,
-		Compactions:    w.compactions,
-		SummaryTokens:  summaryTokens(entries, in.estimate),
-		DroppedTurns:   w.folded, // messages folded into the summary so far (monotonic)
-		TrimmedTail:    tailTrimmed,
-		MapBudget:      in.MapBudget,
-		HotBudget:      hotBudget,
+		PinnedMessages:  len(finalPins),
+		PromptTokens:    in.SystemTokens + tokensOfWith(out, in.estimate),
+		WindowTokens:    window,
+		Compactions:     w.compactions,
+		SummaryTokens:   summaryTokens(entries, in.estimate),
+		DroppedTurns:    w.folded, // messages folded into the summary so far (monotonic)
+		TrimmedTail:     tailTrimmed,
+		MapBudget:       in.MapBudget,
+		HotBudget:       hotBudget,
+		Distilled:       w.distilled,
+		DistillFailures: w.distillFailures,
 	}
 	return out, nil
 }
@@ -562,7 +628,7 @@ func assemble(task llm.Message, summaryEntries []string, pins, tail []llm.Messag
 // "accumulate for thirty turns before shedding anything". capWorkingSet only ever
 // lowers the result, so a window already tighter than the cap is untouched.
 func triggerTokens(window int) int {
-	return capWorkingSet(int(triggerFrac * float64(window)))
+	return capWorkingSet(int(triggerFrac*float64(window)), window)
 }
 
 // summaryTokens is the token cost of the summary slot for the given entries
