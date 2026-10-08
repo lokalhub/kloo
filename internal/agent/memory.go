@@ -37,10 +37,20 @@ const (
 	// same test file read four times, zero edits — the model could never hold the
 	// test and the source at once long enough to write a fix.
 	//
-	// Now they sum to 0.75 of the trigger, leaving a quarter of it for the fresh
-	// conversation that compaction exists to make room for.
+	// 0.75 is now a CEILING on their sum, not the sum: measured against the real
+	// trigger, map + hot comes to 75.0% only where the working-set cap binds and the
+	// curator cap is lifted, and to 66.0% at ctx 8000 and ctx 32768, where it does
+	// not. 66 rather than 75 because hotBudgetTokens is handed the already-usable
+	// window and applies usableWindow a SECOND time (its own comment records this),
+	// so hot lands at 36% of the trigger instead of 45% wherever the cap is a no-op.
+	// Either way a quarter of the trigger or more is left for the fresh conversation
+	// compaction exists to make room for.
+	//
+	// The ceiling was BREACHED until the map budget was given the real trigger:
+	// measured at ctx 131072 with the curator cap lifted, map was 37.6% of the
+	// trigger and hot 45%, summing to 82.6%.
 	mapBudgetFrac     = 0.30 // repo-map section cap, as a fraction of the compaction trigger
-	hotBudgetFrac     = 0.45 // pin-hot set + recent tail cap, same base
+	hotBudgetFrac     = 0.45 // pin-hot set + recent tail cap, nominally the same base (see above)
 	maxKeepItemTokens = 256  // per-item verbatim cap; a larger kept item is truncated-with-marker
 	ceilSlack         = 4    // tokens reserved when truncating, to absorb ApproxTokens rounding so the hard ceiling holds strictly
 	// usableWindowFrac budgets the PROMPT to a fraction of the model's context
@@ -98,36 +108,54 @@ func UsableWindow(window int) int { return usableWindow(window) }
 // compaction. A task already above it compacts on step one.
 func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 
-// mapBudgetTokens caps the repo-map section at mapBudgetFrac of the REAL compaction
-// trigger — triggerTokens, working-set cap included — or of the curator budget when
-// that is deliberately smaller. Whichever binds, the map can never on its own be
-// large enough to force a compaction.
+// mapBudgetTokens caps the repo-map section. It is the SMALLER of two numbers: a
+// fraction of the REAL compaction trigger (triggerTokens, working-set cap included),
+// and the appetite figure `curator x triggerFrac x mapBudgetFrac` the curator budget
+// has always produced. So the map can never on its own be large enough to force a
+// compaction, and it can never be larger than it was before this cap existed.
 //
 // IT CARRIED TWO DOC COMMENTS AND THEY CONTRADICTED EACH OTHER. One said the base
 // is the curator budget and must NOT follow the window; the next said it is
 // "budgeted against the COMPACTION TRIGGER, so the map can never be large enough to
 // force a compaction by itself". The code did neither: it was
-// `curator x triggerFrac x mapBudgetFrac`, a trigger RECONSTRUCTED from a fraction,
-// and since v0.26.0 the real trigger is the window-adaptive working set
+// `curator x triggerFrac x mapBudgetFrac` alone, a trigger RECONSTRUCTED from a
+// fraction, and since v0.26.0 the real trigger is the window-adaptive working set
 // (workingset.go), not that fraction. So the second comment's guarantee failed
-// exactly where the cap binds. Measured before this change, --ctx 131072
-// --working-set-tokens 12000: trigger 12,000, map budget 22,019 — 184% of the
-// trigger, a map that guaranteed a compaction on turn one on its own. After:
-// 3,600, 30% of it.
+// exactly where the cap binds. Measured at --ctx 131072 --working-set-tokens 12000:
+// trigger 12,000, map budget 22,019 — 184% of the trigger, a map that guaranteed a
+// compaction on turn one on its own. Now 3,600, 30% of it.
 //
-// The sibling budget already had this base. hotBudgetTokens applies capWorkingSet;
-// this one did not, while hotBudgetFrac was documented as the "same base" as
-// mapBudgetFrac. The two fractions are meant to be a partition of what fits before
-// compaction (see mapBudgetFrac above) and a partition only holds if both sides
-// divide the same number.
+// WHY A MIN AND NOT THE TRIGGER ALONE. Taking mapBudgetFrac of the trigger and
+// nothing else is the coherent formula, and it RAISES the budget by 43% wherever the
+// curator budget is the smaller input — at the stock curator cap and --ctx 131072,
+// 6,881 to 9,830. Measured end to end with `kloo context --ctx 131072
+// --curator-budget 32768 --json "fix the bug"` on kloo's own tree: the assembled
+// prompt goes 34,526 -> 43,115 chars, i.e. +8,589 bytes of repo map (+24.9%) on
+// every turn, for +2,959 tokens of map. A ~22k map re-prefilling every call was
+// the worst performance bug kloo has had; nothing measured says a bigger map helps,
+// and a correctness fix must not smuggle in a token increase to pay for itself. The
+// min makes this change MONOTONE: at every window and every curator value the budget
+// either stays byte-identical or goes down. Pinned by
+// TestMapBudgetNeverExceedsTheAppetiteFormula.
+//
+// The trigger arm is therefore reachable only where it is the TIGHTER of the two,
+// which is where the working-set cap bit: a lifted curator cap on a large window, or
+// an explicit --working-set-tokens. Below ~47k declared the cap is a strict no-op,
+// trigger == triggerFrac x usable and curator <= usable, so the appetite arm always
+// wins and the result is byte-identical to before.
+//
+// hotBudgetTokens, the sibling this was meant to match, is NOT on the same base
+// either: it is handed the already-usable window and applies usableWindow a second
+// time (see its own comment), so its base is ~20% below triggerTokens at any window
+// where the cap does not bind. That is a separate defect with its own cost, left
+// alone here deliberately.
 //
 // THE CONSTRAINT THE FIRST COMMENT WAS PROTECTING STILL HOLDS, and more tightly: a
 // model advertising a huge window must not authorise an enormous map. Capacity is
-// discovered from the endpoint, appetite is chosen by us, and the curator cap still
-// wins whenever it is the smaller of the two. Measured at --ctx 900000 with the
-// curator cap removed (--curator-budget set to the usable window, the worst case):
-// 46,080 tokens, against 151,200 before this change — because the working-set curve
-// bounds the trigger at 153,600 there while 0.70 x usable is 504,000.
+// discovered from the endpoint, appetite is chosen by us. Measured at --ctx 900000
+// with the curator cap lifted to the usable window (the worst case): 46,080 tokens,
+// against 151,200 from the appetite arm alone — the working-set curve bounds the
+// trigger at 153,600 there while 0.70 x usable is 504,000.
 //
 // `window` is the DECLARED context window and `curatorCap` the configured cap, both
 // taken raw from the Loop. EffectiveCuratorBudget is applied here and only here, so
@@ -135,11 +163,13 @@ func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 // window, which is the convention every other caller follows (loop.go hands Assemble
 // usableWindow(ctx)) and the one workingset.go documents.
 func mapBudgetTokens(window, curatorCap int) int {
-	base := triggerTokens(usableWindow(window))
-	if c := EffectiveCuratorBudget(window, curatorCap); c > 0 && c < base {
-		base = c
+	n := int(float64(triggerTokens(usableWindow(window))) * mapBudgetFrac)
+	// The appetite arm, spelled out as the arithmetic that shipped, so the monotone
+	// guarantee is visible here rather than inferred from two call sites.
+	if appetite := int(float64(EffectiveCuratorBudget(window, curatorCap)) * triggerFrac * mapBudgetFrac); appetite < n {
+		n = appetite
 	}
-	return int(float64(base) * mapBudgetFrac)
+	return n
 }
 
 // EffectiveCuratorBudget resolves the per-step context-assembly budget from the

@@ -125,23 +125,29 @@ func TestSplitBoundsLargeWindows(t *testing.T) {
 	}
 }
 
-// TestMapBudgetIsAFractionOfTheRealTrigger pins the INVARIANT, not the numbers: the
-// repo-map budget is mapBudgetFrac of the compaction trigger the loop actually
-// enforces, or of the curator budget when appetite is deliberately smaller.
+// TestMapBudgetIsBoundedByTheRealTrigger pins the INVARIANT, not the numbers: the
+// repo-map budget is the SMALLER of mapBudgetFrac of the compaction trigger the loop
+// actually enforces and the appetite figure the curator budget has always produced.
 //
 // It is the invariant rather than a table of values because the numbers moved for a
-// reason that a value table would have hidden. mapBudgetTokens used to compute
-// `curator x triggerFrac x mapBudgetFrac` — a trigger RECONSTRUCTED from a fraction —
-// while its sibling hotBudgetTokens read the real one through capWorkingSet. Since
-// the working set went window-adaptive (v0.26.0) the two diverge exactly where the
-// cap binds, which is every window above ~47k declared, and the divergence is
-// invisible to any test that asserts a constant.
+// reason a value table would have hidden. mapBudgetTokens used to compute the
+// appetite figure ALONE — `curator x triggerFrac x mapBudgetFrac`, a trigger
+// RECONSTRUCTED from a fraction — while its sibling hotBudgetTokens read the real one
+// through capWorkingSet. Since the working set went window-adaptive (v0.26.0) the two
+// diverge exactly where the cap binds, which is every window above ~47k declared, and
+// the divergence is invisible to any test that asserts a constant.
 //
-// So each case names WHICH of the two budgets is expected to bind, and the expected
-// binding is itself asserted. A case that silently stopped being the
-// working-set-bound one would otherwise go on passing.
-func TestMapBudgetIsAFractionOfTheRealTrigger(t *testing.T) {
-	const bindsTrigger, bindsCurator = "trigger", "curator"
+// So each case names WHICH arm is expected to bind, and the expected binding is
+// itself asserted. A case that silently stopped being the working-set-bound one would
+// otherwise go on passing.
+//
+// Note the shape of the two arms: the trigger arm can only bind where the WORKING-SET
+// CAP bit, because below ~47k declared trigger == triggerFrac x usable and
+// curator <= usable, so the appetite arm is always the smaller one there. That is the
+// mechanism behind the "small windows are byte-identical" guarantee, stated as a
+// property instead of as a list of windows.
+func TestMapBudgetIsBoundedByTheRealTrigger(t *testing.T) {
+	const bindsTrigger, bindsAppetite = "trigger", "appetite"
 	for _, tc := range []struct {
 		name       string
 		window     int
@@ -149,40 +155,83 @@ func TestMapBudgetIsAFractionOfTheRealTrigger(t *testing.T) {
 		workingSet int // --working-set-tokens; 0 ⇒ the built-in curve
 		binding    string
 	}{
-		{"8k: the trigger fraction binds, the cap is a strict no-op", 8000, 0, 0, bindsTrigger},
-		{"32k: still the fraction", 32768, 0, 0, bindsTrigger},
-		{"131k, no curator cap: the working-set CURVE is the trigger", 131072, 0, 0, bindsTrigger},
-		{"131k, explicit --working-set-tokens 12000: the cap is the trigger", 131072, 0, 12000, bindsTrigger},
-		{"131k, the stock curator cap: appetite is the smaller number", 131072, 32768, 0, bindsCurator},
-		{"131k, a curator cap at the usable window: back to the trigger", 131072, 104857, 0, bindsTrigger},
-		{"900k, the stock curator cap: capacity never reaches the map", 900000, 32768, 0, bindsCurator},
+		{"8k: the cap is a strict no-op, so appetite binds", 8000, 0, 0, bindsAppetite},
+		{"32k: still appetite", 32768, 0, 0, bindsAppetite},
+		{"131k, no curator cap: the working-set CURVE binds", 131072, 0, 0, bindsTrigger},
+		{"131k, explicit --working-set-tokens 12000: the cap binds", 131072, 0, 12000, bindsTrigger},
+		{"131k, the stock curator cap: appetite is the smaller number", 131072, 32768, 0, bindsAppetite},
+		{"131k, the muse-glimmer-30b curator cap: still appetite", 131072, 52428, 0, bindsAppetite},
+		{"131k, a curator cap at the usable window: the curve binds", 131072, 104857, 0, bindsTrigger},
+		{"900k, the stock curator cap: capacity never reaches the map", 900000, 32768, 0, bindsAppetite},
+		{"1M, the curator cap lifted: the curve binds hard", 1 << 20, 838860, 0, bindsTrigger},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer SetWorkingSetTokens(0)
 			SetWorkingSetTokens(tc.workingSet)
 
 			trigger := triggerTokens(usableWindow(tc.window))
-			curator := EffectiveCuratorBudget(tc.window, tc.curator)
+			fromTrigger := int(float64(trigger) * mapBudgetFrac)
+			fromAppetite := int(float64(EffectiveCuratorBudget(tc.window, tc.curator)) * triggerFrac * mapBudgetFrac)
 			got := mapBudgetTokens(tc.window, tc.curator)
 
-			base := trigger
-			if tc.binding == bindsCurator {
-				base = curator
-				if curator >= trigger {
-					t.Fatalf("this case claims the curator binds, but curator %d >= trigger %d", curator, trigger)
+			want := fromTrigger
+			if tc.binding == bindsAppetite {
+				want = fromAppetite
+				if fromAppetite > fromTrigger {
+					t.Fatalf("this case claims appetite binds, but appetite %d > trigger arm %d", fromAppetite, fromTrigger)
 				}
-			} else if curator < trigger {
-				t.Fatalf("this case claims the trigger binds, but curator %d < trigger %d", curator, trigger)
+			} else if fromTrigger > fromAppetite {
+				t.Fatalf("this case claims the trigger binds, but trigger arm %d > appetite %d", fromTrigger, fromAppetite)
 			}
-			if want := int(float64(base) * mapBudgetFrac); got != want {
-				t.Errorf("map budget = %d, want %d (%s base %d x %.2f)", got, want, tc.binding, base, mapBudgetFrac)
+			if got != want {
+				t.Errorf("map budget = %d, want %d (the %s arm)", got, want, tc.binding)
 			}
-			// The same statement as a SHARE, which is the form that survives a retune of
-			// the working-set curve or of the fractions.
-			if share := float64(got) / float64(base); share < mapBudgetFrac-0.001 || share > mapBudgetFrac+0.001 {
-				t.Errorf("map budget is %.4f of the %s base, want %.2f", share, tc.binding, mapBudgetFrac)
+			// As a SHARE of the real trigger, which is the form that survives a retune of
+			// the working-set curve or of the fractions. mapBudgetFrac is the CEILING, met
+			// exactly when the trigger arm binds and below it otherwise.
+			share := float64(got) / float64(trigger)
+			if share > mapBudgetFrac+0.001 {
+				t.Errorf("map budget is %.4f of the trigger, above the %.2f ceiling", share, mapBudgetFrac)
+			}
+			if tc.binding == bindsTrigger && share < mapBudgetFrac-0.001 {
+				t.Errorf("the trigger arm binds, so the share should be %.2f, got %.4f", mapBudgetFrac, share)
 			}
 		})
+	}
+}
+
+// TestMapBudgetNeverExceedsTheAppetiteFormula is the guarantee that makes budgeting
+// the map against the real trigger safe to ship: the change is MONOTONE DOWNWARD.
+//
+// Taking mapBudgetFrac of the trigger and nothing else is the coherent formula and it
+// RAISES the budget wherever the curator budget is the smaller input — +43%, which at
+// the stock curator cap and --ctx 131072 is 6,881 to 9,830, measured end to end as
+// +9,706 bytes of repo map on every turn (+32.6% of the assembled prompt). A ~22k map
+// re-prefilling every call was the worst performance bug kloo has had, and nothing
+// measured says a bigger map helps. So a correctness fix must not pay for itself in
+// tokens, and this test is what says so for every configuration rather than for the
+// ones someone thought to tabulate.
+//
+// 1,496 combinations swept. Largest reduction at the built-in working-set curve:
+// 281,981 tokens, at a 2M declared window with no curator cap, where the appetite arm
+// authorised 352,321 tokens of repo map and the curve bounds it to 70,340.
+func TestMapBudgetNeverExceedsTheAppetiteFormula(t *testing.T) {
+	defer SetWorkingSetTokens(0)
+	for _, window := range []int{1000, 2000, 4096, 8000, 16384, 32768, 40960, 65536, 100000, 131072, 200000, 262144, 400000, 600000, 900_000, 1 << 20, 2 << 20} {
+		for _, curator := range []int{0, 1, 1024, 4096, 32768, 52428, 104857, 500_000, 838_860, 1 << 20, 1 << 22} {
+			for _, ws := range []int{0, -1, 1, 8000, 12000, 32768, 65536, 200_000} {
+				SetWorkingSetTokens(ws)
+				// The formula that shipped in v0.27.0, written out rather than called: this
+				// is a comparison against HISTORY, so it cannot be expressed in terms of the
+				// function under test.
+				appetite := int(float64(EffectiveCuratorBudget(window, curator)) * triggerFrac * mapBudgetFrac)
+				if got := mapBudgetTokens(window, curator); got > appetite {
+					t.Fatalf("ctx %d curator %d working-set %d: map budget %d exceeds the %d v0.27.0 shipped — "+
+						"this change must never make the prompt bigger", window, curator, ws, got, appetite)
+				}
+				SetWorkingSetTokens(0)
+			}
+		}
 	}
 }
 

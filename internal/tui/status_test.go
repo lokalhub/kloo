@@ -168,31 +168,54 @@ func TestCtxSegmentWithoutATriggerNamesNone(t *testing.T) {
 }
 
 // TestStatusContextFieldReachesTheHeader wires the whole path: a contextMsg lands on
-// the status data and the rendered header carries the occupancy, while the permission
-// mode — the one field a user must never misread — survives at every width.
+// the status data and the rendered header carries the occupancy.
+//
+// It also pins what the fitting can and cannot promise about the permission mode,
+// because the first version of this test and its comment OVERCLAIMED. The field is
+// budgeted to the leftover columns MINUS ONE, because renderHeader falls back to
+// whole-line truncation whenever the gap between the two clusters drops below one
+// column — so a form that exactly filled the space still cost the line its last
+// character. Measured before that fix: at 90 columns with a 10-character model name
+// the bar rendered `· au…`.
+//
+// What it cannot promise: when the lead cluster and the counters ALONE overflow the
+// line, the mode goes whatever this field does. A 37-character model name at 85
+// columns is already over before any occupancy is placed, and that is identical on
+// master.
 func TestStatusContextFieldReachesTheHeader(t *testing.T) {
-	line := func(width int) string {
-		m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), width, th)
-		m = apply(m, progressMsg{Model: "test-model", Step: 3, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000})
+	line := func(model string, width int) string {
+		m := sized(New(Config{Model: model, MaxSteps: 500, MaxTokens: 480000}), width, th)
+		m = apply(m, progressMsg{Model: model, Step: 18, MaxSteps: 500, Tokens: 1553679, MaxTokens: 480000})
 		m = apply(m, contextMsg{Used: 26370, Usable: 104857, Trigger: 58617, Free: 78487, FreeToCompaction: 32247})
 		return strings.Split(m.View(), "\n")[1]
 	}
-	wide := line(140)
-	for _, want := range []string{"26.4k used", "25%", "78.5k free", "compact", "32.2k", "auto"} {
+	wide := line("test-model", 140)
+	for _, want := range []string{"26.4k used", "25%", "78.5k free", "compact at 58.6k", "32.2k", "auto"} {
 		if !contains(wide, want) {
 			t.Errorf("wide header missing %q:\n%s", want, wide)
 		}
 	}
-	for _, w := range []int{140, 120, 100, 90, 80, 60, 40} {
-		got := line(w)
+	// A short model name leaves room for the mode at every width where the line can
+	// hold `lead + counters + mode` at all, which starts at 70. The ctx field must
+	// never be the reason it is lost.
+	for _, w := range []int{140, 125, 120, 110, 100, 95, 90, 85, 80, 70} {
+		got := line("test-model", w)
 		if n := len([]rune(got)); n > w {
 			t.Errorf("width %d: header is %d columns: %q", w, n, got)
 		}
-		// The ctx field is fitted to the columns left over, so it is sacrificed before
-		// the mode is pushed off the end of the line by whole-line truncation.
-		if w >= 80 && !contains(got, "auto") {
+		if !contains(got, "· auto") {
 			t.Errorf("width %d: the permission mode was lost to the ctx field:\n%s", w, got)
 		}
+	}
+	// And the honest limit: a long model name loses the mode below 90 columns, with
+	// the ctx field already fully suppressed, so nothing this field does could save
+	// it. Asserted so the comment above cannot drift back into overclaiming.
+	const longModel = "lokalai/muse-glimmer-30b-a3b-instruct"
+	if got := line(longModel, 85); contains(got, "ctx ") {
+		t.Errorf("at 85 columns with a 37-char model name the ctx field should be suppressed, not competing:\n%s", got)
+	}
+	if got := line(longModel, 90); !contains(got, "· auto") {
+		t.Errorf("at 90 columns the mode should still fit a 37-char model name:\n%s", got)
 	}
 }
 

@@ -16,22 +16,44 @@ trigger as `curator × triggerFrac`. It did not move when the user lowered
 `--working-set-tokens`, so the cap the user set did not bound the single largest
 section of the prompt.
 
-It now takes `mapBudgetFrac` of `triggerTokens` — the real trigger, working-set cap
-included — or of the curator budget when appetite is deliberately smaller. Measured
-on kloo's own tree, 2026-10-07:
+It is now the SMALLER of `mapBudgetFrac × triggerTokens` — the real trigger, with
+the working-set cap in it — and the appetite figure `curator × triggerFrac ×
+mapBudgetFrac` that shipped in v0.27.0. The min is what keeps the fix MONOTONE: at
+every window and every curator value the budget either stays byte-identical or goes
+down, never up. Taking the trigger arm alone is the coherent formula but it is +43%
+wherever the curator budget is the smaller input — including the stock CLI default
+and the `muse-glimmer-30b` profile — and a correctness fix must not pay for itself
+in tokens that nothing measured says buy anything.
 
-    ctx=131072 stock curator    before: trigger=58617 map= 6881 hot=26377  map+hot =  57% of trigger
-                                 after: trigger=58617 map= 9830 hot=26377  map+hot =  62%
-    ctx=131072 curator=104857   before: trigger=58617 map=22019 hot=26377  map+hot =  83%
-                                 after: trigger=58617 map=17585 hot=26377  map+hot =  75%
+Measured on kloo's own tree with `kloo context --json "fix the bug"`, 2026-10-07
+(`map` is the budget, `hot` is `hotBudgetTokens`, both against the real trigger):
+
+    ctx=131072 curator=32768 (stock)  before: trigger=58617 map=  6881  after: map=  6881  byte-identical
+    ctx=131072 curator=52428 (glimmer) before: trigger=58617 map= 11009  after: map= 11009  byte-identical
+    ctx=131072 curator=104857          before: trigger=58617 map= 22019  after: map= 17585  FIXED
     ctx=131072 --working-set-tokens 12000
-                                before: trigger=12000 map=22019 hot= 5400  map+hot = 228%  map ALONE = 183%
-                                 after: trigger=12000 map= 3600 hot= 5400  map+hot =  75%  map ALONE =  30%
+                                       before: trigger=12000 map= 22019  after: map=  3600  FIXED
+    ctx=1048576 curator=838860         before: trigger=165794 map=176160 after: map= 49738  FIXED
+    ctx=8000                           before: trigger= 4480 map=  1344  after: map=  1344  byte-identical
+    ctx=32768                          before: trigger=18349 map=  5504  after: map=  5504  byte-identical
 
-`map+hot` is now at most `mapBudgetFrac + hotBudgetFrac` = 75% of the trigger at
-every window, which is the partition those two constants have always claimed to be.
-Small windows are unchanged: at ctx 8000 the map budget is 1,344 before and after,
-at ctx 32768 it is 5,504.
+Every pathology stays fixed and nothing grows. Monotonicity is swept over 1,496
+(window, curator, working-set) combinations in
+`TestMapBudgetNeverExceedsTheAppetiteFormula`; the largest reduction at the built-in
+working-set curve is 281,981 tokens, at a 2M declared window with no curator cap,
+where the appetite arm authorised 352,321 tokens of repo map.
+
+What the trigger arm would have cost, measured end to end at the stock default with
+`--ctx 131072 --curator-budget 32768`: the assembled first turn goes from 34,526 to
+43,115 chars, +8,589 bytes of repo map (+24.9%) on every turn, for +2,959 tokens.
+
+`map + hot` is at most `mapBudgetFrac + hotBudgetFrac` = 75% of the trigger, which is
+a CEILING and not the sum. Measured: 75.0% where the working-set cap binds with the
+curator cap lifted, 66.0% at ctx 8000 and ctx 32768 where the cap is a no-op — 66
+rather than 75 because `hotBudgetTokens` is handed the already-usable window and
+applies `usableWindow` a second time (defect 6 below), so hot lands at 36% of the
+trigger there instead of 45%. Before this change the ceiling was breached: at
+ctx 131072 with the curator cap lifted, map was 37.6% and hot 45%, summing to 82.6%.
 
 The trigger and hot figures above are the ones the code computes, which are NOT
 `workingSetFor(declared)`: `hotBudgetTokens` and `triggerTokens` are both handed the
@@ -41,10 +63,11 @@ An earlier version of this table derived them from the declared window and so
 reported trigger=65536 / hot=29491.
 
 `kloo doctor` reported the explicit flag as "BINDING — holds the prompt here", which
-was the third thing wrong here: the cap holds the compaction TRIGGER, and the
-trigger bounds only the history compaction can shed. At this configuration doctor
-claimed 12,000 while `kloo context` measured the first turn at 26,370. That line now
-says where compaction starts and points at `kloo context` for the prompt.
+was the third thing wrong here: the cap holds the compaction TRIGGER, and the trigger
+bounds only the history compaction can shed. At this configuration doctor claimed
+12,000 while `kloo context` measured the first turn at 26,370; it is 7,864 now, under
+the trigger. That line says where compaction starts and points at `kloo context` for
+the prompt.
 
 This is the second time that phrase has been wrong. The first was `hotBudgetTokens`
 ignoring the cap entirely (fixed in fc608bf). Finding that one was worth more than
@@ -93,6 +116,24 @@ deliberately.
 
 The default system prompt supplies no downward pressure on reading. "Reading is not
 progress" sits behind `KLOO_GROK_PROMPT`.
+
+## 6. hotBudgetTokens applies usableWindow twice
+
+`hotBudgetTokens(window)` computes
+`capWorkingSet(usableWindow(window) × triggerFrac, window) × hotBudgetFrac`, but the
+`window` it receives is ALREADY the usable window — `loop.go` hands `Assemble`
+`usableWindow(ctx)`. So `usableWindow` is applied a second time and the hot budget is
+~20% below the fraction it documents. Its own comment records this and declines to
+fix it, which is the right call (it moves every small-ctx run and there is no evidence
+a larger hot budget helps there), but it has a consequence worth writing down: the hot
+budget is NOT on the same base as `triggerTokens`, so the claim that `mapBudgetFrac`
+and `hotBudgetFrac` partition one number is only true where the working-set cap binds.
+
+Measured against the real trigger: hot is 45.0% of it at ctx 131072 (cap binding) and
+36.0% at ctx 8000 and ctx 32768 (cap a no-op). The map budget is now on
+`triggerTokens` proper, so the two halves of the "partition" are derived differently.
+Fixing this means raising the hot budget on every small window, which needs its own
+bench baseline.
 
 ## A measurement dispute worth settling
 

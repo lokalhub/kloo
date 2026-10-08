@@ -130,18 +130,25 @@ func (m Model) handleProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 //	18  ctx 26.4k/105k 25%
 //	 7  ctx 25%
 //
-// 50 is not an arbitrary target: with the lead cluster and `step 18/500 ·
-// 1553.7k/480k tok` placed, an 80x24 terminal leaves ~10 columns for this field and
-// a 120-column one leaves exactly 50 — so the form carrying used, free, percentage
-// AND the distance to compaction is the one that fits a standard wide terminal.
+// 50 is not an arbitrary target. Measured with a 10-character model name and
+// `step 18/500 · 1553.7k/480k tok` beside it, the field is handed 54 columns at a
+// 120-column terminal, 59 at 125 and 14 at 80 — so the 50-wide form carrying used,
+// free, percentage AND the distance to compaction is the widest one that fits a
+// standard wide terminal, and everything is on screen from 125.
 //
 // Past the trigger the distance is not printed as a negative — a bar reading
 // "-14.4k left" is a puzzle, and the fact worth stating is that the loop compacts on
 // the next step.
 //
-// COMPACTION OFF (Trigger <= 0: --compact-trigger-frac disabled, or
-// --working-set-tokens negative with no fraction) collapses to the forms that name
-// no trigger. Printing one would mean inventing it.
+// TRIGGER <= 0 collapses to the forms that name no trigger, because printing one
+// would mean inventing it. That branch is DEFENSIVE, not a configuration: no flag
+// reaches it. `--working-set-tokens -1` disables the absolute cap and leaves the
+// fraction, which at --ctx 131072 is 73,399; `--compact-trigger-frac -1` falls
+// outside (0,1] and SetContextFractions ignores it silently, leaving 58,617. Driving
+// the trigger to zero takes a usable window of 1 or less, and Assemble refuses that
+// with ErrWindowTooSmall before any prompt is built. So the branch is here so the bar
+// cannot print `compact in 0` if the gauge ever arrives zeroed — an earlier version
+// of this comment named two flags for it and neither produces it.
 func (s statusData) ctxSegment(avail int) string {
 	// No gauge yet ⇒ nothing, so a run before its first assembled prompt renders
 	// exactly as it did before this field existed.
@@ -271,11 +278,24 @@ func (m Model) renderHeader() string {
 	// indistinguishable because only the second one existed.
 	//
 	// The segment is fitted to the columns left over once everything else on the line
-	// is placed, so a narrow terminal loses DETAIL from this field instead of losing
-	// the permission mode off the end of the line — which is what the whole-line
-	// truncation below would do, and the mode is the field you must never misread.
+	// is placed, so a narrow terminal loses DETAIL from this field rather than having
+	// this field push the line into the whole-line truncation below, which cuts the
+	// END — the permission mode, the field you must never misread.
+	//
+	// That is all the fitting can promise, and the original form of this comment
+	// overclaimed. When the lead cluster and the counters ALONE overflow the line the
+	// mode is lost whatever this field does: measured at 80 columns with the model
+	// name `lokalai/muse-glimmer-30b-a3b-instruct`, the line truncates to
+	// `… 1553.7k/480k …` with the ctx field already suppressed. Identical on master,
+	// so not a regression, but not something this field can fix either.
 	const sep = " · "
-	avail := inner - lipgloss.Width(lead) - lipgloss.Width(right) - lipgloss.Width(tail) - lipgloss.Width(sep)
+	// -1: renderHeader falls back to whole-line truncation when the gap between the
+	// two clusters is below ONE column, so a ctx form that exactly fills the space
+	// still costs the line its last character — the permission mode. Measured: at 90
+	// columns with a 10-character model name the chosen form left gap 0 and the bar
+	// rendered `· au…`. The field therefore budgets itself one column short of the
+	// space it has.
+	avail := inner - lipgloss.Width(lead) - lipgloss.Width(right) - lipgloss.Width(tail) - lipgloss.Width(sep) - 1
 	if seg := s.ctxSegment(avail); seg != "" {
 		right += sep + seg
 	}
