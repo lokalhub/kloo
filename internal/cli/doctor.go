@@ -439,9 +439,24 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	switch {
 	case diag.WorkingSetTokens <= 0:
 		fmt.Fprintf(out, "working_set: disabled (compact_at is the fraction alone)\n")
+	// "HOLDS THE PROMPT HERE" WAS FALSE AND IT HID A REAL DEFECT.
+	//
+	// The cap lowers the compaction TRIGGER. The trigger decides when shedding
+	// starts and bounds the history that shedding can reach; it does not bound the
+	// prompt, because the system prompt, the tool schemas and the repo map are
+	// re-assembled every turn and no compaction removes them. Measured on kloo's own
+	// tree at --ctx 131072 --working-set-tokens 12000, doctor printed "holds the
+	// prompt here" for 12,000 while `kloo context` measured the first turn at 26,370
+	// — the repo-map budget alone was 22,019, 184% of the trigger it was supposed to
+	// sit inside, because mapBudgetTokens reconstructed the trigger from a fraction
+	// instead of reading it (agent/memory.go). This line reporting the cap as working
+	// is why that went three releases unnoticed, so it now says what the cap does and
+	// points at the instrument that measures the prompt rather than deriving it.
 	case diag.CompactAtTokens >= diag.WorkingSetTokens:
-		fmt.Fprintf(out, "working_set: %d tokens (BINDING — holds the prompt here instead of %d)\n",
+		fmt.Fprintf(out, "working_set: %d tokens (BINDING — compaction starts here instead of %d)\n",
 			diag.WorkingSetTokens, int(diag.CompactTriggerFrac*float64(diag.UsablePromptTokens)))
+		fmt.Fprintf(out, "  the trigger bounds the HISTORY compaction can shed, not the whole prompt — "+
+			"the system prompt, tool schemas and repo map are re-sent every turn; `kloo context` measures the assembled prompt\n")
 	default:
 		fmt.Fprintf(out, "working_set: %d tokens (not binding — the fraction is tighter)\n", diag.WorkingSetTokens)
 	}

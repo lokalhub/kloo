@@ -98,17 +98,48 @@ func UsableWindow(window int) int { return usableWindow(window) }
 // compaction. A task already above it compacts on step one.
 func CompactTriggerTokens(window int) int { return triggerTokens(window) }
 
-// mapBudgetTokens is the repo-map token budget when working memory is engaged: a
-// fraction of the CURATOR budget — how much context kloo chooses to assemble —
-// NOT of the model's context window, which is how much the model can hold.
+// mapBudgetTokens caps the repo-map section at mapBudgetFrac of the REAL compaction
+// trigger — triggerTokens, working-set cap included — or of the curator budget when
+// that is deliberately smaller. Whichever binds, the map can never on its own be
+// large enough to force a compaction.
 //
-// Those are different decisions, and tying them together was a real bug: a model
-// advertising a 900k window made this authorise a 252k-token repo map on EVERY
-// turn. Capacity is discovered from the endpoint; appetite is chosen by us.
-// mapBudgetTokens caps the repo-map section. Budgeted against the COMPACTION
-// TRIGGER, so the map can never be large enough to force a compaction by itself.
-func mapBudgetTokens(curator int) int {
-	return int(float64(curator) * triggerFrac * mapBudgetFrac)
+// IT CARRIED TWO DOC COMMENTS AND THEY CONTRADICTED EACH OTHER. One said the base
+// is the curator budget and must NOT follow the window; the next said it is
+// "budgeted against the COMPACTION TRIGGER, so the map can never be large enough to
+// force a compaction by itself". The code did neither: it was
+// `curator x triggerFrac x mapBudgetFrac`, a trigger RECONSTRUCTED from a fraction,
+// and since v0.26.0 the real trigger is the window-adaptive working set
+// (workingset.go), not that fraction. So the second comment's guarantee failed
+// exactly where the cap binds. Measured before this change, --ctx 131072
+// --working-set-tokens 12000: trigger 12,000, map budget 22,019 — 184% of the
+// trigger, a map that guaranteed a compaction on turn one on its own. After:
+// 3,600, 30% of it.
+//
+// The sibling budget already had this base. hotBudgetTokens applies capWorkingSet;
+// this one did not, while hotBudgetFrac was documented as the "same base" as
+// mapBudgetFrac. The two fractions are meant to be a partition of what fits before
+// compaction (see mapBudgetFrac above) and a partition only holds if both sides
+// divide the same number.
+//
+// THE CONSTRAINT THE FIRST COMMENT WAS PROTECTING STILL HOLDS, and more tightly: a
+// model advertising a huge window must not authorise an enormous map. Capacity is
+// discovered from the endpoint, appetite is chosen by us, and the curator cap still
+// wins whenever it is the smaller of the two. Measured at --ctx 900000 with the
+// curator cap removed (--curator-budget set to the usable window, the worst case):
+// 46,080 tokens, against 151,200 before this change — because the working-set curve
+// bounds the trigger at 153,600 there while 0.70 x usable is 504,000.
+//
+// `window` is the DECLARED context window and `curatorCap` the configured cap, both
+// taken raw from the Loop. EffectiveCuratorBudget is applied here and only here, so
+// the caller cannot clamp it twice. Note that triggerTokens expects the USABLE
+// window, which is the convention every other caller follows (loop.go hands Assemble
+// usableWindow(ctx)) and the one workingset.go documents.
+func mapBudgetTokens(window, curatorCap int) int {
+	base := triggerTokens(usableWindow(window))
+	if c := EffectiveCuratorBudget(window, curatorCap); c > 0 && c < base {
+		base = c
+	}
+	return int(float64(base) * mapBudgetFrac)
 }
 
 // EffectiveCuratorBudget resolves the per-step context-assembly budget from the

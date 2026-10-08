@@ -111,3 +111,47 @@ func TestDoctorReportsRepeatRounds(t *testing.T) {
 		})
 	}
 }
+
+// TestDoctorWorkingSetLineDoesNotClaimToHoldThePrompt.
+//
+// The line read `working_set: 12000 tokens (BINDING — holds the prompt here instead
+// of 73399)` and that was false twice over. The cap lowers the compaction TRIGGER,
+// and the trigger bounds only the history compaction can shed — the system prompt,
+// the tool schemas and the repo map are re-assembled every turn and no compaction
+// reaches them. Measured on kloo's own tree at exactly this configuration before the
+// map-budget fix, `kloo context` put the first turn at 26,370 tokens against the
+// 12,000 doctor claimed to be holding it to.
+//
+// It matters because this line is a diagnostic: reporting the cap as working is why
+// the map budget sat at 184% of the trigger for three releases with nothing
+// complaining. A tool that says a cap is in force has to be right about what the cap
+// does.
+func TestDoctorWorkingSetLineDoesNotClaimToHoldThePrompt(t *testing.T) {
+	cfg := config.Config{
+		Model:            "m",
+		Endpoint:         "http://x/v1",
+		MaxContextTokens: 131072,
+		WorkingSetTokens: 12000,
+	}
+	defer agent.SetWorkingSetTokens(0)
+	agent.SetWorkingSetTokens(cfg.WorkingSetTokens)
+	diag := buildResolvedConfigDiagnostic(cfg, "", "", lintOpts{Disabled: true})
+
+	var buf bytes.Buffer
+	writeDoctorHuman(&buf, diag)
+	out := buf.String()
+
+	if !bytes.Contains(buf.Bytes(), []byte("working_set: 12000 tokens (BINDING")) {
+		t.Fatalf("the cap is binding at this configuration and must be reported as such:\n%s", out)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("holds the prompt")) {
+		t.Errorf("the working-set line still claims to hold the PROMPT; it holds the compaction trigger:\n%s", out)
+	}
+	// It must say where compaction starts, what the trigger governs, and where to go
+	// for a MEASURED prompt size rather than a derived one.
+	for _, want := range []string{"compaction starts here", "HISTORY compaction can shed", "kloo context"} {
+		if !bytes.Contains(buf.Bytes(), []byte(want)) {
+			t.Errorf("working-set line missing %q:\n%s", want, out)
+		}
+	}
+}

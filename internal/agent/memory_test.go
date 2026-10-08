@@ -345,7 +345,7 @@ func TestMemoryA5LegacyPathByteIdentical(t *testing.T) {
 	// could not distinguish the legacy (full) budget from the memory (shrunk) one.
 	probe := &Loop{Root: root, System: "you are kloo"}
 	full := probe.assembleContext(task, ctxTokens)
-	shrunk := probe.assembleContext(task, mapBudgetTokens(ctxTokens))
+	shrunk := probe.assembleContext(task, mapBudgetTokens(ctxTokens, 0))
 	if full == shrunk {
 		t.Fatalf("repo map too small to exercise the budget split (full==shrunk); raise nFiles/nFuncs")
 	}
@@ -376,7 +376,7 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 	win := usableWindow(ctxTokens)
 	probe := &Loop{Root: root, System: "you are kloo"}
 	full := probe.assembleContext(task, ctxTokens)
-	shrunk := probe.assembleContext(task, mapBudgetTokens(win))
+	shrunk := probe.assembleContext(task, mapBudgetTokens(ctxTokens, 0))
 	if full == shrunk {
 		t.Fatalf("repo map too small to exercise the budget split; raise nFiles/nFuncs")
 	}
@@ -394,15 +394,15 @@ func TestMemoryA6MemoryPathBudgets(t *testing.T) {
 		t.Errorf("memory path did not curate the map at mapBudgetTokens(window)")
 	}
 	st := wm.Stats()
-	if st.MapBudget != mapBudgetTokens(win) {
-		t.Errorf("Stats().MapBudget = %d, want %d", st.MapBudget, mapBudgetTokens(win))
+	if st.MapBudget != mapBudgetTokens(ctxTokens, 0) {
+		t.Errorf("Stats().MapBudget = %d, want %d", st.MapBudget, mapBudgetTokens(ctxTokens, 0))
 	}
 	if st.HotBudget != hotBudgetTokens(win) {
 		t.Errorf("Stats().HotBudget = %d, want %d", st.HotBudget, hotBudgetTokens(win))
 	}
 	// And the assembled history confirms the map budget really is < the window.
-	if mapBudgetTokens(ctxTokens) >= ctxTokens {
-		t.Errorf("mapBudgetTokens(%d) = %d must be < the window", ctxTokens, mapBudgetTokens(ctxTokens))
+	if mapBudgetTokens(ctxTokens, 0) >= ctxTokens {
+		t.Errorf("mapBudgetTokens(%d) = %d must be < the window", ctxTokens, mapBudgetTokens(ctxTokens, 0))
 	}
 	_ = repomap.ApproxTokens // map math is the shared estimator (no tokenizer dep)
 }
@@ -725,7 +725,7 @@ func TestBudgetsFitUnderTheCompactionTrigger(t *testing.T) {
 	for _, window := range []int{8000, 16384, 32768, 65536, 131072, 200000} {
 		usable := usableWindow(window)
 		trigger := int(float64(usable) * compactTriggerFrac)
-		m := mapBudgetTokens(EffectiveCuratorBudget(window, 0))
+		m := mapBudgetTokens(window, 0)
 		h := hotBudgetTokens(window)
 
 		if m+h >= trigger {
@@ -744,8 +744,8 @@ func TestBudgetsFitUnderTheCompactionTrigger(t *testing.T) {
 // raw-window bases is what let them overflow unnoticed.
 func TestBudgetsScaleTogether(t *testing.T) {
 	small, large := 32768, 65536
-	mS, hS := mapBudgetTokens(EffectiveCuratorBudget(small, 0)), hotBudgetTokens(small)
-	mL, hL := mapBudgetTokens(EffectiveCuratorBudget(large, 0)), hotBudgetTokens(large)
+	mS, hS := mapBudgetTokens(small, 0), hotBudgetTokens(small)
+	mL, hL := mapBudgetTokens(large, 0), hotBudgetTokens(large)
 
 	if mL <= mS || hL <= hS {
 		t.Fatalf("doubling the window did not grow both budgets: map %d->%d, hot %d->%d", mS, mL, hS, hL)
