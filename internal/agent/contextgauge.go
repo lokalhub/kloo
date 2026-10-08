@@ -346,7 +346,7 @@ func (l *Loop) ContextGauge() ContextGauge { return l.lastGauge }
 func (l *Loop) BuildPromptForMeasurement(ctx context.Context, task string) (messages, schemaTokens int, err error) {
 	ps, req, err := l.buildPrompt(ctx, task,
 		[]llm.Message{{Role: llm.RoleUser, Content: task}}, // convo[0] is the task
-		VerifyResult{}, "")                                 // no verify signal yet, no file under edit
+		VerifyResult{}, "") // no verify signal yet, no file under edit
 	if err != nil {
 		return 0, 0, err
 	}
