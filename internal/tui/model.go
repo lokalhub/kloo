@@ -298,6 +298,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProgress(msg)
 	case memoryMsg:
 		return m.handleMemory(msg)
+	case contextMsg:
+		return m.handleContext(msg)
 	case clipboardMsg:
 		return m.appendItem(infoItem{text: fmt.Sprintf("copied %d chars to clipboard", msg.chars)}), nil
 	case tickMsg:

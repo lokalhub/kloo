@@ -45,7 +45,7 @@ func ApplyToFile(path string, b Block) error {
 		return CreateFile(path, b)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readFileCapped(path)
 	if err != nil {
 		return fmt.Errorf("edit: read %s: %w", path, err)
 	}

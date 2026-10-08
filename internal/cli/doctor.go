@@ -101,7 +101,12 @@ type resolvedConfigDiagnostic struct {
 	MCP                    mcpDiagnostic     `json:"mcp"`
 	Retry                  retryDiagnostic   `json:"retry"`
 	Memory                 memoryDiagnostic  `json:"memory"`
-	AllowedImportDirsCount int               `json:"allowed_import_dirs_count"`
+	// MemoryGuard is the process-memory ceiling in force and the resident set right
+	// now (agent/memguard.go). In doctor because a guard that can stop a run must be
+	// inspectable before the run — and because kloo's previous OOM, at 44 GB, left no
+	// record of anything whatsoever.
+	MemoryGuard            memoryGuardDiagnostic `json:"memory_guard"`
+	AllowedImportDirsCount int                   `json:"allowed_import_dirs_count"`
 	AllowedEnvNames        []string          `json:"allowed_env_names"`
 	PatchOnly              bool              `json:"patch_only"`
 	Scope                  scopeDiagnostic   `json:"scope"`
@@ -114,6 +119,19 @@ type resolvedConfigDiagnostic struct {
 type promptCacheDiag struct {
 	Mode     string `json:"mode"`
 	Resolved bool   `json:"resolved"`
+}
+
+// memoryGuardDiagnostic reports the resident-memory ceiling. CeilingSource is here
+// because a number whose provenance is invisible is precisely how this command came
+// to print a working-set cap that held the prompt nowhere.
+type memoryGuardDiagnostic struct {
+	CeilingBytes  int64  `json:"ceiling_bytes"`
+	CeilingSource string `json:"ceiling_source"` // "default" | "env" | "disabled"
+	RSSBytes      uint64 `json:"rss_bytes"`
+	// MapContentBudgetBytes is the aggregate cap on the repo-map content load
+	// (agent/repomap_budget.go) — the bound that stops the pipeline that reproduces
+	// the 44 GB kill. 0 means it has been disabled.
+	MapContentBudgetBytes int64 `json:"map_content_budget_bytes"`
 }
 
 type scopeDiagnostic struct {
@@ -323,6 +341,12 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 			MaxRecallBytes: cfg.Memory.MaxRecallBytes,
 			StoreOnFailure: cfg.Memory.StoreOnFailure,
 		},
+		MemoryGuard: memoryGuardDiagnostic{
+			CeilingBytes:          agent.MemCeilingBytes(),
+			CeilingSource:         agent.MemCeilingSource(),
+			RSSBytes:              agent.ProcessRSSBytes(),
+			MapContentBudgetBytes: agent.RepoMapContentBudgetBytes(),
+		},
 		AllowedImportDirsCount: len(cfg.AllowedImportDirs),
 		AllowedEnvNames:        allowedEnv,
 		PatchOnly:              cfg.PatchOnly,
@@ -440,6 +464,22 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	fmt.Fprintf(out, "memory: enabled=%t server=%s recall=%s store=%s max_recall_bytes=%d store_on_failure=%t\n",
 		diag.Memory.Enabled, noneDash(diag.Memory.Server), noneDash(diag.Memory.RecallTool),
 		noneDash(diag.Memory.StoreTool), diag.Memory.MaxRecallBytes, diag.Memory.StoreOnFailure)
+	// The real default, stated as such. This file has a history of claiming "off by
+	// default" for rails that shipped on, so the line names the SOURCE of the number
+	// rather than describing the feature.
+	switch mg := diag.MemoryGuard; {
+	case mg.CeilingBytes <= 0:
+		fmt.Fprintf(out, "memory_guard: DISABLED (rss %s now; nothing stops kloo before the kernel's OOM killer)\n",
+			humanBytesCLI(mg.RSSBytes))
+	default:
+		fmt.Fprintf(out, "memory_guard: ceiling %s (source=%s), rss %s now — kloo stops itself above the ceiling\n",
+			humanBytesCLI(uint64(mg.CeilingBytes)), mg.CeilingSource, humanBytesCLI(mg.RSSBytes))
+	}
+	if b := diag.MemoryGuard.MapContentBudgetBytes; b <= 0 {
+		fmt.Fprintf(out, "map_content_budget: disabled (the repo-map content load is unbounded — the pre-v0.26 behaviour)\n")
+	} else {
+		fmt.Fprintf(out, "map_content_budget: %s of workspace source per map assembly\n", humanBytesCLI(uint64(b)))
+	}
 	fmt.Fprintf(out, "allowed_import_dirs: %d\n", diag.AllowedImportDirsCount)
 	fmt.Fprintf(out, "allowed_env: %d names=%q\n", len(diag.AllowedEnvNames), diag.AllowedEnvNames)
 	fmt.Fprintf(out, "patch_only: %t\n", diag.PatchOnly)

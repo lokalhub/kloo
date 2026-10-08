@@ -30,6 +30,12 @@ func (r *Report) String() string {
 	case ReasonBudgetExceeded:
 		if r.Budget != nil {
 			fmt.Fprintf(&b, " — %s budget exceeded (limit %s, observed %s)", r.Budget.Kind, r.Budget.Limit, r.Budget.Observed)
+			// The memory ceiling is the one budget whose remedy is not obvious from the
+			// numbers, so it gets its own line rather than being crammed into Observed
+			// (which renders mid-sentence, before the limit).
+			if r.Budget.Kind == BudgetMemory {
+				fmt.Fprintf(&b, "\n  %s", memCeilingAdvice())
+			}
 		}
 	case ReasonChurn:
 		if r.Churn != nil {

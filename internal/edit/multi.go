@@ -100,7 +100,7 @@ func stageFile(path string, blocks []Block) (string, error) {
 
 		// In-place edit form.
 		if !loaded {
-			data, err := os.ReadFile(path)
+			data, err := readFileCapped(path)
 			if err != nil {
 				return "", fmt.Errorf("edit: read %s: %w", path, err)
 			}
