@@ -79,6 +79,11 @@ type reportMsg struct {
 	// receipt (steps/tokens/elapsed) with the answer nowhere on screen. Reported as
 	// kloo "not feeling like" grok or Claude on the same model and question.
 	Summary string
+	// Rails is the run's soft-rail tally, rendered as "self-corrections: name×n".
+	// These were headless-JSON-only, so an interactive user had no way to see that a
+	// rail had fired — including chat-gate-action, which means the conversational
+	// gate tried to DO the work in a turn that has no tools.
+	Rails string
 	// SummarySalvaged: the Summary is the last thing the model happened to say, not
 	// a reply it was asked for. It may be a fragment mid-investigation, so it is
 	// labelled rather than presented as a conclusion — passing one off as a final
@@ -136,6 +141,9 @@ func (ri reportItem) render(width int) string {
 			result = verifyFail.Render(fmt.Sprintf("exit %d %s", r.VerifyExit, glyphFail))
 		}
 		fmt.Fprintf(&b, "last verify: %s → %s\n", r.VerifyCmd, result)
+	}
+	if r.Rails != "" {
+		fmt.Fprintf(&b, "self-corrections: %s\n", r.Rails)
 	}
 	if r.RolledBack {
 		b.WriteString("workspace rolled back to checkpoint. Refine the task and retry.")

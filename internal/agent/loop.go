@@ -967,13 +967,19 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// the finished task on a vague input like "thanks" (the system prompt telling it
 	// to just finish isn't enough). Only a TASK verdict falls through to the loop;
 	// anything else is replied to and stops as a calm ReasonAnswered. Disabled when
-	// ChatSystem is empty (headless/benchmark). A gate error fails OPEN — we run the
-	// loop rather than block real work on a classifier hiccup.
+	// ChatSystem is empty (headless/benchmark) or --no-chat-gate. A gate error fails
+	// OPEN — we run the loop rather than block real work on a classifier hiccup, and
+	// so does a reply that is itself a tool call (RailChatGateAction): the model has
+	// decided to act, and printing its call as the answer is the step-0 `answered`
+	// stop that made kloo state work it never did.
 	if l.ChatSystem != "" && ctx.Err() == nil {
-		reply, conversational, usage, gateErr := l.chatGate(ctx, task)
+		reply, conversational, gateAction, usage, gateErr := l.chatGate(ctx, task)
 		l.observeUsage(usage)
 		if gateErr != nil {
 			return finish(ReasonError, gateErr, nil, nil)
+		}
+		if gateAction {
+			recordRail(RailChatGateAction)
 		}
 		if conversational {
 			if l.OnDelta != nil {
@@ -3773,7 +3779,7 @@ const chatSentinel = "TASK"
 // never flash on the user's screen; the conversational reply is surfaced by the
 // caller (via OnDelta) only once classification is known. Any error fails OPEN
 // (returns false) so a classifier hiccup never blocks real work.
-func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, usage llm.Usage, gateErr error) {
+func (l *Loop) chatGate(ctx context.Context, task string) (reply string, conversational bool, action bool, usage llm.Usage, gateErr error) {
 	msgs := []llm.Message{{Role: llm.RoleSystem, Content: l.ChatSystem}}
 	msgs = append(msgs, l.SessionHistory...)
 	// The gate sees the attachments too. It is a MODEL CALL that answers the user
@@ -3790,18 +3796,32 @@ func (l *Loop) chatGate(ctx context.Context, task string) (reply string, convers
 
 	resp, err := l.Client.Complete(ctx, l.withThinkingControl(llm.ChatRequest{Model: l.Model, Messages: msgs, Temperature: l.Temperature}))
 	if err != nil {
-		return "", false, llm.Usage{}, nil // fail open: run the loop normally
+		return "", false, false, llm.Usage{}, nil // fail open: run the loop normally
 	}
 	msg := assistantMessage(resp)
 	usage = estimateUsage(resp.Usage, msgs, msg)
 	if err := runawayThinkingError(msg); err != nil {
-		return "", false, usage, err
+		return "", false, false, usage, err
+	}
+	// An action is not a conversation. The gate has no tools, but a model told
+	// "answer, or reply TASK" routinely answers by WRITING THE CALL anyway — e.g.
+	//
+	//	<tool_call><function=shell><parameter=command>cat > reply.md << 'EOF' …
+	//
+	// That text is not the TASK sentinel, so it was printed to the user as the final
+	// answer and the run stopped at step 0 as a calm `answered`: kloo stating the
+	// work and never doing it. Measured in a live session (37 runs, 21 of them
+	// `answered after 0 step(s)`, the visible "answer" being a heredoc body). The
+	// model has already decided to act — send the turn into the loop, where the call
+	// can actually be parsed and dispatched.
+	if tools.LooksLikeToolCall(msg) {
+		return "", false, true, usage, nil
 	}
 	text := strings.TrimSpace(msg.Content)
 	if text == "" || isTaskVerdict(text) {
-		return "", false, usage, nil
+		return "", false, false, usage, nil
 	}
-	return text, true, usage, nil
+	return text, true, false, usage, nil
 }
 
 // isTaskVerdict reports whether the gate reply is the TASK sentinel. Lenient: the

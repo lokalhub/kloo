@@ -249,6 +249,7 @@ churn detection as the primary guard).
 | `--llm-stream-idle-timeout` | `5m` | Streaming no-token idle timeout. |
 | `--no-think` | `false` | Ask compatible OpenAI-style backends to disable thinking/reasoning by sending `reasoning_effort: "none"` on chat requests. |
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
+| `--no-chat-gate` | `false` | Disable the interactive **conversational gate**. The gate is one extra no-tools model call made before each interactive run: it replies `TASK` to hand an actionable message to the agent loop, and anything else is shown to you as the answer with the run stopping at `steps: 0 · ANSWERED`. It keeps a weak model from re-doing finished work on a "thanks". Turn it off when the model classifies your messages badly or you do not want the extra call per message. Profile key: `"noChatGate": true`. Headless runs and subagents never use the gate. |
 | `--allowed-dirs` | _(unset)_ | Directories **outside** the workspace that an `AGENTS.md` [`@import`](#project-instructions-agentsmd) may read from. Repeatable or comma-separated. Read-only and load-time only — it never widens the model's file tools. |
 | `--allow-env` | _(unset)_ | Env var **names** to forward from kloo's own environment into `run_command` (repeatable/comma-separated). By default executed commands get a least-privilege env (`PATH/HOME/LANG/…`) so a model-proposed command can't exfiltrate secrets; this is the deliberate, user-granted passthrough for a **trusted deploy/CI step** that needs a specific secret (e.g. `--allow-env CLOUDFLARE_API_TOKEN,ADMIN_PASSWORD`). The value is read from kloo's env at run time — it never appears in the model's prompt or transcript. |
 | `--allow` | _(unset)_ | Glob(s) the model **may edit** (repeatable/comma-separated). See [file scope](#file-scope---allow----deny----read-only). An empty allow set means all in-jail files are editable unless `--deny`/`--read-only` narrows it. **Setting any scope flag disables the model-facing `run_command`.** |
@@ -1299,7 +1300,8 @@ Common sections, all optional:
     "llmRetryMaxDelay": "30s",
     "llmColdLoadTimeout": "2m",
     "llmStreamIdleTimeout": "5m",
-    "noThink": true                 // ask compatible backends to disable reasoning
+    "noThink": true,                // ask compatible backends to disable reasoning
+    "noChatGate": true              // skip the interactive conversational gate
   },
   "deepseek/deepseek-v4-flash": {
     "toolFormat": "native",
