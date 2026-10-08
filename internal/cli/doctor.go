@@ -77,40 +77,40 @@ type resolvedConfigDiagnostic struct {
 	// OpenAI per-request parameter — in the one command whose job is to remove
 	// confusion about the resolved configuration. The per-request cap is printed
 	// beside it as max_output_tokens.
-	MaxRunTokens           int               `json:"max_run_tokens"`
-	MaxRunTokensComputed   bool              `json:"max_run_tokens_computed"`
-	MaxOutputTokens        int               `json:"max_output_tokens"`
-	MaxWallClockSeconds    int               `json:"max_wall_clock_seconds"`
-	ChurnRounds            int               `json:"churn_rounds"`
-	RepeatNudgeRounds      int               `json:"repeat_nudge_rounds"`
-	ExploreNudgeRounds     int               `json:"explore_nudge_rounds"`
-	UsableWindowFrac       float64           `json:"usable_window_frac"`
-	CompactTriggerFrac     float64           `json:"compact_trigger_frac"`
-	UsablePromptTokens     int               `json:"usable_prompt_tokens"`
-	CompactAtTokens        int               `json:"compact_at_tokens"`
-	WorkingSetTokens       int               `json:"working_set_tokens"`
-	SummaryBudgetFrac      float64           `json:"summary_budget_frac"`
-	ExploreAbortRounds     int               `json:"explore_abort_rounds"`
-	RepeatAbortRounds      int               `json:"repeat_abort_rounds"`
-	Temperature            float64           `json:"temperature"`
-	NoThink                bool              `json:"no_think"`
-	ToolFormat             string            `json:"tool_format"`
-	PromptCache            promptCacheDiag   `json:"prompt_cache"`
-	Verify                 commandDiagnostic `json:"verify"`
-	Lint                   commandDiagnostic `json:"lint"`
-	MCP                    mcpDiagnostic     `json:"mcp"`
-	Retry                  retryDiagnostic   `json:"retry"`
-	Memory                 memoryDiagnostic  `json:"memory"`
+	MaxRunTokens         int               `json:"max_run_tokens"`
+	MaxRunTokensComputed bool              `json:"max_run_tokens_computed"`
+	MaxOutputTokens      int               `json:"max_output_tokens"`
+	MaxWallClockSeconds  int               `json:"max_wall_clock_seconds"`
+	ChurnRounds          int               `json:"churn_rounds"`
+	RepeatNudgeRounds    int               `json:"repeat_nudge_rounds"`
+	ExploreNudgeRounds   int               `json:"explore_nudge_rounds"`
+	UsableWindowFrac     float64           `json:"usable_window_frac"`
+	CompactTriggerFrac   float64           `json:"compact_trigger_frac"`
+	UsablePromptTokens   int               `json:"usable_prompt_tokens"`
+	CompactAtTokens      int               `json:"compact_at_tokens"`
+	WorkingSetTokens     int               `json:"working_set_tokens"`
+	SummaryBudgetFrac    float64           `json:"summary_budget_frac"`
+	ExploreAbortRounds   int               `json:"explore_abort_rounds"`
+	RepeatAbortRounds    int               `json:"repeat_abort_rounds"`
+	Temperature          float64           `json:"temperature"`
+	NoThink              bool              `json:"no_think"`
+	ToolFormat           string            `json:"tool_format"`
+	PromptCache          promptCacheDiag   `json:"prompt_cache"`
+	Verify               commandDiagnostic `json:"verify"`
+	Lint                 commandDiagnostic `json:"lint"`
+	MCP                  mcpDiagnostic     `json:"mcp"`
+	Retry                retryDiagnostic   `json:"retry"`
+	Memory               memoryDiagnostic  `json:"memory"`
 	// MemoryGuard is the process-memory ceiling in force and the resident set right
 	// now (agent/memguard.go). In doctor because a guard that can stop a run must be
 	// inspectable before the run — and because kloo's previous OOM, at 44 GB, left no
 	// record of anything whatsoever.
 	MemoryGuard            memoryGuardDiagnostic `json:"memory_guard"`
 	AllowedImportDirsCount int                   `json:"allowed_import_dirs_count"`
-	AllowedEnvNames        []string          `json:"allowed_env_names"`
-	PatchOnly              bool              `json:"patch_only"`
-	Scope                  scopeDiagnostic   `json:"scope"`
-	StopOn                 stopOnDiagnostic  `json:"stop_on"`
+	AllowedEnvNames        []string              `json:"allowed_env_names"`
+	PatchOnly              bool                  `json:"patch_only"`
+	Scope                  scopeDiagnostic       `json:"scope"`
+	StopOn                 stopOnDiagnostic      `json:"stop_on"`
 }
 
 // promptCacheDiag reports the configured mode AND what it resolved to. The
@@ -439,9 +439,24 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	switch {
 	case diag.WorkingSetTokens <= 0:
 		fmt.Fprintf(out, "working_set: disabled (compact_at is the fraction alone)\n")
+	// "HOLDS THE PROMPT HERE" WAS FALSE AND IT HID A REAL DEFECT.
+	//
+	// The cap lowers the compaction TRIGGER. The trigger decides when shedding
+	// starts and bounds the history that shedding can reach; it does not bound the
+	// prompt, because the system prompt, the tool schemas and the repo map are
+	// re-assembled every turn and no compaction removes them. Measured on kloo's own
+	// tree at --ctx 131072 --working-set-tokens 12000, doctor printed "holds the
+	// prompt here" for 12,000 while `kloo context` measured the first turn at 26,370
+	// — the repo-map budget alone was 22,019, 184% of the trigger it was supposed to
+	// sit inside, because mapBudgetTokens reconstructed the trigger from a fraction
+	// instead of reading it (agent/memory.go). This line reporting the cap as working
+	// is why that went three releases unnoticed, so it now says what the cap does and
+	// points at the instrument that measures the prompt rather than deriving it.
 	case diag.CompactAtTokens >= diag.WorkingSetTokens:
-		fmt.Fprintf(out, "working_set: %d tokens (BINDING — holds the prompt here instead of %d)\n",
+		fmt.Fprintf(out, "working_set: %d tokens (BINDING — compaction starts here instead of %d)\n",
 			diag.WorkingSetTokens, int(diag.CompactTriggerFrac*float64(diag.UsablePromptTokens)))
+		fmt.Fprintf(out, "  the trigger bounds the HISTORY compaction can shed, not the whole prompt — "+
+			"the system prompt, tool schemas and repo map are re-sent every turn; `kloo context` measures the assembled prompt\n")
 	default:
 		fmt.Fprintf(out, "working_set: %d tokens (not binding — the fraction is tighter)\n", diag.WorkingSetTokens)
 	}

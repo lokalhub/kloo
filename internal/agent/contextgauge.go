@@ -14,8 +14,9 @@ import (
 //   - `kloo tokens` printed `headroom: usable - approx(task)`. approx is the TASK
 //     STRING ALONE — no repo map, no system prompt, no AGENTS.md, no history. At
 //     --ctx 131072 it reported ~104,848 tokens free on a window whose FIRST turn
-//     already spends ~22k on the repo map before the task is read. Measured on
-//     kloo's own tree at the default budget: the map assembles to 22,109 tokens.
+//     already spends thousands of tokens on the repo map before the task is read.
+//     Measured on kloo's own tree at --ctx 131072: 9,869 tokens of map at the stock
+//     --curator-budget, 17,660 with the curator cap removed.
 //   - the run display `── step 44/500 tokens 1553679/480000` is CUMULATIVE SPEND
 //     against the run budget. The whole prompt is counted every turn, so that
 //     counter routinely exceeds the window by 10x. It is a bill, not a gauge.
@@ -172,8 +173,8 @@ type ContextGauge struct {
 	// measured number came to be computed and then hidden.
 	//
 	// A small PROPORTIONAL overshoot is two estimators disagreeing, not an unenforced
-	// cap. Measured across a 3.2x change in the curator budget: 6,881 budget / 6,912
-	// actual (+0.45%) and 22,019 / 22,123 (+0.47%). An unenforced cap would overshoot
+	// cap. Measured across a 3.2x change in the curator budget: 9,830 budget / 9,869
+	// actual (+0.40%) and 17,585 / 17,660 (+0.43%). An unenforced cap would overshoot
 	// by whatever the next file happened to be, not by a constant fraction.
 	// repomap.Assemble stays within budget by summing PER-ENTRY estimates; this gauge
 	// re-estimates the concatenated whole, and tokens.Estimate is not additive over
@@ -345,7 +346,7 @@ func (l *Loop) ContextGauge() ContextGauge { return l.lastGauge }
 func (l *Loop) BuildPromptForMeasurement(ctx context.Context, task string) (messages, schemaTokens int, err error) {
 	ps, req, err := l.buildPrompt(ctx, task,
 		[]llm.Message{{Role: llm.RoleUser, Content: task}}, // convo[0] is the task
-		VerifyResult{}, "")                                 // no verify signal yet, no file under edit
+		VerifyResult{}, "") // no verify signal yet, no file under edit
 	if err != nil {
 		return 0, 0, err
 	}

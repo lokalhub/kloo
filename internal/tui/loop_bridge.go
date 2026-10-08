@@ -120,7 +120,13 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 		// buildPrompt already measured — it assembles nothing and costs the prompt
 		// nothing (agent/contextgauge.go).
 		if g := r.loop.ContextGauge(); g.Usable > 0 && g.Used > 0 {
-			r.send(contextMsg{Used: g.Used, Usable: g.Usable})
+			r.send(contextMsg{
+				Used: g.Used, Usable: g.Usable,
+				// Trigger/Free/FreeToCompaction are copied, not recomputed from Usable: the
+				// trigger is the working-set cap applied to a fraction, and a status bar that
+				// multiplied the fraction itself would print the pre-v0.25.6 number.
+				Trigger: g.Trigger, Free: g.Free, FreeToCompaction: g.FreeToCompaction,
+			})
 		}
 	}
 	// Capture a compact, human-readable display log of THIS run for resume: the
