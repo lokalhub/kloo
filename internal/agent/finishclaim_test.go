@@ -83,7 +83,7 @@ func TestUnsupportedFinishClaim(t *testing.T) {
 		},
 		{
 			name:    "a hostname is not a filename",
-			summary: "Wrote the config pointing at lokalai.silverjrom.app for the endpoint.",
+			summary: "Wrote the config pointing at api.example.com for the endpoint.",
 			want:    "",
 		},
 		{
