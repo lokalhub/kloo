@@ -152,6 +152,10 @@ func parseNamedTagParams(body string) map[string]any {
 var toolCallMarkers = []string{
 	"<tool_call", "<invoke_name", "<tool_name", "<invoke ", "<function=", "<function>",
 	"\"tool_call\"", "tool_calls", "<｜DSML｜",
+	// The XMLAdapter's own grammar (<tool name="…"><arg name="…">). A model served
+	// native function-calling can still answer in it — nothing here parsed it, and
+	// without this marker the attempt passed for prose.
+	"<tool name=",
 }
 
 // looksLikeToolCall reports whether content appears to contain an attempted tool

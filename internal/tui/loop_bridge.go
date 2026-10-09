@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -573,6 +574,7 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 		VerifyExit: rep.FinalVerify.ExitCode,
 		RolledBack: rep.RolledBack,
 		Summary:    rep.Summary,
+		Rails:      railSummary(rep.RailFires),
 	}
 	switch {
 	case rep.Err != nil:
@@ -591,4 +593,22 @@ func reportFor(rep *agent.Report, maxTokens int) reportMsg {
 		}
 	}
 	return msg
+}
+
+// railSummary renders a Report's rail tally as "name×n, name×n" in a stable
+// order, or "" when nothing fired.
+func railSummary(fires map[string]int) string {
+	if len(fires) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(fires))
+	for k := range fires {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, k := range names {
+		parts = append(parts, fmt.Sprintf("%s\u00d7%d", k, fires[k]))
+	}
+	return strings.Join(parts, ", ")
 }

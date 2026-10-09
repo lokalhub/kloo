@@ -128,7 +128,10 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		Tokens:        tokenCalibrator(cwd, cfg.Model),
 		Memory:        agent.NewWorkingMemory(), // working memory on by default (P00); maxContextTokens governs compaction
 		System:        SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(os.Stderr)),
-		ChatSystem:    chatGateSystemPrompt, // interactive only: answer chit-chat without launching a run
+		// Interactive only: answer chit-chat without launching a run. Empty disables
+		// the gate entirely (--no-chat-gate / "noChatGate"), as headless and
+		// subagents already do.
+		ChatSystem: chatGateSystem(cfg.NoChatGate),
 
 		StopOn:                  agentStopPolicy(cfg.StopOn),
 		StallRounds:             cfg.ChurnRounds,

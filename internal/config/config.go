@@ -258,6 +258,11 @@ type Config struct {
 	// negative ⇒ never sent (kloo's historical behaviour).
 	MaxOutputTokens int
 	NoFinalAnswer   bool
+	// NoChatGate disables the interactive conversational gate (the single no-tools
+	// classifier call before the agent loop). On by default; this is the escape
+	// hatch for a model that classifies the user's messages badly, which costs an
+	// extra call per message and can answer instead of working.
+	NoChatGate bool
 	// ExploreSaturationWindow/Min: the sliding-window new-ground rail.
 	ExploreSaturationWindow int
 	ExploreSaturationMin    float64
@@ -383,8 +388,10 @@ type Flags struct {
 	// Distinct from MaxTokens, which is the whole run's cumulative ceiling.
 	MaxOutputTokens *int
 	NoFinalAnswer   *bool
-	Mode            *string
-	Effort          *string
+	// NoChatGate (--no-chat-gate) turns the conversational gate off. nil ⇒ unset.
+	NoChatGate *bool
+	Mode       *string
+	Effort     *string
 	// MaxContextTokens (--ctx) overrides the per-step context window above the
 	// profile/bundled/built-in defaults. nil ⇒ not set on the CLI.
 	MaxContextTokens *int
@@ -475,6 +482,7 @@ type profileEntry struct {
 	CompactTriggerFrac      *float64 `json:"compactTriggerFrac,omitempty"`
 	WorkingSetTokens        *int     `json:"workingSetTokens,omitempty"`
 	NoThink                 *bool    `json:"noThink,omitempty"`
+	NoChatGate              *bool    `json:"noChatGate,omitempty"`
 	LLMMaxRetries           *int     `json:"llmMaxRetries,omitempty"`
 	LLMRetryCodes           []int    `json:"llmRetryCodes,omitempty"`
 	LLMRetryBaseDelay       *string  `json:"llmRetryBaseDelay,omitempty"`
@@ -673,6 +681,9 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
+	}
+	if e.NoChatGate != nil {
+		cfg.NoChatGate = *e.NoChatGate
 	}
 	if e.LLMMaxRetries != nil {
 		cfg.LLMMaxRetries = *e.LLMMaxRetries
@@ -1059,6 +1070,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.NoFinalAnswer != nil {
 		cfg.NoFinalAnswer = *flags.NoFinalAnswer
+	}
+	if flags.NoChatGate != nil {
+		cfg.NoChatGate = *flags.NoChatGate
 	}
 	if flags.CuratorBudgetTokens != nil {
 		cfg.CuratorBudgetTokens = *flags.CuratorBudgetTokens

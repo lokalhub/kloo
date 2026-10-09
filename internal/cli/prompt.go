@@ -80,7 +80,9 @@ const chatGateSystemPrompt = "You are kloo, a coding assistant in an ongoing ses
 	"Look ONLY at the user's latest message and decide which case it is.\n\n" +
 	"CASE 1 — it asks you to write, modify, create, delete, inspect, run, build, test, or fix " +
 	"code or files (any actionable work). Then respond with EXACTLY this one word and nothing else:\n" +
-	"TASK\n\n" +
+	"TASK\n" +
+	"You have NO tools in this turn: do not write the command, the file, or a tool call here. TASK is what " +
+	"hands the work to the tool-equipped agent, which is the only thing that can actually do it.\n\n" +
 	"CASE 2 — anything else: a greeting, thanks, an acknowledgement (\"ok\", \"nice\", \"got it\"), " +
 	"small talk, or a question you can answer from the conversation so far. Then do NOT output TASK — " +
 	"instead reply to the user directly, briefly (1-3 sentences) and helpfully. Do not start or describe " +
@@ -140,4 +142,15 @@ func envInt(name string) int {
 		return 0
 	}
 	return n
+}
+
+// chatGateSystem returns the gate prompt, or "" to disable the gate. The gate
+// costs one extra model call per message and decides, before any tool is
+// available, whether to work or reply — so a model that classifies badly needs a
+// way out (--no-chat-gate).
+func chatGateSystem(disabled bool) string {
+	if disabled {
+		return ""
+	}
+	return chatGateSystemPrompt
 }

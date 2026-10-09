@@ -211,6 +211,14 @@ const (
 	// the situation never arose — the previous behaviour spent whole step budgets, and
 	// on the unscoped variant of the same task 1.55M tokens, in silence (baseline.go).
 	RailVerifyOutOfScope Rail = "verify-out-of-scope"
+	// RailChatGateAction: the conversational gate — which has no tools — answered
+	// with a tool call instead of the TASK sentinel, so the turn was routed into the
+	// agent loop. Recorded because the alternative readings are indistinguishable
+	// otherwise: a gate that classified correctly, a gate that said TASK, and a gate
+	// that tried to act all end in the same loop. The live defect this fixes (a
+	// swallowed call printed to the user as the answer, run stopped at step 0) was
+	// invisible for exactly that reason.
+	RailChatGateAction Rail = "chat-gate-action"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

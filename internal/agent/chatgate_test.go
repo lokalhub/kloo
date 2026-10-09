@@ -150,3 +150,43 @@ func TestIsTaskVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestChatGateToolCallReplyRunsTheLoop: the gate has no tools, but the model
+// frequently answers by WRITING the call anyway. That text is not the TASK
+// sentinel, and it used to be printed to the user as the answer with the run
+// stopping at step 0 as a calm `answered` — kloo stating work it never did (a
+// live session: 21 of 37 runs, the visible "answer" being the heredoc body of a
+// swallowed `cat > reply.md` call). An action-shaped reply must reach the loop.
+func TestChatGateToolCallReplyRunsTheLoop(t *testing.T) {
+	for _, tc := range []struct{ name, gate string }{
+		{"function dialect", "<tool_call>\n<function=write_file>\n<parameter=path>reply.md</parameter>\n<parameter=content>hi</parameter>\n</function>\n</tool_call>"},
+		{"shell heredoc", "<tool_call><function=run_command><parameter=command>cat > reply.md << 'EOF'\n# Summary\nthe answer\nEOF</parameter>"},
+		{"xml dialect", "<tool name=\"write_file\"><arg name=\"path\">reply.md</arg></tool>"},
+		{"json dialect", `{"name":"write_file","arguments":{"path":"reply.md","content":"hi"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := llmtest.Sequence(t,
+				llmtest.Mock{Body: proseResp(t, tc.gate)}, // gate answers with an action
+				llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+			)
+			loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+			loop.ChatSystem = "classify the message: TASK or a reply"
+			// OnDelta is deliberately left nil: the loop streams when it is set, and
+			// the mocks here are plain JSON bodies.
+
+			rep, err := loop.Run(context.Background(), "write the summary to reply.md")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if rep.Reason != ReasonSuccess {
+				t.Fatalf("reason = %q, want success (an action-shaped gate reply must run the loop)", rep.Reason)
+			}
+			if rep.Steps == 0 {
+				t.Errorf("steps = 0: the gate swallowed the action again")
+			}
+			if strings.Contains(rep.Summary, "reply.md") {
+				t.Errorf("the gate's tool call reached the user as prose: %q", rep.Summary)
+			}
+		})
+	}
+}

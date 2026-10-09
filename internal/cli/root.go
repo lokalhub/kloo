@@ -126,6 +126,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagMaxTokens        int
 		flagMaxOutputTokens  int
 		flagNoFinalAnswer    bool
+		flagNoChatGate       bool
 		flagTemp             float64
 		flagVerify           string
 		flagBenchmark        bool
@@ -214,6 +215,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("no-final-answer") {
 				flags.NoFinalAnswer = &flagNoFinalAnswer
+			}
+			if fs.Changed("no-chat-gate") {
+				flags.NoChatGate = &flagNoChatGate
 			}
 			if fs.Changed("max-tokens") {
 				flags.MaxTokens = &flagMaxTokens
@@ -372,6 +376,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagMaxSteps, "max-steps", config.DefaultMaxSteps, "max autonomous steps")
 	f.IntVar(&flagMaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ NOT SENT, the default; negative ⇒ computed from the window minus the estimated prompt). Not the same as --max-tokens, which is the whole run")
 	f.BoolVar(&flagNoFinalAnswer, "no-final-answer", false, "do not make a closing tool-free call for an answer when a budget or rail cuts the run short (the last prose kloo produced is still shown)")
+	f.BoolVar(&flagNoChatGate, "no-chat-gate", false, "disable the interactive conversational gate (the extra no-tools classifier call before each run; it answers chit-chat without launching work)")
 	f.IntVar(&flagMaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ computed from the context window, the default; negative ⇒ unbounded). The status line shows used/budget")
 	f.IntVar(&flagCtx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&flagCurator, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
@@ -454,6 +459,9 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	}
 	if fs.Changed("no-final-answer") {
 		flags.NoFinalAnswer = &values.NoFinalAnswer
+	}
+	if fs.Changed("no-chat-gate") {
+		flags.NoChatGate = &values.NoChatGate
 	}
 	if fs.Changed("max-tokens") {
 		flags.MaxTokens = &values.MaxTokens
@@ -579,6 +587,7 @@ type configFlagValues struct {
 	MaxTokens            int
 	MaxOutputTokens      int
 	NoFinalAnswer        bool
+	NoChatGate           bool
 	Temperature          float64
 	Effort               string
 	NoMCP                bool
@@ -628,6 +637,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.IntVar(&v.MaxTokens, "max-tokens", config.DefaultMaxTokens, "cap CUMULATIVE tokens for the run (0 ⇒ computed from the context window, the default; negative ⇒ unbounded)")
 	f.IntVar(&v.MaxOutputTokens, "max-output-tokens", 0, "PER-REQUEST completion cap sent as max_tokens (0 ⇒ NOT SENT, the default; negative ⇒ computed)")
 	f.BoolVar(&v.NoFinalAnswer, "no-final-answer", false, "do not make a closing tool-free call for an answer when a budget or rail cuts the run short")
+	f.BoolVar(&v.NoChatGate, "no-chat-gate", false, "disable the interactive conversational gate (the extra no-tools classifier call before each run; it answers chit-chat without launching work)")
 	f.IntVar(&v.Ctx, "ctx", config.DefaultMaxContextTokens, "per-step context window (match your server's -c; needed for a llama-swap/Ollama alias the bundled defaults can't size)")
 	f.IntVar(&v.CuratorBudget, "curator-budget", config.DefaultCuratorBudgetTokens, "cap on the context kloo ASSEMBLES per step (the repo map), separate from --ctx which is what the model can hold")
 	f.StringVar(&v.MapPosition, "map-position", config.DefaultMapPosition, "where the repo map goes in the prompt: tail (default; keeps the prefix cacheable) or system (legacy)")
