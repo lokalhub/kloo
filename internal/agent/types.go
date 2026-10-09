@@ -219,6 +219,13 @@ const (
 	// swallowed call printed to the user as the answer, run stopped at step 0) was
 	// invisible for exactly that reason.
 	RailChatGateAction Rail = "chat-gate-action"
+	// RailFinishClaimUnsupported: the finish summary asserted a concrete action —
+	// a file created, a command run — that this run's tool output does not support,
+	// so the finish was refused once with a corrective naming the gap. Recorded
+	// because the failure it catches is silent by construction: the run ends
+	// normally, the user is told the work was done, and nothing in the report
+	// disagrees. See finishclaim.go for the live incident.
+	RailFinishClaimUnsupported Rail = "finish-claim-unsupported"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

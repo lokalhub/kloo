@@ -809,6 +809,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		churnBanned    = map[string]bool{}
 		churnEscalated bool
 		editedPaths    = map[string]bool{}
+		// Finish-claim state. ranCommand records whether run_command ever dispatched
+		// cleanly this run; finishClaimNudged makes the claim refusal one-shot, so a
+		// model with genuinely nothing left still stops on the next turn.
+		ranCommand        bool
+		finishClaimNudged bool
 		// summarySalvaged marks a Summary that is the last thing the model happened to
 		// say rather than a reply it was asked for, so the renderers can label it
 		// honestly instead of passing a mid-investigation fragment off as a conclusion.
@@ -1163,6 +1168,20 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// tools.FinishSummary); reading only "summary" dropped the reply outright.
 			finishSummary = tools.FinishSummary(call.Args)
 			convo = append(convo, observation(call, tools.Result{Output: finishSummary}, nil))
+			// Claim check (finishclaim.go): the summary is the run's closing message to
+			// the user, and it was the one thing kloo passed through on the model's word.
+			// A claim this run's tools cannot back refuses the finish ONCE. The summary is
+			// cleared with it — if the run then ends some other way, it must not close
+			// with the sentence that was just shown to be false.
+			if !finishClaimNudged {
+				if missing := l.unsupportedFinishClaim(finishSummary, editedPaths, ranCommand); missing != "" {
+					finishClaimNudged = true
+					finishSummary = ""
+					recordRail(RailFinishClaimUnsupported)
+					convo = append(convo, finishClaimCorrective(missing))
+					continue
+				}
+			}
 			if l.Verifier == nil {
 				// Unverified mode: no command to prove the change works. Honour finish
 				// as a calm terminal stop, but label it UNVERIFIED — distinct from
@@ -1396,6 +1415,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// stop must be challenged rather than accepted as a calm answer.
 		if !isReadOnlyTool(call.Name) && derr == nil {
 			everActed = true
+		}
+		if call.Name == tools.NameRunCommand && derr == nil {
+			ranCommand = true
 		}
 
 		editedBefore := edited
