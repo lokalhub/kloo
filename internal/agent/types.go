@@ -226,6 +226,13 @@ const (
 	// normally, the user is told the work was done, and nothing in the report
 	// disagrees. See finishclaim.go for the live incident.
 	RailFinishClaimUnsupported Rail = "finish-claim-unsupported"
+	// RailGreenVerifyConfirm: a landed edit verified green mid-loop, which used to
+	// END the run as success on the spot. The probe spends one turn re-checking the
+	// original task's remaining requirements first. Recorded because it is the one
+	// rail that fires on runs that were already succeeding, so its cost (one step)
+	// and its benefit (a requirement that would have been dropped) have to be
+	// countable separately in a bench comparison.
+	RailGreenVerifyConfirm Rail = "green-verify-confirm"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

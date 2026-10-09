@@ -64,7 +64,13 @@ func TestIntegrationNoOpFeedbackOffByDefault(t *testing.T) {
 func TestIntegrationRealEditIsNotCalledANoOp(t *testing.T) {
 	t.Setenv("KLOO_NOOP_EDIT_FEEDBACK", "1")
 	root := seedRepo(t)
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: writeFileCall(t, "right\n", "")})
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: writeFileCall(t, "right\n", "")},
+		// Answer to the completion probe the green verify fires. Scripted, because a
+		// replayed write of the same content IS a no-op and would trip the very
+		// counter this test is asserting on.
+		llmtest.Mock{Body: finishToolResp(t, "fixed")},
+	)
 	loop := buildLoop(t, root, srv, config.Config{MaxSteps: 20, ChurnRounds: 2})
 
 	rep, _ := loop.Run(context.Background(), "make the check pass")

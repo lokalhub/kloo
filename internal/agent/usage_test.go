@@ -62,15 +62,21 @@ func TestLoopEstimatesWhenServerOmitsUsage(t *testing.T) {
 // TestLoopUsesServerUsage: when the server reports usage, the run's TokensUsed is
 // exactly that value — the estimate is not applied.
 func TestLoopUsesServerUsage(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1410, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 1410, tcSpec{"edit_file", map[string]any{"path": "a.go"}})},
+		// The green verify spends one turn on the completion probe, so the run makes
+		// two model calls. Both report 1410, and the total is their sum — which is the
+		// point of the test: server-reported usage, never an estimate.
+		llmtest.Mock{Body: toolResp(t, 1410, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	rep, err := loop.Run(context.Background(), "do it")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.TokensUsed != 1410 {
-		t.Errorf("TokensUsed = %d, want 1410 (server value, not an estimate)", rep.TokensUsed)
+	if rep.TokensUsed != 2820 {
+		t.Errorf("TokensUsed = %d, want 2820 (2 × the server value, not an estimate)", rep.TokensUsed)
 	}
 }
 
@@ -90,8 +96,9 @@ func TestLoopTokensMonotonic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.Reason != ReasonSuccess || rep.Steps != 3 {
-		t.Fatalf("want 3-step success, got %s in %d steps", rep.Reason, rep.Steps)
+	// Three turns of work (fail, fail, pass) plus the one-shot completion probe.
+	if rep.Reason != ReasonSuccess || rep.Steps != 4 {
+		t.Fatalf("want 4-step success, got %s in %d steps", rep.Reason, rep.Steps)
 	}
 	for i := 1; i < len(seen); i++ {
 		if seen[i] < seen[i-1] {

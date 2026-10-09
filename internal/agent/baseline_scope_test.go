@@ -131,10 +131,13 @@ func TestGreenBaselineDoesNotInflateVerifyAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// One edit ⇒ one verify of the agent's work. (The run ends at the success gate,
-	// so the finish-path verify never runs.)
-	if rep.ToolCounters.VerifyAttempts != 1 {
-		t.Errorf("verify_attempts = %d, want 1 — the baseline probe must not be folded in",
+	// Two verifies of the AGENT's work: one for the edit, one on the finish path. (The
+	// mid-loop green stop no longer ends the run on the spot — it spends a turn on the
+	// completion probe, and the model's finish then triggers the final verify.) What
+	// this test protects is that neither of them is kloo's own baseline probe, which
+	// is counted on its own line below.
+	if rep.ToolCounters.VerifyAttempts != 2 {
+		t.Errorf("verify_attempts = %d, want 2 — the baseline probe must not be folded in",
 			rep.ToolCounters.VerifyAttempts)
 	}
 	if rep.ToolCounters.BaselineVerifyAttempts != 1 {

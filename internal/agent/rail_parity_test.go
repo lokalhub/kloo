@@ -253,7 +253,12 @@ func TestExploreRailUnchangedWithVerifyGate(t *testing.T) {
 }
 
 func TestReadThenEditRunTripsNothing(t *testing.T) {
-	assertParity(t, "read-then-edit", 4, ReasonSuccess, "-")
+	// DELIBERATE drift from v0.16.7, step 4 -> 5: a landed edit with a green verify no
+	// longer ENDS the run where it stands. It spends one turn asking whether the task's
+	// other requirements are done (RailGreenVerifyConfirm), because ending there
+	// silently dropped every requirement the model had not reached yet. The run still
+	// trips no rail and still ends in success, which is what this parity check protects.
+	assertParity(t, "read-then-edit", 5, ReasonSuccess, "-")
 }
 
 // TestCaptureRailBaseline prints one line per scripted run. It is the generator for

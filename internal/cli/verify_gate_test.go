@@ -44,6 +44,11 @@ func readHeavyRun(t *testing.T) (map[string]any, string) {
 	srv := llmtest.Sequence(t,
 		read, read, read,
 		llmtest.Mock{Body: toolCallStream(t, "write_file", map[string]any{"path": "answer.txt", "content": "right\n"}), SSE: true},
+		// The write turns the verify green, which no longer ends the run on the spot:
+		// one turn is spent asking whether the task's remaining requirements are done
+		// (RailGreenVerifyConfirm). This is that turn's answer. Without it the last
+		// mock replays and the same write lands again as a no-op.
+		llmtest.Mock{Body: toolCallStream(t, "finish", map[string]any{"summary": "fixed"}), SSE: true},
 	)
 	cfg := config.Config{
 		Endpoint: srv.URL + "/v1", Model: "test-model", ToolFormat: config.DefaultToolFormat,
@@ -101,11 +106,14 @@ func TestVerifyAttemptsLessThanStepsInSummary(t *testing.T) {
 		t.Errorf("verify_attempts = %d, steps = %d — want attempts < steps on a read-heavy run\n%s",
 			attempts, steps, out)
 	}
-	if attempts != 1 {
-		t.Errorf("verify_attempts = %d, want exactly 1 (three reads skip; the write triggers one)", attempts)
+	// Two: the write triggers one, and the model's finish (answering the completion
+	// probe) triggers the final one. The three reads still skip, which is the gate
+	// this test is about — five steps, two verifies.
+	if attempts != 2 {
+		t.Errorf("verify_attempts = %d, want exactly 2 (three reads skip; the write and the finish each trigger one)", attempts)
 	}
-	if steps != 4 {
-		t.Errorf("steps = %d, want 4", steps)
+	if steps != 5 {
+		t.Errorf("steps = %d, want 5 (three reads, the write, and the completion probe)", steps)
 	}
 }
 

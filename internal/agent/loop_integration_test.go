@@ -72,6 +72,24 @@ func writeFileCall(t *testing.T, content, claim string) string {
 	return string(b)
 }
 
+// finishCall renders a native tool_calls response for the finish tool — the answer
+// a model gives to the completion probe when the task really is done.
+func finishToolResp(t *testing.T, summary string) string {
+	t.Helper()
+	args, _ := json.Marshal(map[string]any{"summary": summary})
+	resp := llm.ChatResponse{
+		Choices: []llm.Choice{{Message: llm.Message{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: "f1", Type: "function", Function: llm.FunctionCall{
+				Name: "finish", Arguments: string(args),
+			}}},
+		}}},
+		Usage: llm.Usage{TotalTokens: 50},
+	}
+	b, _ := json.Marshal(resp)
+	return string(b)
+}
+
 func readFileCall(t *testing.T) string {
 	t.Helper()
 	args, _ := json.Marshal(map[string]any{"path": "answer.txt"})
@@ -113,6 +131,9 @@ func TestIntegrationDriveToGreen(t *testing.T) {
 		llmtest.Mock{Body: writeFileCall(t, "still-wrong\n", "Done! All tests pass. ✅")},
 		// Turn 2: actually fixes it.
 		llmtest.Mock{Body: writeFileCall(t, "right\n", "")},
+		// Turn 3: the green verify now spends one turn on the completion probe before
+		// the run can end (RailGreenVerifyConfirm); this is that turn's answer.
+		llmtest.Mock{Body: finishToolResp(t, "fixed")},
 	)
 	cfg := config.Config{MaxSteps: 10, ChurnRounds: 10}
 	loop := buildLoop(t, root, srv, cfg)
@@ -126,8 +147,9 @@ func TestIntegrationDriveToGreen(t *testing.T) {
 	}
 	// Decided on the real signal: it took TWO turns — the turn-1 claim of success
 	// did NOT stop the loop; only the green verify (exit 0) did.
-	if rep.Steps != 2 {
-		t.Errorf("steps = %d, want 2 (claim must not short-circuit the real verify)", rep.Steps)
+	if rep.Steps != 3 {
+		t.Errorf("steps = %d, want 3 — two turns of work, because the turn-1 claim must not "+
+			"short-circuit the real verify, plus the completion probe", rep.Steps)
 	}
 	if !rep.FinalVerify.Passed || rep.FinalVerify.ExitCode != 0 {
 		t.Errorf("success must rest on a green verify: %+v", rep.FinalVerify)

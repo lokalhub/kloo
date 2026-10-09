@@ -275,7 +275,13 @@ func countMsgsContaining(msgs []llm.Message, sub string) int {
 func TestLoopTransitionsInOrder(t *testing.T) {
 	// An edit_file so the passing verify counts as success (verify-pass is success
 	// only after a real change this run).
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 10, tcSpec{"edit_file", map[string]any{"path": "a.go"}})})
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 10, tcSpec{"edit_file", map[string]any{"path": "a.go"}})},
+		// The green verify no longer ends the run on the spot: it spends one turn
+		// asking whether the TASK is complete (RailGreenVerifyConfirm). This is that
+		// turn's answer, so the sequence below is one full cycle plus the finish.
+		llmtest.Mock{Body: toolResp(t, 10, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	var seq []State
@@ -288,7 +294,10 @@ func TestLoopTransitionsInOrder(t *testing.T) {
 	if rep.Reason != ReasonSuccess {
 		t.Errorf("reason = %q, want success", rep.Reason)
 	}
-	want := []State{StateAct, StateApply, StateVerify, StateDecide, StateStop}
+	// One work cycle, then the completion probe's act (which calls finish and stops
+	// without an apply/verify cycle of its own — the finish-path verify is not a
+	// StateVerify transition).
+	want := []State{StateAct, StateApply, StateVerify, StateDecide, StateAct, StateStop}
 	if fmt.Sprint(seq) != fmt.Sprint(want) {
 		t.Errorf("state sequence = %v, want %v", seq, want)
 	}
@@ -447,7 +456,12 @@ func TestLoopOneToolPerTurn(t *testing.T) {
 		tcSpec{"edit_file", map[string]any{"path": "first.go"}}, // edit ⇒ verify-pass = success this turn
 		tcSpec{"read_file", map[string]any{"path": "second.go"}},
 	)
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: body})
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: body},
+		// Answer to the completion probe the green verify now fires, so the run ends
+		// without the replaying mock re-issuing the same pair of calls.
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
 	loop, calls := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult()}}, &stubBudget{}, &stubChurn{})
 
 	rep, err := loop.Run(context.Background(), "do it")
@@ -465,16 +479,21 @@ func TestLoopOneToolPerTurn(t *testing.T) {
 func TestLoopStopsOnVerifySuccess(t *testing.T) {
 	// edit_file each turn so the passing verify counts as success (verify-pass is
 	// success only after a real change this run).
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: toolResp(t, 1, tcSpec{"edit_file", map[string]any{"path": "a"}})})
-	// First verify fails, second passes → loop runs two turns then stops success.
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"edit_file", map[string]any{"path": "a"}})},
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"edit_file", map[string]any{"path": "a"}})},
+		// Turn 3 answers the completion probe the green verify fires before stopping.
+		llmtest.Mock{Body: toolResp(t, 1, tcSpec{"finish", map[string]any{"summary": "done"}})},
+	)
+	// First verify fails, second passes → two turns of work, then the probe.
 	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{failResult(), passResult()}}, &stubBudget{}, &stubChurn{})
 
 	rep, _ := loop.Run(context.Background(), "fix it")
 	if rep.Reason != ReasonSuccess {
 		t.Errorf("reason = %q, want success", rep.Reason)
 	}
-	if rep.Steps != 2 {
-		t.Errorf("steps = %d, want 2", rep.Steps)
+	if rep.Steps != 3 {
+		t.Errorf("steps = %d, want 3 (two turns of work + the one-shot completion probe)", rep.Steps)
 	}
 	if !rep.FinalVerify.Passed {
 		t.Errorf("final verify should be the green one")
@@ -674,7 +693,13 @@ func TestLoopRepairRepeatedEditChurns(t *testing.T) {
 // a matching first edit reaches ReasonSuccess with NO repair text in the
 // transcript and a single apply round-trip.
 func TestLoopCleanEditNoRepairObservation(t *testing.T) {
-	srv := llmtest.Sequence(t, llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 5)}) // matches first try
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: editFileCall(t, "answer.txt", "wrong\n", "right\n", 5)}, // matches first try
+		// The completion probe's turn. Scripted as finish because a replayed edit
+		// would no longer match the (already fixed) file and produce exactly the
+		// repair observation this test exists to rule out.
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "fixed"}})},
+	)
 	loop, root := newRealEditLoop(t, srv, "answer.txt", "wrong\n",
 		&stubVerifier{results: []VerifyResult{passResult()}},
 		&stubBudget{}, &stubChurn{})
@@ -689,8 +714,8 @@ func TestLoopCleanEditNoRepairObservation(t *testing.T) {
 	if countMsgsContaining(rep.Transcript, "Failing SEARCH block") != 0 {
 		t.Errorf("clean apply must produce no repair observation in the transcript")
 	}
-	if rep.Steps != 1 {
-		t.Errorf("steps = %d, want 1 (single round-trip)", rep.Steps)
+	if rep.Steps != 2 {
+		t.Errorf("steps = %d, want 2 (one apply round-trip + the completion probe)", rep.Steps)
 	}
 	if got := readFile(t, filepath.Join(root, "answer.txt")); got != "right\n" {
 		t.Errorf("answer.txt = %q, want %q", got, "right\n")
