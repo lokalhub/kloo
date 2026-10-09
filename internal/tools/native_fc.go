@@ -68,6 +68,12 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		if len(calls) == 0 {
 			calls = append(calls, extractInvokeNameToolCalls(msg.Content)...)
 		}
+		// And GLM's own template (glm-5.3-flash): a bare name after <tool_call>
+		// followed by <arg_key>/<arg_value> pairs. Caught a live run that kloo
+		// killed as malformed-tool-call while the model was calling `finish`.
+		if len(calls) == 0 {
+			calls = append(calls, extractArgKeyToolCalls(msg.Content)...)
+		}
 		// Nothing parsed, but the reply is clearly ATTEMPTING a call: fail loudly
 		// so the loop's corrective re-prompt fires. Falling through here returned
 		// zero calls, which the loop reads as "the model answered" — a run that
