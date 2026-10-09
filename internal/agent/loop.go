@@ -814,6 +814,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// model with genuinely nothing left still stops on the next turn.
 		ranCommand        bool
 		finishClaimNudged bool
+		// greenStopNudged latches the one-shot completion probe on the mid-loop
+		// green-verify stop (defect A, at the DECIDE gate below).
+		greenStopNudged bool
 		// summarySalvaged marks a Summary that is the last thing the model happened to
 		// say rather than a reply it was asked for, so the renderers can label it
 		// honestly instead of passing a mid-investigation fragment off as a conclusion.
@@ -896,6 +899,22 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// finish builds the report and rolls back on any non-success terminal path.
 	finish := func(reason Reason, runErr error, be *BudgetEvidence, ce *ChurnEvidence) (*Report, error) {
 		l.onState(StateStop)
+		// The completion probe at the DECIDE gate may only ever ADD a step; it must
+		// never cost a run the success it had already earned. If the probe was spent
+		// and the state that used to end the run as success still holds — an edit
+		// landed this run and the verify is green — then whatever stopped the run
+		// afterwards (a step/token budget, a rail, a prose turn) reports SUCCESS,
+		// exactly as it would have before the probe existed. That makes the change
+		// strictly additive: the probe can buy the task another turn, and cannot lose
+		// it the one it had. Interrupted and Error are left alone: the user pressing
+		// Esc or a dead endpoint is not a finished task, whatever the tree looks like.
+		if greenStopNudged && edited && lastVerify.Passed && lastVerify.Err == nil &&
+			reason != ReasonSuccess && reason != ReasonInterrupted && reason != ReasonError {
+			// The evidence goes with the reason it explained. A success report carrying
+			// "budget: steps, limit 2, observed 2" reads as a failure in the TUI and in
+			// the headless JSON, and the trip is no longer what ended the run.
+			reason, be, ce = ReasonSuccess, nil, nil
+		}
 		l.Registry.StopBackground() // kill any background servers this run started (no leaks across runs)
 		// A run cut short by a budget or a rail used to report counters and nothing
 		// else: finishSummary is set only when the model calls finish, so every other
@@ -1800,6 +1819,23 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// Tolerance therefore applies only where the model declares it is done: the
 		// finish branch above. That also keeps the mid-loop gate byte-identical.
 		if lastVerify.Passed && edited {
+			// ONE completion probe before this becomes the end of the run. The gate
+			// above is right that a green verify over a landed edit is real evidence —
+			// but it is evidence that THAT change works, not that the TASK is done, and
+			// ending here silently dropped every requirement the model had not reached
+			// yet. Observed live: a brief asking for a file AND a command stopped as
+			// success at the file, with the command never run and the user told it was
+			// complete. So spend one turn asking, with the original task back in front
+			// of the model: anything left, do it now; nothing left, call finish. The
+			// probe is one-shot, and the latch in finish() means a run that had earned
+			// success still reports success whatever happens on the extra turn — so the
+			// worst case is one additional step on an already-passing run.
+			if !greenStopNudged {
+				greenStopNudged = true
+				recordRail(RailGreenVerifyConfirm)
+				convo = append(convo, greenVerifyConfirmCorrective())
+				continue
+			}
 			return finish(ReasonSuccess, nil, nil, nil)
 		}
 
@@ -3119,6 +3155,17 @@ func confirmFinishCorrective() llm.Message {
 		"Re-read the original task and its definition of done. If EVERY step is genuinely complete, call the finish tool now " +
 		"with a one-line summary (it runs the final verify). If ANY step remains, do the next one THIS turn with a tool call. " +
 		"Do not end with a prose 'done' — either call finish or keep going."}
+}
+
+// greenVerifyConfirmCorrective is the one-shot completion probe fired when a landed
+// edit verifies green mid-loop. It puts the ORIGINAL task back in front of the model
+// rather than asking a bare "are you done?", because the failure it addresses is a
+// model that has lost sight of requirements 2..n while working on requirement 1.
+func greenVerifyConfirmCorrective() llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: "Your change is applied and the verify command passes — that part works. " +
+		"Before this run ends, re-read the ORIGINAL task and check EVERY requirement in it, not only the one you just finished. " +
+		"If anything it asked for is still not done — another file, a command to run, a second change — do that NOW, this turn, with a tool call. " +
+		"If every requirement is genuinely complete, call the finish tool with a one-line summary."}
 }
 
 // promiseVerbs are the action-announcing phrases a model emits right before it SHOULD
