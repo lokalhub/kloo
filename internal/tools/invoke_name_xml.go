@@ -152,6 +152,10 @@ func parseNamedTagParams(body string) map[string]any {
 var toolCallMarkers = []string{
 	"<tool_call", "<invoke_name", "<tool_name", "<invoke ", "<function=", "<function>",
 	"\"tool_call\"", "tool_calls", "<｜DSML｜",
+	// GLM's <arg_key>/<arg_value> pairs (arg_key_xml.go). Listed so a reply that
+	// drops the <tool_call> wrapper — leaving no recoverable tool name — still
+	// reaches the corrective re-prompt instead of being read as an answer.
+	"<arg_key>",
 	// The XMLAdapter's own grammar (<tool name="…"><arg name="…">). A model served
 	// native function-calling can still answer in it — nothing here parsed it, and
 	// without this marker the attempt passed for prose.
