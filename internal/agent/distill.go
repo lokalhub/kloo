@@ -55,29 +55,86 @@ const distillMaxTokens = 700
 // worse than summarising it, and the call is bounded and fails open.
 func distillEnabled() bool { return envOnDefault("KLOO_DISTILL") }
 
+// distillOn is distillEnabled plus the Loop-level switch the config layer sets.
+// The field wins when set, so --no-distill / "distill": {"enabled": false} do not
+// need an env var; otherwise the env keeps deciding, as it always has.
+func (l *Loop) distillOn() bool {
+	if l.DistillOff {
+		return false
+	}
+	return distillEnabled()
+}
+
+// distillWords is the word budget asked of the summariser: the configured cap, or
+// the built-in. A cap is not a clamp — maxTokens on the request is the hard bound,
+// and it scales with the ask so a larger brief is not truncated mid-sentence.
+func (l *Loop) distillWords() int {
+	if l.DistillMaxWords > 0 {
+		return l.DistillMaxWords
+	}
+	return distillMaxWords
+}
+
+// distillTokens bounds the completion: ~3 tokens per word, floored at the
+// historical 700. The floor is what keeps the DEFAULT request byte-identical
+// (220 words scales to 660, under the floor), and the scaling is what keeps a
+// raised word cap from being truncated mid-sentence by a bound set for 220.
+func distillTokens(words int) int {
+	if n := words * 3; n > distillMaxTokens {
+		return n
+	}
+	return distillMaxTokens
+}
+
+// distillRoute picks the client and model id that write the brief: the configured
+// distill route when there is one, else the run's own client. It NEVER returns an
+// error — a route that cannot be built falls back to the run's model, because the
+// distiller's whole contract is that it costs nothing but the old behaviour when
+// something about it is wrong.
+//
+// It deliberately does not borrow the subagent route (SubagentModel): someone who
+// pointed delegation at another model did not thereby ask for their run's memory
+// to be rewritten by it. Opting in is one flag.
+func (l *Loop) distillRoute() (llm.LLMClient, string) {
+	m := strings.TrimSpace(l.DistillModel)
+	if m == "" || l.NewDistillClient == nil {
+		return l.Client, l.Model
+	}
+	ep := strings.TrimSpace(l.DistillEndpoint)
+	if ep == "" {
+		ep = l.Endpoint
+	}
+	if c := l.NewDistillClient(ep, m); c != nil {
+		return c, m
+	}
+	return l.Client, l.Model
+}
+
 // distiller returns the closure Assemble calls when the summary overflows, or nil
 // when distillation is off or there is no client to call. Bound to ctx so an
 // interrupt cancels the summariser with the run.
 func (l *Loop) distiller(ctx context.Context) func([]string) (string, error) {
-	if l.Client == nil || !distillEnabled() {
+	if l.Client == nil || !l.distillOn() {
 		return nil
 	}
+	client, model := l.distillRoute()
+	words := l.distillWords()
 	return func(entries []string) (string, error) {
 		if len(entries) == 0 {
 			return "", fmt.Errorf("agent: nothing to distill")
 		}
 		req := llm.ChatRequest{
-			Model: l.Model,
+			Model: model,
 			Messages: []llm.Message{
-				{Role: llm.RoleSystem, Content: fmt.Sprintf(distillSystem, distillMaxWords)},
+				{Role: llm.RoleSystem, Content: fmt.Sprintf(distillSystem, words)},
 				{Role: llm.RoleUser, Content: strings.Join(entries, "\n")},
 			},
 			Temperature: 0,
-			MaxTokens:   distillMaxTokens,
+			MaxTokens:   distillTokens(words),
 		}
 		// Complete, never the streaming path: this is bookkeeping and must not appear
 		// in the transcript as if the model were talking to the user.
-		resp, err := l.Client.Complete(ctx, l.withThinkingControl(req))
+		resp, err := client.Complete(ctx, l.withThinkingControl(req))
 		if err != nil {
 			return "", err
 		}

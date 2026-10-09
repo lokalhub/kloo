@@ -173,6 +173,16 @@ const (
 	EnvLLMRetryMaxDelay     = "KLOO_LLM_RETRY_MAX_DELAY"
 	EnvLLMColdLoadTimeout   = "KLOO_LLM_COLD_LOAD_TIMEOUT"
 	EnvLLMStreamIdleTimeout = "KLOO_LLM_STREAM_IDLE_TIMEOUT"
+
+	// Distiller (compaction summariser) env knobs. EnvDistill is the long-standing
+	// opt-OUT switch read by the agent package; the rest route the pass to a
+	// SECOND model and bound the brief. All four are the env rung of the
+	// "distill" profile block and the --distill-* flags.
+	EnvDistill         = "KLOO_DISTILL"
+	EnvDistillProvider = "KLOO_DISTILL_PROVIDER"
+	EnvDistillModel    = "KLOO_DISTILL_MODEL"
+	EnvDistillEndpoint = "KLOO_DISTILL_ENDPOINT"
+	EnvDistillMaxWords = "KLOO_DISTILL_MAX_WORDS"
 )
 
 // ErrProfileParse wraps a malformed profile JSON file. A *missing* profile file
@@ -258,6 +268,37 @@ type Config struct {
 	// negative ⇒ never sent (kloo's historical behaviour).
 	MaxOutputTokens int
 	NoFinalAnswer   bool
+
+	// ── Distiller ───────────────────────────────────────────────────────────────
+	// The distiller rewrites the oldest half of the run's record into a short
+	// brief at the compaction fold boundary instead of deleting it
+	// (agent/distill.go). It has always been on, always on the RUN'S OWN model,
+	// and tunable only through KLOO_DISTILL. These fields make the route and the
+	// brief's size first-class config, resolvable from flags, env or the profile's
+	// "distill" block.
+	//
+	// Nothing here names a model, a vendor or a tier: an unset DistillModel means
+	// the run's own model, exactly as before. Deliberately so — kloo is open
+	// source and must not ship a preference for anybody's backend.
+	DistillEnabled bool
+	// DistillProvider is a provider NAME from the profile's "providers" block,
+	// resolved the same way --provider is. It exists as its own axis because the
+	// usual reason to distil elsewhere is a local single-GPU server that can only
+	// hold one model: pointing the pass at a different ENDPOINT is what avoids a
+	// model swap on every fold, and a bare model id cannot express that.
+	DistillProvider string
+	// DistillModel is the model that writes the brief; "" ⇒ the run's own model
+	// (unchanged behaviour). A provider alias is expanded like --model's.
+	DistillModel string
+	// DistillEndpoint / DistillAPIKey are the resolved route. Empty endpoint ⇒ the
+	// run's endpoint; empty key ⇒ the run's key.
+	DistillEndpoint string
+	DistillAPIKey   string
+	// DistillMaxWords bounds the brief the summariser is asked for; 0 ⇒ the agent
+	// package's built-in (220). It is configurable because it is the control arm
+	// for "would a bigger model help?" — a cap raised on the SAME model costs
+	// nothing and must be ruled out first.
+	DistillMaxWords int
 	// NoChatGate disables the interactive conversational gate (the single no-tools
 	// classifier call before the agent loop). On by default; this is the escape
 	// hatch for a model that classifies the user's messages badly, which costs an
@@ -454,6 +495,15 @@ type Flags struct {
 	LLMRetryMaxDelay        *time.Duration
 	LLMColdLoadTimeout      *time.Duration
 	LLMStreamIdleTimeout    *time.Duration
+	// Distill (--distill / --no-distill), DistillProvider (--distill-provider),
+	// DistillModel (--distill-model), DistillEndpoint (--distill-endpoint) and
+	// DistillMaxWords (--distill-max-words) configure the compaction summariser.
+	// nil ⇒ flag not set.
+	Distill         *bool
+	DistillProvider *string
+	DistillModel    *string
+	DistillEndpoint *string
+	DistillMaxWords *int
 }
 
 // profileEntry is the per-model override shape in the profile JSON file:
@@ -569,6 +619,175 @@ func loadDefaultModel(profilePath string) (string, error) {
 		return "", fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
 	}
 	return strings.TrimSpace(file.DefaultModel), nil
+}
+
+// distillEntry is the reserved top-level "distill" profile block: the file rung
+// of the same knobs --distill-* and KLOO_DISTILL_* set. A pointer field means
+// "absent", so a block that sets only maxWords leaves the route alone.
+//
+//	{ "distill": {"enabled": true, "provider": "openrouter",
+//	              "model": "qwen-32b", "maxWords": 400} }
+type distillEntry struct {
+	Enabled  *bool  `json:"enabled,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// APIKey is expandValue'd — prefer "${SOME_TOKEN}" over an inline secret, as
+	// with providers and mcpServers. Usually unset: a named provider carries its
+	// own key, and without one the run's key is used.
+	APIKey   string `json:"apiKey,omitempty"`
+	MaxWords *int   `json:"maxWords,omitempty"`
+}
+
+// loadDistill reads the reserved top-level "distill" block. Like loadProviders:
+// a missing file or absent block ⇒ nil and no error; a malformed file ⇒ an error
+// wrapping ErrProfileParse.
+func loadDistill(profilePath string) (*distillEntry, error) {
+	data, path, err := readProfileFile(profilePath)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	var file struct {
+		Distill *distillEntry `json:"distill"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("config: %w %s: %v", ErrProfileParse, path, err)
+	}
+	return file.Distill, nil
+}
+
+// resolveDistill layers the distiller settings onto cfg: flag > env > the
+// profile's "distill" block > built-in. providerModels is the SELECTED provider's
+// alias map, used to expand a distill model alias when no --distill-provider of
+// its own is named — so `--provider openrouter --distill-model cheap` works
+// without naming the provider twice.
+//
+// Every rung may be absent, and all-absent must resolve to today's behaviour
+// exactly: enabled, no route, no word override. That is the whole contract — the
+// feature is generic because "unset" is the shipping default, not a model name.
+func resolveDistill(cfg *Config, flags Flags, getenv func(string) string, profilePath string, providerModels map[string]string) error {
+	cfg.DistillEnabled = true
+
+	entry, err := loadDistill(profilePath)
+	if err != nil {
+		return err
+	}
+	if entry != nil {
+		if entry.Enabled != nil {
+			cfg.DistillEnabled = *entry.Enabled
+		}
+		cfg.DistillProvider = strings.TrimSpace(entry.Provider)
+		cfg.DistillModel = strings.TrimSpace(entry.Model)
+		cfg.DistillEndpoint = strings.TrimSpace(entry.Endpoint)
+		if entry.APIKey != "" {
+			cfg.DistillAPIKey = expandValue(entry.APIKey)
+		}
+		if entry.MaxWords != nil {
+			cfg.DistillMaxWords = *entry.MaxWords
+		}
+	}
+
+	// Env rung. KLOO_DISTILL keeps the opt-out spelling the agent package has
+	// always honoured (0/false/no/off ⇒ off) so an existing script keeps working.
+	if v := strings.ToLower(strings.TrimSpace(getenv(EnvDistill))); v != "" {
+		switch v {
+		case "0", "false", "no", "off":
+			cfg.DistillEnabled = false
+		default:
+			cfg.DistillEnabled = true
+		}
+	}
+	if v := strings.TrimSpace(getenv(EnvDistillProvider)); v != "" {
+		cfg.DistillProvider = v
+	}
+	if v := strings.TrimSpace(getenv(EnvDistillModel)); v != "" {
+		cfg.DistillModel = v
+	}
+	if v := strings.TrimSpace(getenv(EnvDistillEndpoint)); v != "" {
+		cfg.DistillEndpoint = v
+	}
+	if v := strings.TrimSpace(getenv(EnvDistillMaxWords)); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: %s=%q is not a number", EnvDistillMaxWords, v)
+		}
+		cfg.DistillMaxWords = n
+	}
+
+	// Flag rung.
+	if flags.Distill != nil {
+		cfg.DistillEnabled = *flags.Distill
+	}
+	if flags.DistillProvider != nil {
+		cfg.DistillProvider = strings.TrimSpace(*flags.DistillProvider)
+	}
+	if flags.DistillModel != nil {
+		cfg.DistillModel = strings.TrimSpace(*flags.DistillModel)
+	}
+	if flags.DistillEndpoint != nil {
+		cfg.DistillEndpoint = strings.TrimSpace(*flags.DistillEndpoint)
+	}
+	if flags.DistillMaxWords != nil {
+		cfg.DistillMaxWords = *flags.DistillMaxWords
+	}
+
+	// A negative word cap has no meaning here. kloo's sign convention is
+	// "0 ⇒ compute it, negative ⇒ disable", and a brief with no length guidance is
+	// not a feature — it is an unbounded rewrite of the run's own memory. Refuse it
+	// at startup rather than silently clamping, so a typo is visible.
+	if cfg.DistillMaxWords < 0 {
+		return fmt.Errorf("config: distill maxWords must be positive (got %d; 0 ⇒ built-in default)", cfg.DistillMaxWords)
+	}
+
+	// A named distill provider resolves exactly like --provider: endpoint, key and
+	// alias map come from the profile, and an unknown name is a startup error
+	// rather than a silent fall-through to the run's own model.
+	if cfg.DistillProvider != "" {
+		providers, err := loadProviders(profilePath)
+		if err != nil {
+			return err
+		}
+		p, ok := providers[cfg.DistillProvider]
+		if !ok {
+			return unknownDistillProviderError(cfg.DistillProvider, profilePath, providers)
+		}
+		if p.Endpoint != "" && cfg.DistillEndpoint == "" {
+			cfg.DistillEndpoint = p.Endpoint
+		}
+		if p.APIKey != "" && cfg.DistillAPIKey == "" {
+			cfg.DistillAPIKey = expandValue(p.APIKey)
+		}
+		if cfg.DistillModel == "" {
+			cfg.DistillModel = strings.TrimSpace(p.DefaultModel)
+		}
+		providerModels = p.Models
+	}
+	if real, ok := providerModels[cfg.DistillModel]; ok && real != "" {
+		cfg.DistillModel = real
+	}
+
+	// An endpoint with no model would send the run's own model id to a different
+	// server, which is the one combination that is almost certainly a mistake: the
+	// id a hosted provider rejects is exactly the one your local server serves.
+	if cfg.DistillModel == "" && cfg.DistillEndpoint != "" {
+		return fmt.Errorf("config: a distill endpoint needs a distill model (set --distill-model, or drop the endpoint to distil on the run's own model)")
+	}
+	return nil
+}
+
+// unknownDistillProviderError mirrors unknownProviderError for the distill axis,
+// naming the flag the user actually typed.
+func unknownDistillProviderError(name, profilePath string, providers map[string]providerEntry) error {
+	known := make([]string, 0, len(providers))
+	for n := range providers {
+		known = append(known, n)
+	}
+	sort.Strings(known)
+	msg := fmt.Sprintf("config: unknown --distill-provider %q", name)
+	if len(known) == 0 {
+		return fmt.Errorf("%s: the profile defines no \"providers\" block", msg)
+	}
+	return fmt.Errorf("%s (known: %s)", msg, strings.Join(known, ", "))
 }
 
 // ProviderInfo is a named provider's resolved endpoint + key, suitable for
@@ -884,6 +1103,12 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		modelSel = real
 	}
 	cfg.Model = modelSel
+
+	// Distiller route + brief size. Resolved here, where the selected provider's
+	// alias map is still in hand, so a distill model may be spelled as an alias.
+	if err := resolveDistill(&cfg, flags, getenv, profilePath, providerModels); err != nil {
+		return Config{}, err
+	}
 
 	// Capture the user's per-model tuning entry (legacy top-level per-model map,
 	// keyed by model name) instead of applying it inline, so the bundled-defaults

@@ -136,6 +136,22 @@ type Loop struct {
 	// and the child shares the parent's client, so a misconfiguration degrades to
 	// current behaviour instead of producing an unauthenticated child.
 	NewSubagentClient func(endpoint, model string) llm.LLMClient
+	// Distiller routing (distill.go). The compaction summariser has always run on
+	// the run's own model; these route it elsewhere and bound the brief.
+	// Zero values mean "exactly what kloo did before": on, own model, built-in
+	// word cap — so a Loop built without them is byte-identical to the old one.
+	//
+	// DistillOff disables the pass (the config layer's "distill.enabled": false /
+	// --no-distill / KLOO_DISTILL=0). DistillModel/DistillEndpoint name a SECOND
+	// model for it; DistillMaxWords overrides the 220-word brief.
+	DistillOff      bool
+	DistillModel    string
+	DistillEndpoint string
+	DistillMaxWords int
+	// NewDistillClient builds the summariser's client when routing to another
+	// model, the same seam as NewSubagentClient: the CLI owns the credentials.
+	// nil (or a nil return) ⇒ the run's own client, which is the fail-open path.
+	NewDistillClient func(endpoint, model string) llm.LLMClient
 	// subagentDepth is THIS loop's own nesting level, set when a parent builds a
 	// child. Unexported: callers configure the limit, not the position. Without
 	// it a child re-registered the task tool at depth 0 on its own Run and could

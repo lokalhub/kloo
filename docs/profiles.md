@@ -13,6 +13,10 @@ Two independent axes:
 - **Top-level per-model entries** — keyed by the **real model id**, they tune
   `toolFormat`, `temperature`, `maxContextTokens`, retry policy, etc. for that model.
 
+Plus two reserved top-level keys: `defaultProvider` / `defaultModel` (what to use
+when no flag names one) and `distill` (the [compaction
+distiller](#the-compaction-distiller-distill)).
+
 > **Secrets:** put API keys in the environment and reference them as `${VAR}` — never
 > paste a raw key into the file. kloo expands `${VAR}` (and a leading `~`) when it
 > loads the profile. kloo never prints keys in the TUI, logs, `doctor`, or the
@@ -59,6 +63,48 @@ whichever of the above you want):
 
 The hint only appears when a `--provider` is selected (aliases are provider-scoped)
 and when there is a near match worth pointing at.
+
+## The compaction distiller (`distill`)
+
+The reserved top-level `distill` block configures the pass that rewrites the
+oldest summary entries into a brief instead of deleting them (full description in
+[configuration.md](configuration.md#the-compaction-distiller)). Every key is
+optional, and an **absent block is the shipping default**: on, the run's own
+model, a 220-word brief.
+
+```json
+{
+  "defaultProvider": "local",
+  "providers": {
+    "local":      {"endpoint": "http://127.0.0.1:8080/v1", "defaultModel": "my-coder"},
+    "openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                   "apiKey": "${OPENROUTER_API_KEY}",
+                   "models": {"cheap": "qwen/qwen3-32b"}}
+  },
+
+  "distill": {
+    "enabled": true,
+    "provider": "openrouter",
+    "model": "cheap",
+    "maxWords": 400
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `enabled` | `false` turns the pass off (same as `--no-distill` / `KLOO_DISTILL=0`). Default `true`. |
+| `provider` | A name from `providers`, used **only** for the distiller's calls — its endpoint, key and model aliases. Unset ⇒ the run's own provider. |
+| `model` | The model that writes the brief; a provider alias is expanded. Unset ⇒ the run's own model. |
+| `endpoint` | Base URL for the distiller's calls, if you are not naming a provider. Requires `model`. |
+| `apiKey` | Bearer token for that endpoint; `${VAR}` is expanded. Unset ⇒ the provider's key, else the run's. |
+| `maxWords` | Word budget for the brief (default 220). |
+
+Flags and `KLOO_DISTILL_*` env vars override the block, field by field.
+
+A second model on a **single-GPU local server** will swap your run's model out at
+every fold — that is why `provider`/`endpoint` exist here. Point the pass at a
+different *server*, or leave the block out.
 
 ## Precedence
 
