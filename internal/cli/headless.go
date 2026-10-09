@@ -143,6 +143,25 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 				llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout),
 				llm.WithLogf(writerLogf(out)))
 		},
+		// Distiller: unset ⇒ the run's own model and the built-in word cap, i.e.
+		// exactly what kloo did before these knobs existed. The CLI owns the
+		// credentials, so it builds the routed summariser's client (same seam as
+		// NewSubagentClient).
+		DistillOff:      !cfg.DistillEnabled,
+		DistillModel:    cfg.DistillModel,
+		DistillEndpoint: cfg.DistillEndpoint,
+		DistillMaxWords: cfg.DistillMaxWords,
+		NewDistillClient: func(ep, model string) llm.LLMClient {
+			key := cfg.DistillAPIKey
+			if key == "" {
+				key = cfg.APIKey
+			}
+			return llm.New(ep, model,
+				llm.WithAPIKey(key),
+				llm.WithTimeout(cfg.LLMColdLoadTimeout),
+				llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout),
+				llm.WithLogf(writerLogf(out)))
+		},
 		RepeatAbortRounds:    cfg.RepeatAbortRounds,
 		PromptCache:          cfg.PromptCacheEnabled(),
 		Endpoint:             cfg.Endpoint,

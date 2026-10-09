@@ -62,6 +62,20 @@ type memoryDiagnostic struct {
 	StoreOnFailure bool   `json:"store_on_failure"`
 }
 
+// distillDiagnostic reports what the compaction distiller RESOLVED to. It is
+// printed even when nothing is configured, because the failure this prevents is
+// silent: a distill route that fell back to the run's own model looks exactly
+// like one that worked, and the only visible difference is the quality of a
+// brief nobody reads.
+type distillDiagnostic struct {
+	Enabled  bool        `json:"enabled"`
+	Provider string      `json:"provider,omitempty"`
+	Model    string      `json:"model,omitempty"`
+	Endpoint string      `json:"endpoint,omitempty"`
+	APIKey   secretState `json:"api_key"`
+	MaxWords int         `json:"max_words,omitempty"`
+}
+
 type resolvedConfigDiagnostic struct {
 	Profile        profileDiagnostic `json:"profile"`
 	Provider       string            `json:"provider"`
@@ -69,6 +83,7 @@ type resolvedConfigDiagnostic struct {
 	Model          string            `json:"model"`
 	Endpoint       string            `json:"endpoint"`
 	APIKey         secretState       `json:"api_key"`
+	Distill        distillDiagnostic `json:"distill"`
 	Ctx            int               `json:"ctx"`
 	Effort         string            `json:"effort"`
 	MaxSteps       int               `json:"max_steps"`
@@ -291,12 +306,20 @@ func buildResolvedConfigDiagnostic(cfg config.Config, profilePath, verifyOverrid
 		scopeDiag = scopeDiagnostic{Active: sc.Active(), Allow: sc.Allow, Deny: sc.Deny, ReadOnly: sc.ReadOnly}
 	}
 	return resolvedConfigDiagnostic{
-		Profile:              profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
-		Provider:             cfg.Provider,
-		ProviderSource:       cfg.ProviderSource,
-		Model:                cfg.Model,
-		Endpoint:             cfg.Endpoint,
-		APIKey:               secretState{Set: cfg.APIKey != "", Redacted: cfg.APIKey != ""},
+		Profile:        profileDiagnostic{Path: path, Exists: exists, Source: source, Searched: searched},
+		Provider:       cfg.Provider,
+		ProviderSource: cfg.ProviderSource,
+		Model:          cfg.Model,
+		Endpoint:       cfg.Endpoint,
+		APIKey:         secretState{Set: cfg.APIKey != "", Redacted: cfg.APIKey != ""},
+		Distill: distillDiagnostic{
+			Enabled:  cfg.DistillEnabled,
+			Provider: cfg.DistillProvider,
+			Model:    cfg.DistillModel,
+			Endpoint: cfg.DistillEndpoint,
+			APIKey:   secretState{Set: cfg.DistillAPIKey != "", Redacted: cfg.DistillAPIKey != ""},
+			MaxWords: cfg.DistillMaxWords,
+		},
 		Ctx:                  cfg.MaxContextTokens,
 		Effort:               cfg.Effort,
 		MaxSteps:             cfg.MaxSteps,
@@ -403,6 +426,7 @@ func writeDoctorHuman(out io.Writer, diag resolvedConfigDiagnostic) {
 	} else {
 		fmt.Fprintln(out, "api_key: unset")
 	}
+	fmt.Fprintln(out, distillLine(diag.Distill))
 	fmt.Fprintf(out, "ctx: %d\n", diag.Ctx)
 	fmt.Fprintf(out, "effort: %s\n", diag.Effort)
 	fmt.Fprintf(out, "max_steps: %d\n", diag.MaxSteps)
@@ -509,4 +533,34 @@ func noneDash(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// distillLine renders the resolved distiller in one line: off, or the model and
+// endpoint the brief is actually written by. "own model" is spelled out rather
+// than left blank — the whole point of the line is to tell a configured route
+// apart from a fallback.
+func distillLine(d distillDiagnostic) string {
+	if !d.Enabled {
+		return "distill: off (the oldest summary entries are dropped, not rewritten)"
+	}
+	words := "built-in 220"
+	if d.MaxWords > 0 {
+		words = fmt.Sprintf("%d", d.MaxWords)
+	}
+	if d.Model == "" {
+		return fmt.Sprintf("distill: on, own model + endpoint (max_words=%s)", words)
+	}
+	route := d.Model
+	if d.Provider != "" {
+		route = fmt.Sprintf("%s via provider %s", d.Model, d.Provider)
+	}
+	ep := d.Endpoint
+	if ep == "" {
+		ep = "own endpoint"
+	}
+	key := "run key"
+	if d.APIKey.Set {
+		key = "own key (redacted)"
+	}
+	return fmt.Sprintf("distill: on, model=%s endpoint=%s api_key=%s (max_words=%s)", route, ep, key, words)
 }

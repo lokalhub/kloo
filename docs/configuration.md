@@ -235,6 +235,11 @@ churn detection as the primary guard).
 | `--repeat-abort-rounds` | `0` (⇒ `6`) | Identical consecutive **mutating** tool calls (`edit_file`, `write_file`, `run_command`) before the repetition rail halts the run as churn. `0` ⇒ the built-in default `6`. Read-only calls are exempt — see [the repetition rail](#the-repetition-rail-and-repeated-reads). |
 | `--prompt-cache` | `auto` | Ask the provider to cache the stable prompt prefix: `auto` (on only for a provider known to support it), `on` (force it — the escape hatch for a provider the allowlist does not know yet), `off`. See [prompt caching](#prompt-caching---prompt-cache). `kloo doctor` prints the resolved state. |
 | `--strict-model` | off | Also fail on a single-model endpoint, the one case the default only warns about. |
+| `--no-distill` | off | Turn the [compaction distiller](#the-compaction-distiller) off: when the running summary overflows, drop the oldest entries instead of asking a model to rewrite them as a brief. |
+| `--distill-provider` | _(unset)_ | Named provider from the profile used for the distiller's own calls. Sets its endpoint + key independently of the run's, which is how you keep compaction off a single-GPU local server. |
+| `--distill-model` | _(unset)_ | Model that writes the compaction brief. A provider alias is expanded like `--model`'s. Unset ⇒ **the run's own model**, which is the shipping default. |
+| `--distill-endpoint` | _(unset)_ | Base URL for the distiller's calls; unset ⇒ the run's endpoint. Requires `--distill-model`. |
+| `--distill-max-words` | `0` (⇒ `220`) | Word budget for the brief. Raising it on the **same** model is the cheap control arm to try before routing the pass to a bigger one. |
 | `--temperature` | `0.1` | Sampling temperature. |
 | `--verify` | _(auto-detected)_ | Override the verify command run each step — **the real success signal**. When unset, kloo auto-detects the project's build/test (`package.json`→`npm run build`/`npm test`, `go.mod`→`go test ./...`, `Cargo.toml`→`cargo build`, `pyproject.toml`→`python -m pytest`). If nothing is recognised the run is **unverified** — `finish` stops it calmly, but no run is marked success. See [setup.md](setup.md#the-verify-command-is-the-spec). |
 | `--benchmark` | `false` | Automation preset: task loop, final `KLOO_RESULT_JSON`, and stable benchmark exit codes. Requires a task argument. |
@@ -542,6 +547,12 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_SUBAGENT_STEPS` | Cap a delegated child's steps (`0` ⇒ half the parent's). |
 | `KLOO_SUBAGENT_MODEL` | Run delegated work on a **different model** than the parent. |
 | `KLOO_SUBAGENT_ENDPOINT` | Endpoint for the routed child (defaults to the parent's). |
+| `KLOO_DISTILL` | `0`/`false`/`no`/`off` to disable the [compaction distiller](#the-compaction-distiller). On by default. |
+| `KLOO_DISTILL_PROVIDER` | Named provider for the distiller's calls (same as `--distill-provider`). |
+| `KLOO_DISTILL_MODEL` | Model that writes the compaction brief (same as `--distill-model`). |
+| `KLOO_DISTILL_ENDPOINT` | Endpoint for the distiller's calls (same as `--distill-endpoint`). |
+| `KLOO_DISTILL_MAX_WORDS` | Word budget for the brief (same as `--distill-max-words`). |
+| `KLOO_DISTILL_LOG` | Path to append each brief **next to the entries it was written from**. The only way to tell a brief that kept the facts from one that invented them. |
 | `KLOO_MAX_HANDOFFS` | Ceiling on harness-initiated handoffs per run (`0` ⇒ 1). Children are sequential and never nested. |
 | `KLOO_DELEGATE_ON_STOP` | `1` to hand off at the explore rail instead of stopping. Unproven. |
 | `KLOO_DELEGATE_UNTIL_EDIT` | `1` so running a command no longer forfeits delegation. |
@@ -681,7 +692,9 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 - When the projected prompt crosses **~70%** of the window, kloo folds the cold
   middle of the transcript into a deterministic running summary (keeping applied
   diffs and verify outcomes verbatim; stubbing raw file dumps — files are re-read
-  from disk on demand). No model call is involved.
+  from disk on demand). The fold itself involves no model call; when the running
+  summary itself overflows, the [distiller](#the-compaction-distiller) makes one
+  bounded call rather than deleting the oldest entries.
 - The window is a **hard ceiling**: the repo map is capped at a fraction of it
   (so it can no longer consume the whole window), and content is shed in a fixed
   order to stay under it. The goal (the task) is never dropped.
@@ -692,6 +705,59 @@ recent turns) plus a running summary, and keeps the **entire** prompt under
 
 A task-loop run prints `compactions: N` in its report only when memory compacted
 (`N > 0`); the TUI status line shows a `⟲N` indicator while it happens.
+
+### The compaction distiller
+
+The running summary has a budget of its own. When it overflows, kloo used to
+**delete** its oldest entries — the only record of the early run. The distiller
+instead hands those entries to a model and keeps the brief it writes back.
+
+It is **on by default**, and by default it runs on the run's own model and
+endpoint: nothing to configure, nothing provider-specific. Three properties bound
+the cost:
+
+- It runs at the **fold boundary**, not per turn (~3 calls in a long run).
+  Rewriting the head of a prompt invalidates the prefix cache, so this is
+  deliberately rare.
+- It **fails open**. An error, a timeout or an empty reply costs nothing but the
+  old behaviour: the entries are dropped exactly as before. A run never dies
+  because its own bookkeeping call did.
+- The brief is capped (`--distill-max-words`, default 220) and the request is
+  plain chat completion — temperature 0, a `max_tokens`, no tools, no streaming
+  — so any OpenAI-compatible server can serve it.
+
+Routing it to a **second model** is opt-in:
+
+```bash
+# A second model on the same server (Ollama, vLLM, a multi-model llama-swap):
+kloo --distill-model qwen3:32b "fix the failing test"
+
+# A different service entirely, with its own endpoint and key from the profile:
+kloo --provider local --distill-provider openrouter --distill-model cheap "…"
+
+# Cheapest experiment first: a longer brief on the model you already run.
+kloo --distill-max-words 400 "…"
+```
+
+`kloo doctor` prints what it resolved to, including whether a configured route
+fell back:
+
+```
+distill: on, model=qwen-32b via provider openrouter endpoint=https://… api_key=own key (redacted) (max_words=400)
+distill: on, own model + endpoint (max_words=built-in 220)
+distill: off (the oldest summary entries are dropped, not rewritten)
+```
+
+Two cautions:
+
+- **A second model on a single-GPU local server causes a swap.** Ollama,
+  llama-swap and LM Studio load one model at a time, so pointing the distiller at
+  another model on the *same* endpoint can evict your run's model at every fold.
+  That is what `--distill-provider` / `--distill-endpoint` are for: a different
+  *server*, not just a different model id. Leaving it unset is always safe.
+- **This pass rewrites the run's own memory.** A model that invents a fact in a
+  brief hands that fact to the agent as history. Set `KLOO_DISTILL_LOG` and read a
+  few briefs against their inputs before trusting a new route.
 
 ### Window vs curator budget
 

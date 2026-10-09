@@ -258,6 +258,13 @@ func TestResolve(t *testing.T) {
 			// struct can be compared without listing them in every want literal.
 			// (Config now holds a map, so it is no longer != comparable.)
 			got.MCPServers, got.MCPMaxExposedTools, got.MCPDisabled = nil, 0, false
+			// Distillation is on by default and unconfigured in every case here, so
+			// assert that invariant once instead of repeating it in nine want
+			// literals; its own precedence lives in distill_test.go.
+			if !got.DistillEnabled {
+				t.Errorf("DistillEnabled = false; the compaction distiller must default ON")
+			}
+			got.DistillEnabled = tc.want.DistillEnabled
 			got.LLMMaxRetries = tc.want.LLMMaxRetries
 			got.LLMRetryableStatusCodes = tc.want.LLMRetryableStatusCodes
 			got.LLMRetryBaseDelay = tc.want.LLMRetryBaseDelay

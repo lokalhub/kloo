@@ -171,6 +171,11 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagColdLoad         time.Duration
 		flagStreamIdle       time.Duration
 		flagMaxRetries       int
+		flagNoDistill        bool
+		flagDistillProvider  string
+		flagDistillModel     string
+		flagDistillEndpoint  string
+		flagDistillWords     int
 	)
 
 	cmd := &cobra.Command{
@@ -272,6 +277,24 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			}
 			if fs.Changed("strict-model") {
 				flags.StrictModel = &flagStrictModel
+			}
+			// Distiller: --no-distill is the negated spelling, so invert it into
+			// the positive config field the resolver layers.
+			if fs.Changed("no-distill") {
+				on := !flagNoDistill
+				flags.Distill = &on
+			}
+			if fs.Changed("distill-provider") {
+				flags.DistillProvider = &flagDistillProvider
+			}
+			if fs.Changed("distill-model") {
+				flags.DistillModel = &flagDistillModel
+			}
+			if fs.Changed("distill-endpoint") {
+				flags.DistillEndpoint = &flagDistillEndpoint
+			}
+			if fs.Changed("distill-max-words") {
+				flags.DistillMaxWords = &flagDistillWords
 			}
 			if fs.Changed("temperature") {
 				flags.Temperature = &flagTemp
@@ -394,6 +417,11 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagExploreAbort, "explore-abort-rounds", 0, "read-only turns covering no new ground before the exploration rail stops the run (0 ⇒ built-in default)")
 	f.StringVar(&flagPromptCache, "prompt-cache", config.DefaultPromptCache, "request provider prompt caching: auto (default; on only for a provider known to support prompt caching), on, or off")
 	f.BoolVar(&flagStrictModel, "strict-model", false, "fail at startup when the endpoint does not list --model (default: warn and continue)")
+	f.BoolVar(&flagNoDistill, "no-distill", false, "disable the compaction distiller: when the running summary overflows, drop the oldest entries instead of asking the model to rewrite them as a brief (same as KLOO_DISTILL=0)")
+	f.StringVar(&flagDistillProvider, "distill-provider", "", "named provider from the profile's \"providers\" block used for the distiller's own calls (sets its endpoint+key; unset ⇒ the run's own provider)")
+	f.StringVar(&flagDistillModel, "distill-model", "", "model that writes the compaction brief (a provider alias is expanded); unset ⇒ the run's own model, which is the default behaviour")
+	f.StringVar(&flagDistillEndpoint, "distill-endpoint", "", "OpenAI-compatible base URL for the distiller's calls; unset ⇒ the run's endpoint. Requires --distill-model")
+	f.IntVar(&flagDistillWords, "distill-max-words", 0, "word budget for the compaction brief (0 ⇒ built-in 220). Raising it on the SAME model is the cheap control arm before routing the pass to a bigger one")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "", "override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
 	f.BoolVar(&flagBenchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
@@ -556,6 +584,22 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	if fs.Changed("benchmark") {
 		flags.BenchmarkMode = &values.Benchmark
 	}
+	if fs.Changed("no-distill") {
+		on := !values.NoDistill
+		flags.Distill = &on
+	}
+	if fs.Changed("distill-provider") {
+		flags.DistillProvider = &values.DistillProvider
+	}
+	if fs.Changed("distill-model") {
+		flags.DistillModel = &values.DistillModel
+	}
+	if fs.Changed("distill-endpoint") {
+		flags.DistillEndpoint = &values.DistillEndpoint
+	}
+	if fs.Changed("distill-max-words") {
+		flags.DistillMaxWords = &values.DistillMaxWords
+	}
 	if fs.Changed("llm-max-retries") {
 		flags.LLMMaxRetries = &values.LLMMaxRetries
 	}
@@ -604,6 +648,11 @@ type configFlagValues struct {
 	WorkingSetTokens     int
 	PromptCache          string
 	StrictModel          bool
+	NoDistill            bool
+	DistillProvider      string
+	DistillModel         string
+	DistillEndpoint      string
+	DistillMaxWords      int
 	AllowedDirs          []string
 	AllowEnv             []string
 	JSON                 bool
@@ -666,6 +715,11 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.StringSliceVar(&v.StopOn, "stop-on", nil, "hard-stop rule(s) (repeatable/comma-separated): off-scope-edit, read-only-edit, repeated-verify=N")
 	f.StringArrayVar(&v.Prechecks, "precheck", nil, "harness command run BEFORE verify each turn (repeatable); a failure blocks verify/postcheck and is non-success")
 	f.StringArrayVar(&v.Postchecks, "postcheck", nil, "harness command run AFTER a passing verify (repeatable); a failure is non-success even though verify passed")
+	f.BoolVar(&v.NoDistill, "no-distill", false, "disable the compaction distiller: when the running summary overflows, drop the oldest entries instead of asking the model to rewrite them as a brief (same as KLOO_DISTILL=0)")
+	f.StringVar(&v.DistillProvider, "distill-provider", "", "named provider from the profile's \"providers\" block used for the distiller's own calls (sets its endpoint+key; unset ⇒ the run's own provider)")
+	f.StringVar(&v.DistillModel, "distill-model", "", "model that writes the compaction brief (a provider alias is expanded); unset ⇒ the run's own model, which is the default behaviour")
+	f.StringVar(&v.DistillEndpoint, "distill-endpoint", "", "OpenAI-compatible base URL for the distiller's calls; unset ⇒ the run's endpoint. Requires --distill-model")
+	f.IntVar(&v.DistillMaxWords, "distill-max-words", 0, "word budget for the compaction brief (0 ⇒ built-in 220). Raising it on the SAME model is the cheap control arm before routing the pass to a bigger one")
 	f.BoolVar(&v.Benchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
 	f.IntVar(&v.LLMMaxRetries, "llm-max-retries", config.DefaultLLMMaxRetries, "extra model-call retry attempts after the first")
 	f.IntSliceVar(&v.LLMRetryCodes, "llm-retry-codes", config.DefaultLLMRetryableStatusCodes, "HTTP status codes retryable for model calls")
