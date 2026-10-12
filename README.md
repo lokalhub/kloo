@@ -105,6 +105,16 @@ make binary          # build ./bin/kloo  (needs Go 1.25+ on PATH)
 ./bin/kloo "fix the failing test"  # runs the autonomous loop
 ```
 
+To put that build on your `PATH` (default `~/.local/bin`, override with `PREFIX=`
+or `BINDIR=`):
+
+```sh
+make install         # prints the version before and after, so a stale
+                     # install can't pass for a fresh one
+```
+
+A running TUI keeps the binary it started with — relaunch it to pick up a new one.
+
 kloo talks to an OpenAI-compatible endpoint (default
 `http://127.0.0.1:8080/v1`, model `local` — a placeholder a single-model llama.cpp
 server ignores). Point it at your own with `--endpoint` / `--model` or the
