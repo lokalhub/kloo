@@ -15,7 +15,13 @@ DATE      ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 VPKG      := github.com/lokalhub/kloo/internal/cli
 LDFLAGS   := -X $(VPKG).version=$(VERSION) -X $(VPKG).commit=$(COMMIT) -X $(VPKG).date=$(DATE)
 
-.PHONY: build binary run test vet fmt fmtcheck lint tidy check clean bench-assert
+# Where `make install` puts the binary. Override either half:
+#   make install PREFIX=/usr/local     -> /usr/local/bin/kloo
+#   make install BINDIR=$HOME/bin
+PREFIX    ?= $(HOME)/.local
+BINDIR    ?= $(PREFIX)/bin
+
+.PHONY: build binary run test vet fmt fmtcheck lint tidy check clean bench-assert install
 
 # Plain `make` builds the runnable binary (./bin/kloo) — the intuitive default.
 # `make build` remains the no-artifact compile gate; `make check` the full gate.
@@ -28,6 +34,24 @@ build:
 # Build the runnable binary (version-stamped so `kloo --version` works).
 binary:
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN) .
+
+# Build and put the binary on PATH. Prints the version before and after, because
+# the usual way to be confused about kloo is to run a stale install: a copy from a
+# previous build, or a release binary this checkout is already ahead of. An already
+# running TUI keeps the binary it started with — relaunch it to pick this up.
+# Installs a "-dev" stamp by default; pass the tag to install a release stamp:
+#   make install VERSION=v1.2.3
+install: binary
+	@printf 'before: '; "$(BINDIR)/kloo" --version 2>/dev/null || echo "not installed"
+	@mkdir -p "$(BINDIR)"
+	@install -m 0755 "$(BIN)" "$(BINDIR)/kloo"
+	@printf 'after:  '; "$(BINDIR)/kloo" --version
+	@p=$$(command -v kloo 2>/dev/null); \
+	 if [ -z "$$p" ]; then \
+	   printf 'note: %s is not on your PATH\n' "$(BINDIR)"; \
+	 elif [ "$$p" != "$(BINDIR)/kloo" ]; then \
+	   printf 'note: PATH finds kloo at %s, not the copy just installed\n' "$$p"; \
+	 fi
 
 # Run kloo, forwarding args:  make run ARGS='--model snappy "say hi"'
 run:
