@@ -233,6 +233,12 @@ const (
 	// and its benefit (a requirement that would have been dropped) have to be
 	// countable separately in a bench comparison.
 	RailGreenVerifyConfirm Rail = "green-verify-confirm"
+
+	// RailWatchedContinue: a rail that would have ENDED the run handed the model a
+	// corrective and carried on instead, because a human is at the prompt (Loop.Watched).
+	// Counted so an interactive run that needed three rescues is still visible as
+	// one that nearly died, in /verbose and in the JSON.
+	RailWatchedContinue Rail = "watched-continue"
 )
 
 // VerifyResult is the REAL signal from running the configured verify command —

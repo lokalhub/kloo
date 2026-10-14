@@ -39,12 +39,24 @@ type LoopRunner struct {
 	// store + sess persist that conversation to disk so it also survives a restart
 	// (resume). Both nil ⇒ in-memory only (tests, or a workspace store that failed
 	// to init); the in-session carry still works.
-	store        *session.Store
-	sess         *session.Session
-	now          func() time.Time // injectable clock for persistence timestamps
+	store *session.Store
+	sess  *session.Session
+	now   func() time.Time // injectable clock for persistence timestamps
+	// lastRun is what the PREVIOUS submission did, kept so a "continue" can resume
+	// that thread instead of starting a fresh run with a one-line recap of it.
+	lastRun      *runMemo
 	statusWriter func(RuntimeConfig, *agent.Report, time.Duration) error
 	beforeRun    func(context.Context, string, RuntimeConfig) string
 	afterRun     func(context.Context, string, RuntimeConfig, *agent.Report, time.Duration)
+}
+
+// runMemo is the previous run in the form a resume needs: what was asked, what the
+// run actually did (the same one-line-per-action log the session file stores), and
+// how it ended.
+type runMemo struct {
+	task string
+	log  []session.DisplayItem
+	rep  *agent.Report
 }
 
 // NewLoopRunner builds a runner over a pre-constructed loop (deps wired by the
@@ -153,6 +165,12 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 		r.send(streamDoneMsg{}) // finalize any streamed assistant text for this turn
 		r.send(toolEvent(call, res, err))
 	}
+	// A rail that rescued the run, or anything else the run did that the user would
+	// otherwise only learn from a counter. Dim line in the transcript + the active-run
+	// log, same plumbing as a retry notice.
+	r.loop.OnNotice = func(text string) {
+		r.send(noticeMsg{text: "• " + text})
+	}
 	r.loop.OnRetry = func(attempt, max int, err error, wait time.Duration) {
 		// A transient model-call failure is being retried — show it as a dim line so a
 		// slow/cold endpoint reads as "retrying", not a frozen run.
@@ -175,11 +193,22 @@ func (r *LoopRunner) Start(ctx context.Context, task string, runtime RuntimeConf
 	// single user-role context recap (task + outcome + the reply) gives a follow-up
 	// what it needs without derailing the model.
 	r.loop.SessionHistory = r.session
+	// "continue" / "keep going" used to start a FRESH run whose only knowledge of the
+	// last one was the one-line recap ("Outcome: churn after 6 steps") — so the model
+	// re-derived the problem, often re-reading the same files, and sometimes redid
+	// work that had already landed. A run that was stopped by a rail is exactly the
+	// run a user says "continue" to, so that is the case this has to be good at: hand
+	// it back what it was doing, step by step, and tell it not to start over.
+	loopTask := task
+	if isContinuation(task) && r.lastRun != nil {
+		loopTask = resumeBrief(task, r.lastRun)
+	}
 	start := time.Now()
-	rep, _ := r.loop.Run(ctx, task)
+	rep, _ := r.loop.Run(ctx, loopTask)
 	elapsed := time.Since(start)
 	flushProse() // the final turn's answer (prose with no trailing tool call)
 	if rep != nil {
+		r.lastRun = &runMemo{task: task, log: disp, rep: rep}
 		r.session = capSession(append(r.session, sessionRecap(task, rep)))
 		if r.sess != nil {
 			r.sess.Transcript = capDisplay(append(r.sess.Transcript, disp...))
@@ -254,6 +283,90 @@ func capSession(s []llm.Message) []llm.Message {
 		return s
 	}
 	return append([]llm.Message{}, s[len(s)-maxSessionMessages:]...)
+}
+
+// continuationWords are the ways a user says "pick up where you left off" rather
+// than "here is a new task". Matched on the WHOLE message (reduced to letters and
+// single spaces, like ackReply) so a real task that merely contains the word —
+// "continue the migration in src/db" — is not mistaken for one.
+var continuationWords = map[string]bool{
+	"continue": true, "continue please": true, "please continue": true,
+	"keep going": true, "carry on": true, "go on": true, "proceed": true,
+	"resume": true, "continue the task": true, "finish it": true, "go ahead": true,
+}
+
+func isContinuation(line string) bool {
+	var b strings.Builder
+	prevSpace := false
+	for _, ch := range strings.ToLower(strings.TrimSpace(line)) {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			b.WriteRune(ch)
+			prevSpace = false
+		case ch == ' ' || ch == '\t':
+			if !prevSpace && b.Len() > 0 {
+				b.WriteRune(' ')
+			}
+			prevSpace = true
+		}
+	}
+	return continuationWords[strings.TrimSpace(b.String())]
+}
+
+// maxResumeActions bounds how much of the previous run's action log is replayed: the
+// TAIL, which is where it left off. The whole log of a 40-step run would crowd out
+// the task it is supposed to be resuming.
+const maxResumeActions = 15
+
+// resumeBrief turns the previous run into the task text for a "continue": the
+// original request, the actions it got through, how it ended, and the failing verify
+// output if there was one — then an explicit instruction not to start over.
+//
+// It is a BRIEF, not a transcript replay. Replaying the raw prior assistant turns is
+// what makes a small model parrot its own old message and re-issue the tool calls in
+// it (the reason SessionHistory carries a recap and not the transcript); a
+// third-person account of what happened does not read as something to continue
+// saying.
+func resumeBrief(ask string, prev *runMemo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — resume the task below. It was interrupted, not finished, and you must NOT start it over.\n\n", strings.TrimSpace(ask))
+	fmt.Fprintf(&b, "The task: %s\n\n", strings.TrimSpace(prev.task))
+
+	actions := make([]string, 0, maxResumeActions)
+	for _, d := range prev.log {
+		if d.Kind == dispTool {
+			actions = append(actions, d.Text)
+		}
+	}
+	if len(actions) > maxResumeActions {
+		actions = actions[len(actions)-maxResumeActions:]
+	}
+	if len(actions) > 0 {
+		b.WriteString("What you already did, oldest first (do not repeat these):\n")
+		for _, a := range actions {
+			fmt.Fprintf(&b, "  - %s\n", a)
+		}
+		b.WriteString("\n")
+	}
+	if rep := prev.rep; rep != nil {
+		fmt.Fprintf(&b, "How it ended: %s after %d step(s).\n", rep.Reason, rep.Steps)
+		if rep.RolledBack {
+			b.WriteString("The workspace was rolled back to its pre-run state, so those changes are GONE and must be made again.\n")
+		}
+		if v := rep.FinalVerify; v.Command != "" {
+			fmt.Fprintf(&b, "Last %s: exit %d (passed=%t).\n", v.Command, v.ExitCode, v.Passed)
+			if !v.Passed {
+				if out := strings.TrimSpace(v.Stdout + "\n" + v.Stderr); out != "" {
+					fmt.Fprintf(&b, "Its output:\n%s\n", truncate(out, 1500))
+				}
+			}
+		}
+		if ans := lastAssistantContent(rep.Transcript); ans != "" {
+			fmt.Fprintf(&b, "The last thing you said: %s\n", oneLine(ans))
+		}
+	}
+	b.WriteString("\nPick up from there: decide the NEXT action and take it this turn.")
+	return b.String()
 }
 
 // sessionRecap builds the single context message carried to the NEXT submission so

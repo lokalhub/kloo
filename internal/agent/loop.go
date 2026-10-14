@@ -267,6 +267,27 @@ type Loop struct {
 	OnProgress   func(step, maxSteps, tokens, maxTokens int)
 	OnBeforeEdit func(call tools.Call) bool
 	OnRetry      func(attempt, max int, err error, wait time.Duration)
+	// OnNotice is a one-line message FOR THE USER (not the model): something the run
+	// did that they would otherwise only find out about by reading a counter. The TUI
+	// renders it as a dim line. nil ⇒ dropped, so headless is unchanged.
+	OnNotice func(text string)
+
+	// Watched means a human is sitting at the prompt and can stop the run themselves
+	// (the TUI sets it; headless and kloo-bench leave it false).
+	//
+	// It changes what a rail DOES, never when it fires. The rails were tuned where
+	// nobody is watching: on a benchmark, ending a flailing run is cheap — it saves
+	// GPU time and the arm still gets scored. In front of a person it is the
+	// expensive outcome: they can see it is stuck, they have Esc, and what they
+	// wanted was for it to keep trying. Same signal, opposite right answer, and kloo
+	// only ever implemented the benchmark one — so a user's task died at step 6 with
+	// "NO PROGRESS (churn)" and a request to type it again.
+	//
+	// So when Watched, the rails that END a run hand the model their corrective and
+	// continue instead, up to maxWatchedRailContinues times. Bounded because a model
+	// that will never converge must still stop, and honest because every rescue is
+	// announced (OnNotice) and tallied (RailWatchedContinue).
+	Watched bool
 
 	// LLMRetries is the resolved number of EXTRA model-call attempts to make after
 	// the first when a call fails transiently (endpoint timeout, cold model load,
@@ -535,6 +556,30 @@ func isReadOnlyTool(name string) bool {
 }
 
 // stallLimit is the effective stall backstop threshold.
+// maxWatchedRailContinues bounds how many times ONE run may be rescued from a
+// terminal rail while a human watches. Three: enough that a model which is merely
+// stuck on one file gets real chances to recover, few enough that a model which is
+// hopeless reaches the same stop it used to, a few turns later.
+const maxWatchedRailContinues = 3
+
+// notice sends a one-line message to the user (no-op when nothing is listening).
+func (l *Loop) notice(format string, args ...any) {
+	if l.OnNotice != nil {
+		l.OnNotice(fmt.Sprintf(format, args...))
+	}
+}
+
+// rescueFromRail reports whether a rail that would end the run may instead carry on,
+// consuming one of the run's rescues. False in every non-interactive run, so the
+// headless path and every benchmark arm keep the exact stop they had.
+func (l *Loop) rescueFromRail(used *int) bool {
+	if !l.Watched || *used >= maxWatchedRailContinues {
+		return false
+	}
+	*used++
+	return true
+}
+
 func (l *Loop) stallLimit() int {
 	if l.StallRounds > 0 {
 		return l.StallRounds
@@ -887,6 +932,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// exploreTotal it is NOT reset by running a command.
 		readsSinceEdit int
 		counters       ToolCounters
+		// railRescues counts the terminal rails this run talked its way out of because
+		// a human was watching (Loop.Watched). Bounded by maxWatchedRailContinues.
+		railRescues int
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
@@ -1084,6 +1132,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					step-- // the escalation is not the model's step
 					continue
 				}
+			}
+			// A HUMAN IS WATCHING: say what is wrong, hand it back, keep going. They can
+			// see it is stuck and they have Esc; ending their task here and asking them to
+			// retype it is the worse answer. Headless keeps the stop (Watched is false).
+			if artifact := l.Churn.Artifact(); l.rescueFromRail(&railRescues) {
+				recordRail(RailWatchedContinue)
+				l.notice("kloo was going in circles (%s) — pointing it somewhere else and carrying on (%d/%d)",
+					kind, railRescues, maxWatchedRailContinues)
+				l.Churn.Reset()
+				convo = append(convo, churnRescueCorrective(kind, artifact, editedPaths))
+				step-- // the rescue is not the model's step
+				continue
 			}
 			return finish(ReasonChurn, nil, nil, &ChurnEvidence{Kind: kind, Artifact: l.Churn.Artifact()})
 		}
@@ -1866,6 +1926,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				art += " on " + attemptedEditPath
 			}
 			art += fmt.Sprintf(" (%d attempts, no valid edit landed)", editFailStreak)
+			// Edits that never apply are usually ONE fixable mistake — a SEARCH block
+			// that does not match the file byte for byte — so the corrective names it
+			// and offers write_file as the way out. Worth another turn with someone
+			// watching; headless still stops here.
+			if l.rescueFromRail(&railRescues) {
+				recordRail(RailWatchedContinue)
+				l.notice("kloo's edits were not applying — telling it how to fix that and carrying on (%d/%d)",
+					railRescues, maxWatchedRailContinues)
+				editFailStreak = 0
+				convo = append(convo, churnRescueCorrective(ChurnEditFailed, art, editedPaths))
+				continue
+			}
 			return finish(ReasonChurn, nil, nil, &ChurnEvidence{Kind: ChurnEditFailed, Artifact: art})
 		}
 
@@ -1915,6 +1987,18 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					convo = append(convo, l.repeatCorrective(call, repeatStreak))
 				}
 			case repeatStreak >= l.repeatAbortRounds():
+				// The rail a watched run dies on most often: the model locks onto ONE call
+				// and fires it until the abort. It has already been nudged once by the arm
+				// below; with a human present, the answer to the nudge not working is a
+				// harder corrective and another chance, not the end of their task.
+				if art := repeatArtifact(call, repeatStreak); l.rescueFromRail(&railRescues) {
+					recordRail(RailWatchedContinue)
+					l.notice("kloo kept making the same %s call — telling it to change approach and carrying on (%d/%d)",
+						call.Name, railRescues, maxWatchedRailContinues)
+					repeatStreak, repeatNudged = 0, false
+					convo = append(convo, churnRescueCorrective(ChurnRepeatedCall, art, editedPaths))
+					break
+				}
 				return finish(ReasonChurn, nil, nil, &ChurnEvidence{
 					Kind:     ChurnRepeatedCall,
 					Artifact: repeatArtifact(call, repeatStreak),
@@ -2038,12 +2122,30 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// streak alone never fired. Distinctness proves a turn is not a REPEAT; it does
 		// not prove the run is converging on a change.
 		case exploreTotal >= l.exploreTotalCap():
+			if l.rescueFromRail(&railRescues) {
+				recordRail(RailWatchedContinue)
+				l.notice("kloo has been reading without changing anything — telling it to make a change and carrying on (%d/%d)",
+					railRescues, maxWatchedRailContinues)
+				exploreStreak, exploreTotal, exploreNudgedAt, exploreTokens = 0, 0, 0, 0
+				convo = append(convo, exploreCorrective(len(seenTargets)))
+				step--
+				continue
+			}
 			return finish(ReasonExploreStop, nil, nil, nil)
 		case exploreStreak >= l.exploreAbortRounds():
 			// ReasonExploreStop, not ReasonAnswered: a run a RAIL killed with no edits
 			// is not the model answering a question, and reporting it as "answered"
 			// made a stopped run indistinguishable from a clean one in every report
 			// and benchmark that reads the reason.
+			if l.rescueFromRail(&railRescues) {
+				recordRail(RailWatchedContinue)
+				l.notice("kloo stopped finding anything new to read — telling it to make a change and carrying on (%d/%d)",
+					railRescues, maxWatchedRailContinues)
+				exploreStreak, exploreTotal, exploreNudgedAt, exploreTokens = 0, 0, 0, 0
+				convo = append(convo, exploreCorrective(len(seenTargets)))
+				step--
+				continue
+			}
 			return finish(ReasonExploreStop, nil, nil, nil)
 		// ── The two rails below are ADDITIVE and deliberately come LAST. ──
 		//
@@ -3681,6 +3783,51 @@ func churnEditTarget(artifact string) string {
 // closes a file instead of ending the run. It names what is closed and what has
 // already been changed, because the failure this exists for is a model that has
 // edited two of the three files a task needs and cannot see which one is missing.
+// churnRescueCorrective is what the model is told when a churn stop is converted
+// into another turn (Loop.Watched). It has to do more than "try again": the run
+// reached here because repetition did not work, so it names the repetition, rules it
+// out, and asks for a different move — the same shape as the measured escalation
+// corrective, generalised to the other churn kinds.
+func churnRescueCorrective(kind ChurnKind, artifact string, edited map[string]bool) llm.Message {
+	var b strings.Builder
+	switch kind {
+	case ChurnRepeatedEdit:
+		b.WriteString("You have now made the same edit more than once and the result has not changed. ")
+		b.WriteString("Do NOT repeat it. ")
+	case ChurnRepeatedFailure:
+		b.WriteString("The same failure has come back unchanged more than once, so the last few changes are not addressing it. ")
+	case ChurnRepeatedCall:
+		b.WriteString("You have now made the SAME tool call over and over with the same result. ")
+		b.WriteString("Repeating it again cannot help — the next call must be a different one. ")
+	case ChurnEditFailed:
+		b.WriteString("Your edits are not applying. The SEARCH block has to match the file BYTE FOR BYTE, ")
+		b.WriteString("including indentation: read the file again and copy the exact lines you intend to replace, ")
+		b.WriteString("or call write_file with the file's full new contents instead. ")
+	default:
+		b.WriteString("This run has stopped making progress: the last few turns produced no change in the result. ")
+	}
+	if a := strings.TrimSpace(firstLine(artifact)); a != "" {
+		b.WriteString("What keeps repeating: ")
+		b.WriteString(a)
+		b.WriteString("\n\n")
+	}
+	if len(edited) > 0 {
+		paths := make([]string, 0, len(edited))
+		for p := range edited {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		b.WriteString("Files you have changed this run: ")
+		b.WriteString(strings.Join(paths, ", "))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Change your approach THIS TURN. Either read the failing output again and edit a file ")
+	b.WriteString("you have NOT touched yet, or run a command that tells you something new about why it fails. ")
+	b.WriteString("If you have genuinely run out of ways to make progress, call finish and say what is blocking you ")
+	b.WriteString("— an honest account of the obstacle is more useful than another identical attempt.")
+	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+}
+
 func churnEscalationCorrective(target string, edited map[string]bool) llm.Message {
 	var b strings.Builder
 	b.WriteString("STOP editing ")
