@@ -132,6 +132,11 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		// the gate entirely (--no-chat-gate / "noChatGate"), as headless and
 		// subagents already do.
 		ChatSystem: chatGateSystem(cfg.NoChatGate),
+		// A human is at the prompt here. Rails that END a run hand the model their
+		// corrective and continue instead (bounded, announced) — the user can see it
+		// is stuck and has Esc, so killing their task was the worse answer. Headless
+		// and kloo-bench leave this false and keep the hard stops.
+		Watched: true,
 
 		StopOn:                  agentStopPolicy(cfg.StopOn),
 		StallRounds:             cfg.ChurnRounds,
