@@ -51,11 +51,17 @@ type infoItem struct{ text string }
 func (i infoItem) render(width int) string { return wrapLines(i.text, width) }
 
 // interruptItem marks a user-initiated interrupt (distinct from the autonomous
-// stop-report banner).
-type interruptItem struct{}
+// stop-report banner). dropped means the user pressed Esc a SECOND time, before
+// the loop had finished unwinding: the prompt came back immediately and the run
+// was abandoned rather than waited for.
+type interruptItem struct{ dropped bool }
 
-func (interruptItem) render(width int) string {
-	return cardStyle(width, lipgloss.NormalBorder()).Render("■ run interrupted — returned to idle (partial state preserved)")
+func (i interruptItem) render(width int) string {
+	text := "■ run interrupted — returned to idle (partial state preserved)"
+	if i.dropped {
+		text = "■ run dropped — back to the prompt; it was still stopping, so its late output is ignored (partial state preserved)"
+	}
+	return cardStyle(width, lipgloss.NormalBorder()).Render(text)
 }
 
 // --- card rendering helpers -------------------------------------------------

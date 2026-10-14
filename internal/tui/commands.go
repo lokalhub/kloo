@@ -231,6 +231,11 @@ func (m Model) submitTask(line string) (tea.Model, tea.Cmd) {
 	if m.running {
 		return m.appendItem(infoItem{text: "a run is already active — press Esc to interrupt it first"}), nil
 	}
+	// A dropped run's goroutine is still live and still owns the shared Loop's hooks;
+	// starting a second one here is the race the comment above describes.
+	if m.abandoned {
+		return m.appendItem(infoItem{text: "the run you dropped hasn't finished stopping yet — a moment, or Ctrl-C to quit kloo"}), nil
+	}
 	m = m.appendItem(userItem{text: line}) // transcript shows the line as typed (paste placeholders kept short)
 	// A bare "thanks"/"ok"/"nice" is not a task — reply in one line and launch NO
 	// run, so a weak model can't mistake it for "redo the work" (which it did even
