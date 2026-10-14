@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,20 +12,39 @@ import (
 // handleInterruptKeys implements the idle-vs-running key distinction:
 //   - Ctrl-C / Esc while a run is ACTIVE → interrupt the run (cancel ctx); does
 //     NOT quit the program.
+//   - Esc while the run is ALREADY STOPPING → drop it (back to the prompt now).
+//   - Ctrl-C while the run is already stopping → quit the program.
 //   - Ctrl-C from IDLE → quit the program.
 //   - `q` from IDLE with an empty input → quit (so typing a task containing 'q'
 //     still works); Esc from idle is a no-op.
+//
+// The second-press rules are the point of the key, not a nicety. Cancelling the
+// run's context is all the FIRST press can do, and how long the loop then takes to
+// unwind is not up to kloo: an endpoint that keeps the socket open, a tool wedged
+// in a syscall, an MCP server ignoring its context. Before this, that wait had no
+// exit — the screen kept animating the same verb, a second Esc did nothing at all
+// (interrupt() had already dropped the cancel func), and Ctrl-C could not quit
+// either, because Ctrl-C only quits when `running` is false. Pressing the
+// interrupt key and having nothing happen is the whole complaint.
 //
 // Returns handled=false to let normal key handling proceed.
 func (m Model) handleInterruptKeys(msg tea.KeyMsg) (handled bool, nm tea.Model, cmd tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		// A run that was asked to stop and hasn't: Ctrl-C now means quit kloo, which
+		// is the one escape that cannot be blocked by the run.
+		if m.interrupting {
+			return true, m, tea.Quit
+		}
 		if m.running {
 			nm, cmd = m.interrupt()
 			return true, nm, cmd
 		}
 		return true, m, tea.Quit
 	case tea.KeyEsc:
+		if m.interrupting {
+			return true, m.dropRun(), nil
+		}
 		if m.running {
 			nm, cmd = m.interrupt()
 			return true, nm, cmd
@@ -55,10 +75,50 @@ func (m Model) interrupt() (tea.Model, tea.Cmd) {
 		m.confirm = nil
 	}
 	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
+		m.cancel() // idempotent: the func is KEPT so a repeat press still reaches it
 	}
+	// Say so on screen, immediately. The cancel is instant; the loop unwinding from
+	// it is not, and until the report lands the only thing the user had to go on was
+	// a thinking line still animating the same verb with the clock still climbing —
+	// indistinguishable from the key having done nothing.
+	m.interrupting = true
+	m.interruptAt = time.Now()
+	m.activity = "" // the in-flight phrase is no longer what kloo is doing
 	return m, nil
+}
+
+// dropRun is the second Esc: stop WAITING for the run and hand the prompt back.
+//
+// The run goroutine is still out there — kloo cannot reach into a blocked syscall —
+// so the run is ABANDONED rather than stopped: its context stays cancelled, its
+// late output is ignored (see Update), and the report it eventually sends is
+// discarded instead of printing a stop banner over a conversation the user has
+// moved on from. A new task is refused until it reports, because one Loop is shared
+// across submissions and a second run would race the first on its hooks.
+func (m Model) dropRun() Model {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.running, m.interrupting = false, false
+	m.abandoned = true
+	m.streamIdx = -1
+	m.activity = ""
+	return m.appendItem(interruptItem{dropped: true})
+}
+
+// dropLateRunMsg reports whether msg is a signal from an abandoned run, and
+// returns the model with any obligation that message carried discharged.
+func (m Model) dropLateRunMsg(msg tea.Msg) (tea.Model, bool) {
+	switch msg := msg.(type) {
+	case streamDeltaMsg, streamDoneMsg, toolEventMsg, noticeMsg, progressMsg, memoryMsg, contextMsg:
+		return m, true
+	case confirmRequestMsg:
+		if msg.Respond != nil {
+			go msg.Respond(false) // never leave the orphaned loop blocked on a y/n
+		}
+		return m, true
+	}
+	return m, false
 }
 
 // reportMsg is the terminal outcome of a run, translated from the Phase-04
@@ -96,9 +156,16 @@ type reportMsg struct {
 // churn / error / success) renders a distinct terminal banner.
 func (m Model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
 	m.running = false
+	m.interrupting = false
 	m.cancel = nil
 	m.streamIdx = -1
 	m.activity = "" // an in-flight phrase must not outlive the run (task 06)
+	// A run the user already dropped (second Esc) has had its outcome rendered;
+	// printing its stop banner now would land under whatever they did next.
+	if m.abandoned {
+		m.abandoned = false
+		return m, nil
+	}
 	if msg.Reason == "interrupted" {
 		return m.appendItem(interruptItem{}), nil
 	}

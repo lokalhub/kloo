@@ -53,6 +53,15 @@ type Model struct {
 	// run state (interrupt.go / wiring).
 	running bool
 	cancel  context.CancelFunc
+	// interrupting: the run's context has been cancelled and kloo is waiting for
+	// the loop to unwind. Shown on screen, and it arms the second-press keys
+	// (Esc drops the run, Ctrl-C quits) — see handleInterruptKeys.
+	interrupting bool
+	interruptAt  time.Time
+	// abandoned: a dropped run whose goroutine is still live. Its late signals are
+	// discarded and its report prints nothing, and it blocks a new task until it
+	// reports (one Loop is shared across submissions).
+	abandoned bool
 
 	// activity is the display-only in-flight phrase ("editing <file>", "running
 	// <cmd>") shown in the thinking line, set from each tool event (task 06).
@@ -281,6 +290,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	}
+	// Signals from a run the user dropped are discarded: they describe work nobody
+	// is waiting for any more, and appending them would grow the transcript (and
+	// re-open a streaming assistant block) under the live prompt. A held edit is
+	// released rejected so the orphaned loop cannot sit on its confirm forever.
+	if m.abandoned {
+		if nm, dropped := m.dropLateRunMsg(msg); dropped {
+			return nm, nil
+		}
+	}
+	switch msg := msg.(type) {
 	case streamDeltaMsg:
 		return m.handleStreamDelta(msg)
 	case streamDoneMsg:

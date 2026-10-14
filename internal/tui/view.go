@@ -139,6 +139,11 @@ func (m Model) renderActivityLine() string {
 }
 
 func (m Model) renderHint() string {
+	// While a run is stopping the dial is irrelevant and the two keys that matter
+	// are the ones that end the wait.
+	if m.interrupting {
+		return truncate("Esc again: drop the run and get the prompt back · Ctrl-C: quit kloo", m.width)
+	}
 	dial := "permission dial: auto › accept-edits › approve-each"
 	line := "Esc/Ctrl-C interrupt · " + dial
 	return truncate(line, m.width)

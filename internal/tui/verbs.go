@@ -64,6 +64,17 @@ func (m Model) handleTick(tickMsg) (tea.Model, tea.Cmd) {
 // The activity phrase comes from the current tool (display-only); the token
 // count is Phase 00's live value.
 func (m Model) renderThinking() string {
+	// Interrupt requested: the line stops pretending kloo is working on the task and
+	// says what it is actually doing — waiting for the loop to unwind — with the two
+	// keys that end the wait. The verb and spinner would read as "still working".
+	if m.interrupting {
+		waited := 0
+		if !m.interruptAt.IsZero() {
+			waited = int(time.Since(m.interruptAt).Seconds())
+		}
+		return warning.Render("■ interrupting…") + thinkingMeta.Render(fmt.Sprintf(
+			"  stopping the run · %ds · esc again to drop it · ctrl-c quits kloo", waited))
+	}
 	verb := m.verb
 	if verb == "" {
 		verb = "Working"
