@@ -167,12 +167,30 @@ func TestCtrlOTogglesExpand(t *testing.T) {
 // TestVerifyColourReportLine (task 05): the stop-report `last verify` line shows
 // the coloured ✓ (pass) / ✗ (fail) glyph at the report site.
 func TestVerifyColourReportLine(t *testing.T) {
-	pass := apply(tall(), reportMsg{Reason: "success", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 0}).View()
+	verbose := func() Model { m := tall(); m.verbose = true; return m }
+	pass := apply(verbose(), reportMsg{Reason: "success", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 0}).View()
 	if !contains(pass, "last verify: npm run build → exit 0 ✓") {
 		t.Errorf("report pass verify line missing coloured ✓:\n%s", pass)
 	}
-	fail := apply(tall(), reportMsg{Reason: "error", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 1}).View()
+	fail := apply(verbose(), reportMsg{Reason: "error", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 1}).View()
 	if !contains(fail, "last verify: npm run build → exit 1 ✗") {
 		t.Errorf("report fail verify line missing coloured ✗:\n%s", fail)
+	}
+}
+
+// TestQuietReportShowsOnlyAFailingVerify: by default a RED verify still reaches the
+// screen — it names the command to re-run, which is the one counter on that banner
+// a user acts on. A GREEN one says nothing the answer above it does not, so it goes.
+func TestQuietReportShowsOnlyAFailingVerify(t *testing.T) {
+	pass := apply(tall(), reportMsg{Reason: "success", Steps: 1, Elapsed: "4s", Summary: "Added the route.", VerifyCmd: "npm run build", VerifyExit: 0}).View()
+	if contains(pass, "npm run build") {
+		t.Errorf("a green verify should not be reported by default:\n%s", pass)
+	}
+	if !contains(pass, "Added the route.") {
+		t.Errorf("the answer must still be there:\n%s", pass)
+	}
+	fail := apply(tall(), reportMsg{Reason: "unverified", Steps: 1, Elapsed: "9s", VerifyCmd: "npm run build", VerifyExit: 1}).View()
+	if !contains(fail, "npm run build → exit 1 ✗") {
+		t.Errorf("a red verify must stay visible by default:\n%s", fail)
 	}
 }

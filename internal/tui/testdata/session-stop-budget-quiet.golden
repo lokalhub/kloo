@@ -1,0 +1,24 @@
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ kloo dev  test-model                                                              auto │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+k> kloo — autonomous coding for small local models
+
+▸ you: a task that never converges
+
+■ kloo stopped itself before finishing this task. Type "continue" to pick up where it
+  left off.
+■ the workspace was put back the way it was before this run.
+2m18s · npm run build → exit 1 ✗
+
+
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│k> type a task…                                                                         │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

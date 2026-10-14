@@ -166,10 +166,11 @@ func TestActiveRunViaProgram(t *testing.T) {
 		return contains(s, "edited a.ts")
 	}, teatest.WithDuration(3*time.Second))
 
-	// The report ends the run → regions hide, stop banner shows.
+	// The report ends the run → the pinned regions hide and the outcome lands. A
+	// finished run prints no banner any more, so the elapsed footer is the signal.
 	tm.Send(reportMsg{Reason: "success", Steps: 2, Tokens: 400, MaxTokens: 200000, Elapsed: "3s", VerifyCmd: "npm test", VerifyExit: 0})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return contains(string(b), "run stopped — COMPLETE")
+		return contains(string(b), "3s")
 	}, teatest.WithDuration(3*time.Second))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})

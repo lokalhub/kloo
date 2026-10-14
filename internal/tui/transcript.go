@@ -75,21 +75,79 @@ func cardStyle(width int, border lipgloss.Border) lipgloss.Style {
 	return lipgloss.NewStyle().Border(border).Width(w).Padding(0, 1)
 }
 
-// wrapLines hard-wraps text to width, preserving existing newlines.
+// wrapLines wraps text to width at WORD boundaries, preserving existing newlines.
+//
+// It used to cut at exactly `width` runes wherever that landed, so every answer
+// long enough to wrap came out with a word sawn in half ("a more specific in" /
+// "struction"). Nothing else in the terminal does that, and it is a large part of
+// why kloo's prose did not read like Claude's or grok's on the same reply.
+//
+// A single word longer than the line (a path, a URL, a hash) is still hard-split —
+// there is nowhere else to break it — and no character is ever dropped.
 func wrapLines(s string, width int) string {
 	if width < 4 {
 		width = 4
 	}
 	var out []string
 	for _, line := range strings.Split(s, "\n") {
-		for len([]rune(line)) > width {
-			r := []rune(line)
-			out = append(out, string(r[:width]))
-			line = string(r[width:])
+		// Leading whitespace is structure (indented code, list continuation); keep it
+		// on the first visual line and measure the rest against the same width.
+		cur := ""
+		flush := func() {
+			out = append(out, cur)
+			cur = ""
 		}
-		out = append(out, line)
+		for _, word := range splitKeepingSpaces(line) {
+			switch {
+			case cur == "":
+				cur = word
+			case len([]rune(cur))+1+len([]rune(word)) <= width:
+				cur += " " + word
+			default:
+				flush()
+				cur = word
+			}
+			// A word that cannot fit a line of its own: hard-split the overflow.
+			for len([]rune(cur)) > width {
+				r := []rune(cur)
+				out = append(out, string(r[:width]))
+				cur = string(r[width:])
+			}
+		}
+		flush()
 	}
 	return strings.Join(out, "\n")
+}
+
+// splitKeepingSpaces splits a line into words, keeping any leading indentation
+// attached to the first word so wrapped code/list lines do not lose their shape.
+func splitKeepingSpaces(line string) []string {
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+	words := strings.Fields(trimmed)
+	if len(words) == 0 {
+		return []string{indent}
+	}
+	words[0] = indent + words[0]
+	return words
+}
+
+// hangingNote renders a "■ <sentence>" line whose wrapped continuation lines are
+// indented under the text, not under the marker — so one note reads as one note.
+func hangingNote(marker, text string, width int) string {
+	w := width - lipgloss.Width(marker)
+	if w < 8 {
+		w = 8
+	}
+	wrapped := strings.Split(wrapLines(text, w), "\n")
+	pad := strings.Repeat(" ", lipgloss.Width(marker))
+	for i := range wrapped {
+		if i == 0 {
+			continue
+		}
+		wrapped[i] = pad + wrapped[i]
+	}
+	return marker + strings.Join(wrapped, "\n")
 }
 
 // indent prefixes every line with pad.

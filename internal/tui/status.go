@@ -191,6 +191,34 @@ func (s statusData) ctxSegment(avail int) string {
 	return ""
 }
 
+// quietCtxFloor is how full the window has to be before the quiet header mentions
+// it at all. Below this there is nothing for the user to decide, and a number on
+// screen that nobody can act on is the machinery this header is getting rid of.
+const quietCtxFloor = 75
+
+// pressureSegment is the DEFAULT header's only counter, and most of the time it is
+// empty.
+//
+// kloo used to lead with `step 18/500 · 1553.7k/480k tok`: two ratios whose
+// denominators are kloo's own safety rails, parked where a user reads the model
+// name. They make every run look like it is racing a quota — and they are not even
+// the number that matters, since the rails are set wide enough that interactive runs
+// almost never reach them. What DOES change what the user sees next is the context
+// window filling up, because past the trigger kloo starts summarising older turns.
+// So that is what this says, and only once it is true.
+func (s statusData) pressureSegment() string {
+	if s.ctxUsable <= 0 || s.ctxUsed <= 0 {
+		return ""
+	}
+	if s.ctxTrigger > 0 && s.ctxToCompact <= 0 {
+		return "compacting history"
+	}
+	if pct := 100 * s.ctxUsed / s.ctxUsable; pct >= quietCtxFloor {
+		return fmt.Sprintf("context %d%% full", pct)
+	}
+	return ""
+}
+
 // tokensShort is a token count in the fewest columns that stay unambiguous.
 //
 // It is not `human` (transcript.go), which always prints one decimal: `human(104857)`
@@ -251,8 +279,28 @@ func (m Model) renderHeader() string {
 		modelLabel = s.provider + "/" + modelLabel
 	}
 	lead := "kloo " + displayVersion(m.version) + "  " + modelLabel
-	if s.effort != "" {
+	if m.verbose && s.effort != "" {
 		lead += " · " + s.effort
+	}
+
+	// THE DEFAULT HEADER: what kloo is, which model, which permission dial — and the
+	// context field only when it has started to matter. Everything else below is the
+	// /verbose view: the counters are still measured, still in the headless JSON, and
+	// still one command away; they are just not the first thing on screen.
+	if !m.verbose {
+		right := string(s.mode)
+		inner := m.width - 2 - 2
+		if seg := s.pressureSegment(); seg != "" {
+			if lipgloss.Width(lead)+lipgloss.Width(seg)+lipgloss.Width(right)+6 <= inner {
+				right = muted.Render(seg) + " · " + right
+			}
+		}
+		gap := inner - lipgloss.Width(lead) - lipgloss.Width(right)
+		line := lead + " " + right
+		if gap >= 1 {
+			line = lead + strings.Repeat(" ", gap) + right
+		}
+		return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Width(m.width-2).Padding(0, 1).Render(truncate(line, inner))
 	}
 
 	// Trailing cluster: step (dim/secondary) · live token total · [⟲ compactions] · mode.

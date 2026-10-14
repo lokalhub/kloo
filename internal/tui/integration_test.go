@@ -44,9 +44,17 @@ func TestIntegrationFullRunFrame(t *testing.T) {
 		reportMsg{Reason: "success", Steps: 2, Tokens: 1200, MaxTokens: 8000, Elapsed: "12s", VerifyCmd: "npm run build", VerifyExit: 0},
 	)
 	v := m.View()
-	for _, want := range []string{"▸ you: make the three tabs", "I'll update the tab routes", "✎ src/app/tabs/tabs.routes.ts", "- { path: 'tab1'", "exit 0 ✓", "step 2/40", "run stopped — COMPLETE"} {
+	for _, want := range []string{"▸ you: make the three tabs", "I'll update the tab routes", "✎ src/app/tabs/tabs.routes.ts", "- { path: 'tab1'", "exit 0 ✓", "12s"} {
 		if !contains(v, want) {
 			t.Errorf("full-run frame missing %q:\n%s", want, v)
+		}
+	}
+	// How a GOOD run now ends: the work on screen and a dim elapsed. No step ratio in
+	// the header, no "COMPLETE" receipt. kloo congratulating itself in a bordered box
+	// under every finished task is the thing this frame exists to prevent coming back.
+	for _, gone := range []string{"step 2/40", "run stopped — COMPLETE", "1.2k/8k"} {
+		if contains(v, gone) {
+			t.Errorf("a finished run should not show %q:\n%s", gone, v)
 		}
 	}
 	requireGolden(t, "session-run.golden", v)
@@ -56,6 +64,7 @@ func TestIntegrationFullRunFrame(t *testing.T) {
 // terminal banner, visibly DISTINCT from the Esc-interrupt line.
 func TestIntegrationStopReportBudgetDistinct(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m.verbose = true // this frame IS the counter view; the default one is pinned below
 	m = apply(m,
 		submitTaskMsg{task: "a task that never converges"},
 		reportMsg{
@@ -86,6 +95,7 @@ func TestIntegrationStopReportBudgetDistinct(t *testing.T) {
 // frame for the Product lens.
 func TestIntegrationStopReportChurnVariant(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m.verbose = true // the counter view of the churn stop; the default one is pinned below
 	m = apply(m,
 		submitTaskMsg{task: "a task that keeps repeating the same edit"},
 		reportMsg{
@@ -104,6 +114,57 @@ func TestIntegrationStopReportChurnVariant(t *testing.T) {
 		t.Errorf("autonomous churn stop must not render the interrupt line")
 	}
 	requireGolden(t, "session-stop-churn.golden", v)
+}
+
+// TestIntegrationQuietStopFrames is the DEFAULT end of a run, full-frame: the
+// header without counters, and one sentence about what happened in place of the
+// banner. Two frames because they are the two stops a user actually hits — a run
+// that went long, and a run that got stuck — and because the whole point of this
+// change is how these two look.
+func TestIntegrationQuietStopFrames(t *testing.T) {
+	budget := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	budget = apply(budget,
+		submitTaskMsg{task: "a task that never converges"},
+		reportMsg{
+			Reason: "budget-exceeded", Steps: 40, Tokens: 7900, MaxTokens: 8000,
+			Elapsed: "2m18s", Detail: "max-steps (40/40)",
+			VerifyCmd: "npm run build", VerifyExit: 1, RolledBack: true,
+			Rails: "explore-nudge×2",
+		},
+	)
+	v := budget.View()
+	for _, want := range []string{`Type "continue"`, "put back the way it was", "npm run build → exit 1 ✗", "2m18s"} {
+		if !contains(v, want) {
+			t.Errorf("quiet budget stop missing %q:\n%s", want, v)
+		}
+	}
+	for _, gone := range []string{"BUDGET EXCEEDED", "40/40", "steps:", "self-corrections", "step 40/40", "7.9k/8k"} {
+		if contains(v, gone) {
+			t.Errorf("quiet budget stop still shows %q:\n%s", gone, v)
+		}
+	}
+	requireGolden(t, "session-stop-budget-quiet.golden", v)
+
+	churn := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	churn = apply(churn,
+		submitTaskMsg{task: "a task that keeps repeating the same edit"},
+		reportMsg{
+			Reason: "churn", Steps: 6, Tokens: 2100, MaxTokens: 8000,
+			Elapsed: "31s", Detail: "repeated-failure (same failure ×3)",
+			Summary: "I kept re-applying the same change to router.ts and the build stayed red.",
+		},
+	)
+	cv := churn.View()
+	if !contains(cv, "router.ts") {
+		t.Errorf("the model's own account of the run should lead:\n%s", cv)
+	}
+	if !contains(cv, "repeating itself") {
+		t.Errorf("quiet churn stop missing its sentence:\n%s", cv)
+	}
+	if contains(cv, "NO PROGRESS") {
+		t.Errorf("quiet churn stop still shows the banner title:\n%s", cv)
+	}
+	requireGolden(t, "session-stop-churn-quiet.golden", cv)
 }
 
 // TestIntegrationDialDefaultAndApproveEachEndToEnd: default auto end-to-end, and
@@ -133,7 +194,7 @@ func TestIntegrationFakeRunnerDrivesViaProgram(t *testing.T) {
 		streamDeltaMsg{Content: "working"},
 		streamDoneMsg{},
 		toolEventMsg{Name: "run_command", Command: "npm run build", ExitCode: 0},
-		reportMsg{Reason: "success", Steps: 1, VerifyCmd: "npm run build", VerifyExit: 0},
+		reportMsg{Reason: "success", Steps: 1, Elapsed: "12s", VerifyCmd: "npm run build", VerifyExit: 0},
 	}}
 	tm := teatest.NewTestModel(t, New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: runner}),
 		teatest.WithInitialTermSize(tw, th))
@@ -143,7 +204,9 @@ func TestIntegrationFakeRunnerDrivesViaProgram(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return contains(string(b), "COMPLETE") || contains(string(b), "run stopped")
+		// The elapsed footer is the report reaching the screen. It used to wait on
+		// "COMPLETE"/"run stopped", which a finished run no longer prints.
+		return contains(string(b), "12s")
 	}, teatest.WithDuration(3*time.Second))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC}) // idle quit
@@ -162,7 +225,7 @@ func TestIntegrationMemoryIndicatorEndToEnd(t *testing.T) {
 		toolEventMsg{Name: "run_command", Command: "go test", ExitCode: 0},
 		progressMsg{Model: "test-model", Step: 2, MaxSteps: 40, Tokens: 900, MaxTokens: 8000},
 		memoryMsg{Compactions: 2},
-		reportMsg{Reason: "success", Steps: 2, VerifyCmd: "go test", VerifyExit: 0},
+		reportMsg{Reason: "success", Steps: 2, Elapsed: "12s", VerifyCmd: "go test", VerifyExit: 0},
 	}}
 	tm := teatest.NewTestModel(t, New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: runner}),
 		teatest.WithInitialTermSize(tw, th))
@@ -172,7 +235,9 @@ func TestIntegrationMemoryIndicatorEndToEnd(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return contains(string(b), "COMPLETE") || contains(string(b), "run stopped")
+		// The elapsed footer is the report reaching the screen. It used to wait on
+		// "COMPLETE"/"run stopped", which a finished run no longer prints.
+		return contains(string(b), "12s")
 	}, teatest.WithDuration(3*time.Second))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC}) // idle quit

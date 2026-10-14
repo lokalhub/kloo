@@ -169,14 +169,35 @@ func (m Model) handleReport(msg reportMsg) (tea.Model, tea.Cmd) {
 	if msg.Reason == "interrupted" {
 		return m.appendItem(interruptItem{}), nil
 	}
-	return m.appendItem(reportItem{r: msg}), nil
+	return m.appendItem(reportItem{r: msg, verbose: m.verbose}), nil
 }
 
-// reportItem renders the autonomous stop-report banner per the mock, visibly
-// distinct from the interrupt line.
-type reportItem struct{ r reportMsg }
+// reportItem renders a run's outcome. Two forms: the default one, which is the
+// answer and — only when there is something to say — one plain sentence about why
+// kloo stopped; and the /verbose one, the original counter banner.
+//
+// The banner used to be unconditional, so EVERY run ended in a bordered receipt:
+//
+//	■ run stopped — BUDGET EXCEEDED
+//	reason:  steps (40/40)
+//	steps:   40 · tokens: 1.2k/200k · elapsed: 3m04s
+//	self-corrections: explore-nudge×2, repeat-corrective×1
+//
+// Four lines of kloo's internals under every answer, including the ones that went
+// perfectly. None of it is what the user asked for, the ratios advertise rails they
+// will almost never hit, and "BUDGET EXCEEDED" over a finished task reads as a
+// failure. Claude and grok end a turn with the reply and nothing else; so does kloo
+// now. The numbers are unchanged in the headless JSON (which is what kloo-bench
+// reads) and one `/verbose` away on screen.
+type reportItem struct {
+	r       reportMsg
+	verbose bool
+}
 
 func (ri reportItem) render(width int) string {
+	if !ri.verbose {
+		return ri.renderQuiet(width)
+	}
 	r := ri.r
 	title := bannerTitle(r.Reason)
 
@@ -224,6 +245,81 @@ func (ri reportItem) render(width int) string {
 		style = style.BorderForeground(warningColor) // attention tint (theme.go)
 	}
 	return style.Render(strings.TrimRight(b.String(), "\n"))
+}
+
+// renderQuiet is the default outcome: the answer, then at most one sentence.
+//
+// No border and no card. A card draws the eye to the frame, and on a finished task
+// the thing worth reading is the prose inside it.
+func (ri reportItem) renderQuiet(width int) string {
+	r := ri.r
+	var b strings.Builder
+	if sum := strings.TrimSpace(r.Summary); sum != "" {
+		if r.SummarySalvaged {
+			b.WriteString(muted.Render("kloo stopped before it answered — the last thing it said:") + "\n")
+		}
+		b.WriteString(wrapLines(sum, width-2))
+	}
+	if note := quietStopNote(r); note != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(hangingNote(warning.Render("■ "), note, width-2))
+	}
+	if r.RolledBack {
+		b.WriteString("\n" + hangingNote(warning.Render("■ "), "the workspace was put back the way it was before this run.", width-2))
+	}
+	// The dim footer carries the two facts that are still worth a glance: how long it
+	// took, and a verify that is RED (actionable — it names the command to re-run). A
+	// green verify says nothing the answer above does not.
+	foot := make([]string, 0, 2)
+	if e := strings.TrimSpace(r.Elapsed); e != "" && e != "0s" {
+		foot = append(foot, e)
+	}
+	if r.VerifyCmd != "" && r.VerifyExit != 0 {
+		foot = append(foot, fmt.Sprintf("%s → exit %d %s", r.VerifyCmd, r.VerifyExit, glyphFail))
+	}
+	if len(foot) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(muted.Render(strings.Join(foot, " · ")))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// quietStopNote is the one sentence a non-success outcome earns, in words that
+// describe what happened to the USER's task and what to do about it — not which
+// internal counter tripped. "" when the run simply finished: a completed task needs
+// no commentary, and the loudest thing kloo did was comment on its own successes.
+func quietStopNote(r reportMsg) string {
+	switch r.Reason {
+	case "success", "answered", "interrupted":
+		// interrupted is rendered by interruptItem; the others have nothing to add.
+		return ""
+	case "budget-exceeded":
+		// The memory ceiling is a different event from running long, and it is the one
+		// case where kloo stopping is protecting the machine rather than the task.
+		if strings.HasPrefix(r.Detail, "memory") {
+			return "kloo stopped itself to keep from running this machine out of memory. The work so far is kept."
+		}
+		return `kloo stopped itself before finishing this task. Type "continue" to pick up where it left off.`
+	case "churn":
+		return "kloo was repeating itself without making progress, so it stopped. A more specific instruction — which file, which test — usually unsticks it."
+	case "explore-stop":
+		return `kloo kept reading without changing anything, so it stopped. Naming the file to edit usually gets it moving.`
+	case "unverified":
+		// Not a failure: there was no build/test command to gate on, so the work is
+		// done but unproven. Saying nothing would imply it was checked.
+		return "done, but there was no build or test command to check it against — nothing verified this."
+	default:
+		// error / malformed-tool-call / anything new: Detail is already a sentence with
+		// a hint (humanizeError), which is exactly what belongs here.
+		if d := strings.TrimSpace(r.Detail); d != "" {
+			return d
+		}
+		return "kloo stopped before finishing this task."
+	}
 }
 
 func bannerTitle(reason string) string {
