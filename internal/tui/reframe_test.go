@@ -16,6 +16,7 @@ func headerLine(m Model) string {
 // (appears after the lead), and the header never leads with step.
 func TestHeaderReframeLeadsModelEffort(t *testing.T) {
 	m := sized(New(Config{Version: "0.2.0", Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	m = apply(m, progressMsg{Model: "test-model", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
 	h := headerLine(m)
 

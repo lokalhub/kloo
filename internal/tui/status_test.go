@@ -7,6 +7,7 @@ import (
 
 func TestStatusIdleDefaults(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	v := m.View()
 	for _, want := range []string{"test-model", "step 0/40", "0/8k tok", "auto"} {
 		if !contains(v, want) {
@@ -18,6 +19,7 @@ func TestStatusIdleDefaults(t *testing.T) {
 
 func TestStatusUpdatesOnProgress(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	m = apply(m, progressMsg{Model: "test-model", Step: 3, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000})
 	v := m.View()
 	for _, want := range []string{"test-model", "step 3/40", "1.2k/8k tok", "auto"} {
@@ -48,6 +50,7 @@ func TestStatusNarrowElidesGracefully(t *testing.T) {
 // (the unchanged status-running.golden above is the regression for the 0 case).
 func TestStatusCompactionIndicator(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	m = apply(m, progressMsg{Model: "test-model", Step: 3, MaxSteps: 40, Tokens: 1200, MaxTokens: 8000})
 
 	// No compaction yet ⇒ no ⟲ marker (the live token total is still shown).
@@ -185,6 +188,7 @@ func TestCtxSegmentWithoutATriggerNamesNone(t *testing.T) {
 func TestStatusContextFieldReachesTheHeader(t *testing.T) {
 	line := func(model string, width int) string {
 		m := sized(New(Config{Model: model, MaxSteps: 500, MaxTokens: 480000}), width, th)
+		m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 		m = apply(m, progressMsg{Model: model, Step: 18, MaxSteps: 500, Tokens: 1553679, MaxTokens: 480000})
 		m = apply(m, contextMsg{Used: 26370, Usable: 104857, Trigger: 58617, Free: 78487, FreeToCompaction: 32247})
 		return strings.Split(m.View(), "\n")[1]

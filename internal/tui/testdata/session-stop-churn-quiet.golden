@@ -1,0 +1,24 @@
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ kloo dev  test-model                                                              auto │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+k> kloo — autonomous coding for small local models
+
+▸ you: a task that keeps repeating the same edit
+
+I kept re-applying the same change to router.ts and the build stayed red.
+
+■ kloo was repeating itself without making progress, so it stopped. A more specific
+  instruction — which file, which test — usually unsticks it.
+31s
+
+
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│k> type a task…                                                                         │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+Esc/Ctrl-C interrupt · permission dial: auto › accept-edits › approve-each

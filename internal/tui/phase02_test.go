@@ -25,6 +25,10 @@ func TestTranscriptAirySpacing(t *testing.T) {
 // stop-report with a coloured verify line — renders coherently in one frame.
 func TestPhaseComposedTranscript(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", Effort: "medium", MaxSteps: 80, MaxTokens: 200000}), tw, 60)
+	// This frame is the /verbose composition — it asserts the dense header lead and
+	// the counter banner, which is exactly what verbose is for. The default-view
+	// frames are session-run.golden and session-stop-*-quiet.golden.
+	m.verbose = true
 	m = apply(m,
 		submitTaskMsg{task: "rename the three tabs"},
 		progressMsg{Model: "test-model", Step: 1, MaxSteps: 80, Tokens: 400, MaxTokens: 200000},
@@ -40,7 +44,7 @@ func TestPhaseComposedTranscript(t *testing.T) {
 	requireGolden(t, "phase-composed.golden", v)
 
 	for _, want := range []string{
-		"kloo dev  test-model · medium", // reframed header lead (version "dev" for a local build)
+		"kloo dev  test-model · medium", // reframed header lead, /verbose (effort + counters)
 		"● assistant", "• edit tab1",    // markdown assistant
 		"✎ src/app/tabs/tabs.routes.ts", // diff card header
 		"⌘ run_command", "exit 0 ✓",     // pass run card

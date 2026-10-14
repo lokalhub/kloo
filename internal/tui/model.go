@@ -84,6 +84,13 @@ type Model struct {
 	frozenSummaryText string
 	// expanded toggles full vs truncated run-command output (ctrl+o, task 03).
 	expanded bool
+	// verbose shows kloo's own numbers — step/token counters in the header, the
+	// stop-report banner, the rail tally. OFF by default: those are kloo's internals,
+	// not the user's task, and a header that leads with `step 18/500 · 1553.7k/480k
+	// tok` makes every run look like it is racing a quota it will almost never reach.
+	// Toggled with /verbose, or on at launch with KLOO_VERBOSE=1. The numbers are
+	// unchanged in the headless JSON either way — that is what kloo-bench reads.
+	verbose bool
 
 	// thinking-line animation (verbs.go): a rotating verb + spinner shown while
 	// a run is in flight, Claude-Code style.
@@ -241,6 +248,7 @@ func New(cfg Config) Model {
 		m.getenv = func(string) string { return "" }
 	}
 	m.reloadProfile = cfg.ReloadProfile
+	m.verbose = m.getenv("KLOO_VERBOSE") != ""
 	// Splash on a FRESH session only: on a resume the replayed conversation is the
 	// more useful thing to open with, and a masthead above it just pushes it away.
 	if len(cfg.History) == 0 {

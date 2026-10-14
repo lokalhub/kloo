@@ -109,9 +109,24 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashProvider(arg), nil
 	case "/profile":
 		return m.slashProfile(arg), nil
+	case "/verbose":
+		return m.slashVerbose(), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
+}
+
+// slashVerbose toggles kloo's own numbers on screen: the step/token counters in the
+// header and the counter banner under each outcome. They are off by default because
+// they are kloo's bookkeeping rather than the user's work; this is the switch for
+// when the bookkeeping IS the question (a run that stopped early, a benchmark, a
+// budget being tuned).
+func (m Model) slashVerbose() Model {
+	m.verbose = !m.verbose
+	if m.verbose {
+		return m.appendItem(infoItem{text: "verbose: on — step/token counters in the header and a full stop report per run"})
+	}
+	return m.appendItem(infoItem{text: "verbose: off — kloo shows the work, not its counters"})
 }
 
 func (m Model) slashAdd(path string) Model {

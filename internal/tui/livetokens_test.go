@@ -11,6 +11,7 @@ import (
 // user complaint ("tokens 0/200000 for the whole run") is resolved.
 func TestHeaderShowsLiveTokens(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	m = apply(m, progressMsg{Model: "test-model", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
 	v := m.View()
 	if !contains(v, "14.4k/200k tok") {
@@ -25,6 +26,7 @@ func TestHeaderShowsLiveTokens(t *testing.T) {
 // TestHeaderTokensIncrease: successive snapshots advance the displayed total.
 func TestHeaderTokensIncrease(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	m = apply(m, progressMsg{Model: "test-model", Step: 18, MaxSteps: 80, Tokens: 14400, MaxTokens: 200000})
 	if !contains(m.View(), "14.4k/200k") {
 		t.Fatalf("first snapshot not shown:\n%s", m.View())
@@ -56,6 +58,7 @@ func TestThinkingLineShowsLiveTokens(t *testing.T) {
 // zero — the fix surfaces real usage, it does not hardcode a number.
 func TestIdleHeaderNotFalselyNonZero(t *testing.T) {
 	m := sized(New(Config{Model: "test-model", MaxSteps: 80, MaxTokens: 200000}), tw, th)
+	m.verbose = true // the counters live under /verbose now; the quiet default has its own tests
 	if !contains(m.View(), "0/200k tok") {
 		t.Errorf("idle header should show a real zero token count:\n%s", m.View())
 	}
