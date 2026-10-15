@@ -1971,7 +1971,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if !greenStopNudged {
 				greenStopNudged = true
 				recordRail(RailGreenVerifyConfirm)
-				convo = append(convo, greenVerifyConfirmCorrective())
+				// On a task that ENUMERATES its requirements, put the list itself in
+				// front of the model. The generic "re-read the original task" asks it to
+				// reconstruct that list from thousands of tokens back, and it
+				// reconstructs the part it just worked on: a live run wrote the gate for
+				// item 4, never ran it, never touched 5 or 6, and stopped as SUCCESS in
+				// 2m31s with this very probe answered.
+				if list := taskChecklist(task); list != "" {
+					convo = append(convo, checklistCorrective(list))
+				} else {
+					convo = append(convo, greenVerifyConfirmCorrective())
+				}
 				continue
 			}
 			// Failed-last-action rail: the run is about to be called a success while the
