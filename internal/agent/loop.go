@@ -2083,11 +2083,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		if isEditTool(call.Name) && derr == nil {
 			readsSinceEdit = 0
 		}
+		// inspectedNewGround: this turn was a read-only call that reached something
+		// the run had not seen. Reset every turn so a stale true cannot carry over.
+		inspectedNewGround := false
 		if readOnlyTurn {
 			readsSinceEdit++
 			exploreTotal++ // read-only turns since the last action, new ground or not
 			sig := exploreSignature(call)
 			newGround := sig != "" && !seenTargets[sig]
+			inspectedNewGround = newGround // read by the stall backstop below
 			if newGround {
 				seenTargets[sig] = true
 				exploreStreak = 0 // new ground: this turn made progress
@@ -2364,6 +2368,31 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			stallSeeded = true // first turn establishes the baseline; nothing to compare yet
 		case !everActed:
 			stall = 0 // pre-action exploration — let the explore rail govern, not stall
+		case !edited && readOnlyTurn && inspectedNewGround:
+			// INSPECTION before the first edit is not a confirming-spin, whatever came
+			// before it. The !everActed case above stops counting only until the model
+			// runs its first command — but running a command is often how exploration
+			// STARTS: render the page, then look at it. On a real visual task the shape
+			// was exactly that, and it died every time:
+			//
+			//   run_command (playwright capture)  → everActed = true
+			//   view_image wide-login.png         → stall 1
+			//   view_image phone-login.png        → stall 2
+			//   view_image wide-lobby.png         → stall 3 ⇒ run ends, ANSWERED
+			//
+			// Nine steps, zero edits, and the run reported as answered with a green
+			// verify, three times across three kloo versions. The artifacts are
+			// gitignored so the capture moved no fingerprint, and the verify was green
+			// before the run began, so every inspection turn fell through to the
+			// confirming-spin default.
+			//
+			// The backstop's own comment already states the intent — "a model that
+			// reads several files BEFORE making its first edit is doing legitimate
+			// work, not stalling". This extends that to every inspection tool and
+			// keys it on `edited` rather than `everActed`, which is the thing the
+			// comment actually describes. A spin on run_command still counts, so the
+			// case the backstop was built for is untouched.
+			stall = 0
 		case !lastVerify.Passed:
 			stall = 0 // red verify ⇒ churn/budget own this; never stall honest exploration
 		case editedThisTurn || fp != prevFp:
