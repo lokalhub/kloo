@@ -255,6 +255,7 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	bg := NewBackgroundManager()
 	r.bg = bg
 	r.Register(readFileTool{ws})
+	r.Register(viewImageTool{ws}) // vision: look at a screenshot the agent took itself
 	r.Register(readDirTool{ws})
 	r.Register(searchTool{ws})
 	// KLOO_SIMPLE_EDIT=1 offers grok's three-field edit tool INSTEAD of the fenced
