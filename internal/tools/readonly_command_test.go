@@ -61,3 +61,36 @@ func TestReadOnlyCommandClassification(t *testing.T) {
 		}
 	}
 }
+
+// TestCdPrefixedInspectionIsReadOnly: `cd <dir> && <reader>` is how a model
+// inspects a subdirectory, and it must count as reading.
+//
+// While `cd` was missing from the allowlist every one of these classified as
+// ACTING, which reset the exploration counters on every turn — so the explore
+// rails, whose whole job is to convert reading into an edit, could not fire at
+// all for a model that prefixed its greps with a cd. Observed twice in one
+// session: two runs, 6 and 3 minutes, zero edits, zero nudges.
+func TestCdPrefixedInspectionIsReadOnly(t *testing.T) {
+	readOnly := []string{
+		`cd frontend && grep -n "login-container" src/app/login.page.ts | head -60`,
+		`cd frontend && sed -n 1,25p src/app/login.page.ts`,
+		`cd /tmp/x && cat karma.conf.js`,
+		`cd .. && ls`,
+	}
+	for _, c := range readOnly {
+		if !IsReadOnlyCommand(c) {
+			t.Errorf("should be read-only: %s", c)
+		}
+	}
+	// cd does not launder a mutation that follows it.
+	acting := []string{
+		`cd frontend && npm run build`,
+		`cd frontend && rm -rf dist`,
+		`cd frontend && cat a.txt > b.txt`,
+	}
+	for _, c := range acting {
+		if IsReadOnlyCommand(c) {
+			t.Errorf("should count as acting: %s", c)
+		}
+	}
+}
