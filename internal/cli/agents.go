@@ -107,7 +107,90 @@ func agentsInstructions(dir string, allowedDirs []string, windowTokens int, logf
 	if len(sections) == 0 {
 		return ""
 	}
-	return "\n\n# Project instructions — follow these for this repository:\n\n" + strings.Join(sections, "\n\n")
+	body := "\n\n# Project instructions — follow these for this repository:\n\n" + strings.Join(sections, "\n\n")
+	return body + houseRules(sections)
+}
+
+// houseRules re-states the hard "never / always / must" lines from the project
+// instructions as a short list at the very END of the system prompt.
+//
+// Why a second copy: the instructions are loaded in full and pinned every turn, and
+// a small model still walks past them. Measured on a real repo whose AGENTS.md says
+// "Ionic-native components for all UI chrome — no bespoke buttons" and never uses an
+// inline style anywhere: kloo answered a styling task by adding style="..." attributes
+// to markup, one button at a time. The rule was in the prompt, thousands of tokens
+// above the task, in a document the model had already skimmed past. Recency is the
+// cheapest lever available without a model call, so the imperatives are repeated
+// last, where the task is.
+//
+// Deliberately dumb and deterministic: no model call, no scoring. It lifts bullet
+// lines that read like a prohibition or an obligation, deduplicates them, strips
+// markdown emphasis, and stops at a small cap — a long list would recreate the
+// dilution it exists to fix.
+func houseRules(sections []string) string {
+	const (
+		maxRules = 8
+		maxBytes = 700
+	)
+	seen := map[string]bool{}
+	var rules []string
+	used := 0
+	for _, sec := range sections {
+		for _, raw := range strings.Split(sec, "\n") {
+			ln := strings.TrimSpace(raw)
+			if !isRuleBullet(ln) {
+				continue
+			}
+			ln = cleanRule(ln)
+			if ln == "" || seen[strings.ToLower(ln)] {
+				continue
+			}
+			if used+len(ln) > maxBytes {
+				break
+			}
+			seen[strings.ToLower(ln)] = true
+			rules = append(rules, "- "+ln)
+			used += len(ln)
+			if len(rules) >= maxRules {
+				break
+			}
+		}
+		if len(rules) >= maxRules {
+			break
+		}
+	}
+	if len(rules) == 0 {
+		return ""
+	}
+	return "\n\nHOUSE RULES for this repository — these override your defaults, and an edit that " +
+		"breaks one is wrong even if it passes verify:\n" + strings.Join(rules, "\n")
+}
+
+// reRuleWord matches the imperative vocabulary that marks a line as a rule rather
+// than description. Word-bounded so "never" inside a word, or a sentence merely
+// mentioning "must-have", does not qualify.
+var reRuleWord = regexp.MustCompile(`(?i)\b(never|always|must|do not|don't|no bespoke|required|forbidden)\b`)
+
+// isRuleBullet reports whether a line is a markdown bullet carrying an imperative.
+// Bullets only: prose paragraphs restate context, bullets carry the rules, and
+// keeping to bullets is what holds the list short enough to be read.
+func isRuleBullet(ln string) bool {
+	if len(ln) < 4 || len(ln) > 220 {
+		return false
+	}
+	if !strings.HasPrefix(ln, "- ") && !strings.HasPrefix(ln, "* ") && !strings.HasPrefix(ln, "> ") {
+		return false
+	}
+	return reRuleWord.MatchString(ln)
+}
+
+// cleanRule strips the bullet marker and markdown emphasis so the restated line
+// reads as a plain instruction.
+func cleanRule(ln string) string {
+	ln = strings.TrimSpace(strings.TrimLeft(ln, "-*> "))
+	ln = strings.ReplaceAll(ln, "**", "")
+	ln = strings.ReplaceAll(ln, "`", "")
+	return strings.TrimSpace(ln)
 }
 
 var (
