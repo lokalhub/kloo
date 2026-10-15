@@ -552,7 +552,7 @@ func mutated(readOnlyTurn, timedOut bool, derr error) bool {
 func isReadOnlyTool(name string) bool {
 	return name == tools.NameReadFile || name == tools.NameListDir ||
 		name == tools.NameReadDir || name == tools.NameSearch ||
-		name == tools.NameCommandOutput
+		name == tools.NameCommandOutput || name == tools.NameViewImage
 }
 
 // stallLimit is the effective stall backstop threshold.
@@ -2998,7 +2998,10 @@ func observation(call tools.Call, res tools.Result, err error) llm.Message {
 			b.WriteString(fmt.Sprintf("\n[exit %d]", res.ExitCode))
 		}
 	}
-	return llm.Message{Role: llm.RoleUser, Content: b.String()}
+	// Images ride the observation as vision content parts. The observation is a USER
+	// message (not role "tool"), which is what makes this work on every
+	// OpenAI-compatible endpoint: several reject image parts on a tool-result message.
+	return llm.Message{Role: llm.RoleUser, Content: b.String(), Images: res.Images}
 }
 
 // saturated reports whether a read-only span has stopped covering new ground: at

@@ -88,6 +88,15 @@ type Result struct {
 	ExitCode  int
 	TimedOut  bool
 	Truncated bool
+	// Images carries image attachments the tool wants the model to SEE, as data
+	// URLs. They ride the observation message as vision content parts (one
+	// {"type":"image_url"} part each), never as text — base64 in Output would be
+	// tokenized as gibberish and re-sent every turn.
+	//
+	// Only view_image sets this today. It is on Result rather than special-cased in
+	// the loop so any future tool that produces a picture (a chart, a diff render)
+	// needs no loop change.
+	Images []string
 }
 
 // Tool is one entry in the agent's vocabulary. The interface is named by
