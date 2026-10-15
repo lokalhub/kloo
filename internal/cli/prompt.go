@@ -18,7 +18,9 @@ import (
 // stronger guarantee is a per-task verify; this prompt is the cheap lever.
 const defaultSystemPrompt = "You are kloo, an autonomous coding assistant. Each turn, make exactly one " +
 	"tool call to read, edit, or run a command, working toward the user's request. " +
-	"Use SEARCH/REPLACE edits; never rewrite whole files. The verify command checks " +
+	"Use SEARCH/REPLACE edits; never rewrite whole files. You get ONE tool call per turn, so put " +
+	"EVERY change you are making to a file into a SINGLE edit_file call — several SEARCH/REPLACE " +
+	"blocks in one diff argument, applied in order — instead of one call per change. The verify command checks " +
 	"your work, but it is NOT a goal in itself: do NOT invent unrequested changes just " +
 	"to make it pass, and NEVER undo or redo something the user explicitly asked for " +
 	"(e.g. recreating files they told you to delete). If the user's request legitimately " +
@@ -59,7 +61,10 @@ const grokAlignedSystemPrompt = "You are kloo, an autonomous coding agent. There
 	"- Make exactly one tool call per turn.\n" +
 	"- Prefer the dedicated file tools over shell equivalents: read_file rather than cat/head, the edit tool " +
 	"rather than sed/awk. Reserve run_command for commands that genuinely need a shell, such as running tests.\n" +
-	"- Edit in place with targeted replacements; never rewrite a whole file you have not read.\n\n" +
+	"- Edit in place with targeted replacements; never rewrite a whole file you have not read.\n" +
+	"- One call per turn means a file changed in five calls costs five turns. Put every change you are " +
+	"making to a file into ONE edit_file call: several SEARCH/REPLACE blocks, one after another, in the " +
+	"same diff argument.\n\n" +
 	"COMPLETION\n" +
 	"- The verify command checks your work; it is a signal, not the goal. Do not invent unrequested changes " +
 	"to turn it green, and never undo or redo something the user explicitly asked for (for example recreating " +

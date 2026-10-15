@@ -218,13 +218,13 @@ type editFileTool struct{ ws Workspace }
 
 func (t editFileTool) Name() string { return NameEditFile }
 func (t editFileTool) Description() string {
-	return "Edit a file by applying fenced SEARCH/REPLACE blocks. The SEARCH text must match exactly. This is the preferred way to change existing files."
+	return "Edit a file by applying one or more SEARCH/REPLACE blocks in a SINGLE call. The SEARCH text must match exactly. This is the preferred way to change existing files: put every change you are making to this file in one call rather than calling the tool once per change."
 }
 func (t editFileTool) Schema() ParamSchema {
 	return ParamSchema{
 		Properties: map[string]Property{
 			"path": {Type: "string", Description: "Workspace-relative path to edit."},
-			"diff": {Type: "string", Description: "A SEARCH/REPLACE block with ALL THREE marker lines, each on its own line, in this EXACT order — the ======= divider line between the two sections is REQUIRED (do not omit it or replace it with >>>>>>> REPLACE):\n<<<<<<< SEARCH\n<exact lines to find>\n=======\n<replacement lines>\n>>>>>>> REPLACE\nThe SEARCH text must match the file byte-for-byte. To create a new file, leave the SEARCH section empty. The ``` fence is optional." + anchorNote()},
+			"diff": {Type: "string", Description: "One or more SEARCH/REPLACE blocks, each with ALL THREE marker lines, each on its own line, in this EXACT order — the ======= divider line between the two sections is REQUIRED (do not omit it or replace it with >>>>>>> REPLACE):\n<<<<<<< SEARCH\n<exact lines to find>\n=======\n<replacement lines>\n>>>>>>> REPLACE\nThe SEARCH text must match the file byte-for-byte. To create a new file, leave the SEARCH section empty. The ``` fence is optional.\nSeveral blocks may follow one another in this one argument, and they are applied in order — use that instead of calling edit_file repeatedly for the same file." + anchorNote()},
 		},
 		Required: []string{"path", "diff"},
 	}
