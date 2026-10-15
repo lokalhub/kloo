@@ -21,6 +21,15 @@ var readOnlyCommands = map[string]bool{
 	"find": true, "file": true, "stat": true, "pwd": true, "tree": true,
 	"echo": true, "printf": true, "which": true, "type": true, "basename": true,
 	"dirname": true, "date": true, "env": true, "printenv": true, "uname": true,
+	// `cd` mutates nothing — it only moves the shell. It matters far out of
+	// proportion to its size: `cd frontend && grep ...` is the single most common
+	// way a model inspects a subdirectory, and while `cd` was missing here EVERY
+	// such command counted as ACTING. That reset the exploration counters each
+	// turn, so a run could read the repo through run_command indefinitely and no
+	// explore rail could ever fire. Measured twice in one session: 6 minutes /
+	// 112k tokens and 3 minutes / 70k tokens, both ending with zero edits and no
+	// nudge, every command of the form `cd <dir> && <reader>`.
+	"cd":   true,
 	"sort": true, "uniq": true, "cut": true, "diff": true, "cmp": true,
 	"du": true, "df": true, "true": true, "false": true, "test": true,
 	"pytest": true, "jq": true, "yq": true, "realpath": true, "readlink": true,
