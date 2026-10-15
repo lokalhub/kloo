@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -351,9 +352,64 @@ func (e *APIError) Error() string {
 	if status == "" {
 		status = http.StatusText(e.StatusCode)
 	}
-	body := strings.TrimSpace(e.Body)
+	body := summarizeErrorBody(e.Body)
 	if body == "" {
 		return fmt.Sprintf("llm: api error %d %s", e.StatusCode, status)
 	}
 	return fmt.Sprintf("llm: api error %d %s: %s", e.StatusCode, status, body)
+}
+
+// errorBodyMax bounds the upstream body quoted in an error. Endpoints put useful
+// detail in a JSON body, which is small; a proxy or CDN in front of one serves a
+// full HTML error page instead.
+const errorBodyMax = 400
+
+// summarizeErrorBody trims the upstream body to something a human and a model can
+// read. A CDN error page is several KB of markup, scripts and an obfuscated IP
+// reveal widget, and quoting it whole dumps all of that into the run transcript
+// and the model's context — which is what a real 525 did here. The page's own
+// <title> ("lokalai.example.com | 525: SSL handshake failed") is the one line in
+// it worth keeping, so that is what is kept.
+func summarizeErrorBody(raw string) string {
+	body := strings.TrimSpace(raw)
+	if body == "" {
+		return ""
+	}
+	if looksLikeHTML(body) {
+		if title := htmlTitle(body); title != "" {
+			return title + " (HTML error page, " + strconv.Itoa(len(body)) + " bytes)"
+		}
+		return "HTML error page, " + strconv.Itoa(len(body)) + " bytes"
+	}
+	if len(body) > errorBodyMax {
+		return body[:errorBodyMax] + "… (" + strconv.Itoa(len(body)) + " bytes)"
+	}
+	return body
+}
+
+func looksLikeHTML(body string) bool {
+	head := strings.ToLower(body)
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	return strings.Contains(head, "<!doctype html") || strings.Contains(head, "<html")
+}
+
+// htmlTitle returns the text of the first <title> element, collapsed to one line.
+func htmlTitle(body string) string {
+	lower := strings.ToLower(body)
+	i := strings.Index(lower, "<title")
+	if i < 0 {
+		return ""
+	}
+	open := strings.Index(lower[i:], ">")
+	if open < 0 {
+		return ""
+	}
+	start := i + open + 1
+	end := strings.Index(lower[start:], "</title>")
+	if end < 0 {
+		return ""
+	}
+	return strings.Join(strings.Fields(body[start:start+end]), " ")
 }
