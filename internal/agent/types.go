@@ -226,6 +226,13 @@ const (
 	// normally, the user is told the work was done, and nothing in the report
 	// disagrees. See finishclaim.go for the live incident.
 	RailFinishClaimUnsupported Rail = "finish-claim-unsupported"
+	// RailNoEditFinish: the model called finish on a CHANGE task without having
+	// changed a single file, so the finish was refused once. Recorded because the
+	// failure is invisible by construction — a run that edits nothing and finishes
+	// against an already-green verify is reported as SUCCESS. The live incident:
+	// a task listing six visual defects ended after seven steps, three screenshots
+	// looked at and zero edits, with a green tick. See finish_noedit.go.
+	RailNoEditFinish Rail = "no-edit-finish"
 	// RailGreenVerifyConfirm: a landed edit verified green mid-loop, which used to
 	// END the run as success on the spot. The probe spends one turn re-checking the
 	// original task's remaining requirements first. Recorded because it is the one

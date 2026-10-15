@@ -307,6 +307,12 @@ type Loop struct {
 	// RetryableStatusCodes controls which HTTP statuses retry. nil ⇒ defaults.
 	RetryableStatusCodes []int
 
+	// isSubagent marks a delegated child loop (set by runSubagent, never by a
+	// caller). A child is an INVESTIGATOR: its job is to read and report back, and
+	// finishing without editing is the correct outcome — so the no-edit-finish rail
+	// must not fire inside one.
+	isSubagent bool
+
 	// Tokens is the calibrating token estimator. It learns the model's real
 	// chars-per-token ratio from reported usage, so budgeting stops relying on a
 	// fixed guess. nil ⇒ the package default estimate (still entropy-aware).
@@ -913,6 +919,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// (registered a version, then stopped before upgrading the instance).
 		everActed           bool
 		confirmFinishNudged bool
+		// noEditFinishNudged: the no-edit-finish rail is one-shot, so a model that
+		// genuinely has nothing to change finishes on its very next turn.
+		noEditFinishNudged bool
 
 		// railFires tallies each SOFT rail that injected a corrective this run, copied
 		// into Report.RailFires at finish (nil when empty). Makes self-corrections
@@ -1276,6 +1285,27 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					convo = append(convo, finishClaimCorrective(missing))
 					continue
 				}
+			}
+			// No-edit-finish rail: a CHANGE task that finishes having modified nothing.
+			// Placed after the claim check (an unsupported claim is the worse fault and
+			// should be named first) and before the verify, because the verify is what
+			// makes this invisible: an already-green command turns a run that did
+			// nothing into a reported SUCCESS.
+			// `step > 1` is load-bearing: a finish on the very FIRST turn is a model
+			// saying "there is nothing here to do" before it has looked at anything —
+			// the conversational shape the chat gate already handles. The failure this
+			// rail exists for is the opposite: a run that explored, looked, ran
+			// commands, and then quit with the tree untouched.
+			// !finishClaimNudged: when the claim rail has already refused this finish,
+			// it has said the more specific thing ("you said you created X and did
+			// not"). Firing both would scold the model twice for one turn.
+			if step > 1 && !l.isSubagent && !noEditFinishNudged && !finishClaimNudged &&
+				!edited && len(editedPaths) == 0 && taskWantsChange(task) {
+				noEditFinishNudged = true
+				finishSummary = ""
+				recordRail(RailNoEditFinish)
+				convo = append(convo, noEditFinishCorrective(task))
+				continue
 			}
 			if l.Verifier == nil {
 				// Unverified mode: no command to prove the change works. Honour finish

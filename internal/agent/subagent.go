@@ -147,6 +147,7 @@ func (l *Loop) maxSubagents() int {
 //     would be attributed to the child's turns)
 func (l *Loop) runSubagent(ctx context.Context, instruction string, depth int) (tools.Result, int, error) {
 	child := *l // copy configuration, then override everything that must not be shared
+	child.isSubagent = true
 	child.Verifier = nil
 	child.Memory = nil
 	child.Checkpoint = nil
