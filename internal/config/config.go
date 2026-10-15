@@ -98,7 +98,11 @@ const (
 // with `model_error`, mid-task, with no recovery attempt.
 var DefaultLLMRetryableStatusCodes = []int{
 	408, 429, 500, 502, 503, 504,
-	520, 521, 522, 523, 524, // Cloudflare origin errors
+	// Cloudflare origin errors. 525/526 (SSL handshake / invalid certificate) are
+	// as transient as the rest and were missing: a real run died mid-task on a 525
+	// from an endpoint that answered 200 on the very next attempt, having retried
+	// 503s from the same endpoint minutes earlier without trouble.
+	520, 521, 522, 523, 524, 525, 526, 527, 530,
 }
 
 // Env var names (KLOO_-prefixed, SCREAMING_SNAKE). Extendable.
