@@ -2427,7 +2427,7 @@ func (l *Loop) buildPrompt(ctx context.Context, task string, convo []llm.Message
 			mapSection = repoMapSection(l.assembleContext(task, mapBudget))
 		}
 	}
-	sysContent := l.System
+	sysContent := l.System + taskConstraints(task)
 	var tailMsgs []llm.Message
 	pinnedMap := ""
 	if mapSection != "" && l.mapPosition() == MapPositionPinned {
