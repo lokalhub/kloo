@@ -4138,6 +4138,10 @@ func (l *Loop) retryBaseDelay() time.Duration {
 // error is deterministic (4xx, auth, parse), or a stream already emitted tokens —
 // retrying then would duplicate the visible output.
 func (l *Loop) complete(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	// Bound the attachments before anything else: every path into the model goes
+	// through here, so this is the one place the request's image payload can be
+	// capped once rather than at each of the assembly sites.
+	req.Messages = windowImages(req.Messages)
 	attempts := max(1, l.llmRetries()+1)
 	var (
 		resp   llm.ChatResponse
