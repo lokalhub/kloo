@@ -76,3 +76,20 @@ func taskOpening(task string) string {
 	}
 	return s
 }
+
+// failedLastActionCorrective challenges a run that is about to be called a success
+// while its last tool call errored. It quotes the error, because the model has
+// usually moved on and a bare "something failed" invites it to re-affirm that
+// everything is fine.
+func failedLastActionCorrective(errText string) llm.Message {
+	e := strings.Join(strings.Fields(errText), " ")
+	const max = 300
+	if len(e) > max {
+		e = e[:max] + "…"
+	}
+	return llm.Message{Role: llm.RoleUser, Content: "Before this run ends: your most recent tool call FAILED — " + e + " " +
+		"The verify command passes, but it can pass for reasons that have nothing to do with that call, " +
+		"so it does not tell you the change landed. Check whether the thing that call was supposed to do " +
+		"actually happened (read the file back and look). If it did not, do it now, THIS turn, with a tool call. " +
+		"If the failed call turned out to be unnecessary, call finish and say so."}
+}
