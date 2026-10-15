@@ -922,6 +922,12 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// noEditFinishNudged: the no-edit-finish rail is one-shot, so a model that
 		// genuinely has nothing to change finishes on its very next turn.
 		noEditFinishNudged bool
+		// lastToolErrored / lastToolErrorText: did the MOST RECENT dispatched tool call
+		// fail at the tool level, and with what message. failedActionNudged keeps the
+		// rail one-shot.
+		lastToolErrored    bool
+		lastToolErrorText  string
+		failedActionNudged bool
 
 		// railFires tallies each SOFT rail that injected a corrective this run, copied
 		// into Report.RailFires at finish (nil when empty). Makes self-corrections
@@ -1548,6 +1554,14 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// "a wrong command stops the run" gap). Read tools report ExitCode 0, so only a
 		// run_command non-zero exit or a real dispatch error counts as a failure here.
 		lastActionFailed = derr != nil || result.ExitCode != 0
+		// Tool-level failure only. A non-zero exit code is ordinary work (running a
+		// test that fails), so it is deliberately not counted here.
+		lastToolErrored = derr != nil
+		if derr != nil {
+			lastToolErrorText = derr.Error()
+		} else {
+			lastToolErrorText = ""
+		}
 		if !lastActionFailed {
 			promiseNudges = 0
 		}
@@ -1958,6 +1972,26 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				greenStopNudged = true
 				recordRail(RailGreenVerifyConfirm)
 				convo = append(convo, greenVerifyConfirmCorrective())
+				continue
+			}
+			// Failed-last-action rail: the run is about to be called a success while the
+			// most recent tool call ERRORED. A verify can be green for reasons that have
+			// nothing to do with the failed call, so success here says "it worked" about
+			// a turn that did not.
+			//
+			// Live incident: the model wrote 150 lines of stylesheet for a brand band, a
+			// surface card and a restyled primary button, then its edit_file adding the
+			// matching markup failed with "no SEARCH/REPLACE block found in diff" — and
+			// the run reported SUCCESS, because the verify (unit tests + an unrelated
+			// gate) was green either way. The CSS targeted elements that did not exist,
+			// so the page was byte-for-byte unchanged and the user was told it was done.
+			//
+			// Keyed on a tool-level error (derr), NOT on a command's exit code: running
+			// a test that fails is ordinary, deliberate work and must never trip this.
+			if lastToolErrored && !failedActionNudged {
+				failedActionNudged = true
+				recordRail(RailFailedLastAction)
+				convo = append(convo, failedLastActionCorrective(lastToolErrorText))
 				continue
 			}
 			return finish(ReasonSuccess, nil, nil, nil)

@@ -233,6 +233,13 @@ const (
 	// a task listing six visual defects ended after seven steps, three screenshots
 	// looked at and zero edits, with a green tick. See finish_noedit.go.
 	RailNoEditFinish Rail = "no-edit-finish"
+	// RailFailedLastAction: the run was about to be reported a SUCCESS while its most
+	// recent tool call had errored, so it was challenged once. Recorded because the
+	// failure is silent by construction — a green verify can be green for reasons
+	// unrelated to the call that failed. The live incident: 150 lines of stylesheet
+	// written, the edit adding the matching markup failed, and the run reported
+	// success with the page byte-for-byte unchanged.
+	RailFailedLastAction Rail = "failed-last-action"
 	// RailGreenVerifyConfirm: a landed edit verified green mid-loop, which used to
 	// END the run as success on the spot. The probe spends one turn re-checking the
 	// original task's remaining requirements first. Recorded because it is the one
