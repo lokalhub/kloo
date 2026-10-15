@@ -140,9 +140,14 @@ func TestLoopStallBackstopOnGreenSpin(t *testing.T) {
 		t.Fatalf("reason = %q, want answered (stall backstop)", rep.Reason)
 	}
 	// Step 1: run_command (seeds stall, sets everActed=true)
-	// Steps 2,3,4: read_file "a" (stall climbs 1,2,3 = stallLimit → stop)
-	if rep.Steps != 4 {
-		t.Errorf("steps = %d, want 4 (seed + stallLimit=3)", rep.Steps)
+	// Step 2: the FIRST read of "a" reaches new ground, so it is inspection, not a
+	//         spin — it does not count. (Before the inspection exemption this step
+	//         counted and the run stopped at 4. The one extra turn is the price of
+	//         not cutting off a model that runs a command and then looks at what it
+	//         produced, which killed a real visual run three times.)
+	// Steps 3,4,5: re-reading "a" covers nothing new (stall 1,2,3 = stallLimit → stop)
+	if rep.Steps != 5 {
+		t.Errorf("steps = %d, want 5 (seed + one new-ground read + stallLimit=3)", rep.Steps)
 	}
 }
 
