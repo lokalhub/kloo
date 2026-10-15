@@ -114,3 +114,46 @@ func TestNoEditFinishDoesNotFireAfterAnEdit(t *testing.T) {
 		t.Errorf("rail fired %d times after a real edit, want 0", n)
 	}
 }
+
+// The shape the LIVE incident actually took, and the one the first version of
+// this rail missed: the model never calls finish at all. It runs tools, then
+// stops with a prose turn narrating what it found. confirm-finish spends its one
+// nudge on "you did not call finish"; the model answers with more prose; the run
+// ends as ReasonAnswered with a green verify and an untouched tree.
+//
+// The session record is what identified it: `Outcome: answered after 8 step(s).
+// Verify: exit=0 passed=true.` A finish-TOOL stop with a passing verify returns
+// ReasonSuccess, so ReasonAnswered + green verify can only be the prose path.
+//
+// NEGATIVE CONTROL: remove the rail from the prose-stop branch and this fails —
+// the run ends one request earlier, having edited nothing.
+func TestNoEditStopIsRefusedOnTheProsePath(t *testing.T) {
+	prose := func(text string) llmtest.Mock { return llmtest.Mock{Body: proseResp(t, text)} }
+	narrate := prose("The matchup bar subtitle is dark grey on dark green, so it is unreadable.")
+	srv := llmtest.Sequence(t,
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"read_file", map[string]any{"path": "a.txt"}})},
+		// FOUR prose turns, not one. A bare prose reply to a native-FC request is
+		// first treated as a recoverable no-usable-content hiccup and retried, so a
+		// turn only reaches the stop branch after the model has narrated more than
+		// once. confirm-finish then spends the first stop that gets there, and THIS
+		// rail answers the second — which is exactly the live sequence.
+		narrate, narrate, narrate, narrate,
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"edit_file", map[string]any{"path": "a.txt", "diff": "x"}})},
+		llmtest.Mock{Body: toolResp(t, 5, tcSpec{"finish", map[string]any{"summary": "fixed the contrast"}})},
+	)
+	loop, _ := newLoop(t, srv, &stubVerifier{results: []VerifyResult{passResult(), passResult(), passResult()}}, &stubBudget{tripAt: 50}, &stubChurn{})
+
+	rep, err := loop.Run(context.Background(), "fix the contrast in the matchup bar")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := rep.RailFires[string(RailNoEditFinish)]; n != 1 {
+		t.Fatalf("no-edit rail fired %d times on the prose path, want 1 (rails: %v)", n, rep.RailFires)
+	}
+	if n := rep.RailFires[string(RailConfirmFinish)]; n != 1 {
+		t.Errorf("confirm-finish fired %d times, want 1 — the two rails answer different questions and must not share a budget", n)
+	}
+	if rep.Reason != ReasonSuccess {
+		t.Errorf("reason = %q, want success: the nudge should have driven a real edit", rep.Reason)
+	}
+}

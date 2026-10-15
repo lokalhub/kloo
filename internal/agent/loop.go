@@ -1236,6 +1236,24 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 					convo = append(convo, msg, confirmFinishCorrective())
 					continue
 				}
+				// No-edit stop on a CHANGE task. The confirm-finish rail above has already
+				// spent its one nudge on "you did not call finish"; this one answers a
+				// different question — "you changed nothing" — and so carries its own
+				// one-shot budget.
+				//
+				// This is where the live incident actually landed, and the first version
+				// of this rail missed it by sitting only in the finish-tool branch. The
+				// session record is what gave it away: `Outcome: answered after 8 step(s).
+				// Verify: exit=0 passed=true.` A finish-tool stop with a passing verify
+				// returns ReasonSuccess, so ReasonAnswered + green verify can ONLY be this
+				// path — the model narrates its findings and never calls a tool again.
+				if step > 1 && !l.isSubagent && !noEditFinishNudged && !finishClaimNudged &&
+					!edited && len(editedPaths) == 0 && taskWantsChange(task) {
+					noEditFinishNudged = true
+					recordRail(RailNoEditFinish)
+					convo = append(convo, msg, noEditFinishCorrective(task))
+					continue
+				}
 				// Conversational reply (prose, no tool call): the answer is already
 				// streamed to the transcript — stop calmly rather than error/churn.
 				return finish(ReasonAnswered, nil, nil, nil)
