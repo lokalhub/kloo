@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -312,6 +313,11 @@ type Loop struct {
 	// finishing without editing is the correct outcome — so the no-edit-finish rail
 	// must not fire inside one.
 	isSubagent bool
+
+	// createdPaths are files this run brought into existence. They are the run's
+	// DELIVERABLE, never the specification it is graded against, so the
+	// verify-path guard must not close them (see protectedByVerify).
+	createdPaths map[string]bool
 
 	// Tokens is the calibrating token estimator. It learns the model's real
 	// chars-per-token ratio from reported usage, so budgeting stops relying on a
@@ -1471,6 +1477,16 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// config. Refuse the apply and nudge the model to read-then-edit instead.
 			derr = errWriteClobber
 		default:
+			// An edit aimed at a path that is not there yet CREATES it, and what this
+			// run creates is its deliverable — recorded before dispatch so the
+			// verify-path guard leaves it open for the rest of the run.
+			if isEditTool(call.Name) {
+				for _, key := range []string{"path", "file_path"} {
+					if p := str(call.Args[key]); p != "" && !l.pathExists(p) {
+						l.noteCreated(p)
+					}
+				}
+			}
 			result, derr = l.Registry.Dispatch(ctx, call)
 		}
 		if l.OnTool != nil {
@@ -4006,10 +4022,40 @@ func (l *Loop) protectedByVerify(path string) bool {
 			tb = tb[i+1:]
 		}
 		if tb == base && strings.Contains(tok, ".") && looksLikeTestFile(tok) {
-			return true
+			// ...but only if it is actually THERE. A file that does not exist cannot
+			// be the specification this run is graded against — it is the deliverable.
+			// Live failure: asked to create worker/tests/login-with-google.test.ts for
+			// a resolver that had no test at all, kloo refused its own first write_file
+			// because the verify command names the file the task exists to write.
+			// A file THIS RUN created stays open for the rest of the run too, or the
+			// first red test run leaves the fix in a file it may no longer touch.
+			return l.pathExists(path) && !l.createdPaths[strings.TrimSpace(path)]
 		}
 	}
 	return false
+}
+
+// noteCreated records that this run brought path into existence.
+func (l *Loop) noteCreated(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	if l.createdPaths == nil {
+		l.createdPaths = map[string]bool{}
+	}
+	l.createdPaths[path] = true
+}
+
+// pathExists reports whether an edit target is already on disk, resolved the same
+// way the edit tools resolve it: relative to the run's workspace root.
+func (l *Loop) pathExists(path string) bool {
+	full := path
+	if !filepath.IsAbs(full) {
+		full = filepath.Join(l.Root, path)
+	}
+	_, err := os.Stat(full)
+	return err == nil
 }
 
 // coversNewGround reports whether a read-only call targets something this run has
