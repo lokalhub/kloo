@@ -67,7 +67,7 @@ func TestCheckpointCleanRepoRollback(t *testing.T) {
 	// Loop edit.
 	writeFile(t, filepath.Join(root, "code.txt"), "loop-edit\n")
 
-	if err := cp.Rollback(ctx, snap); err != nil {
+	if err := cp.Rollback(ctx, snap, []string{"code.txt"}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := readFile(t, filepath.Join(root, "code.txt")); got != "v1\n" {
@@ -91,7 +91,7 @@ func TestCheckpointDirtyRepoPreservesUserChanges(t *testing.T) {
 	// Loop edit on top.
 	writeFile(t, filepath.Join(root, "code.txt"), "loop-edit\n")
 
-	if err := cp.Rollback(ctx, snap); err != nil {
+	if err := cp.Rollback(ctx, snap, []string{"code.txt"}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	// The user's pre-existing change survives; the loop edit is gone.
@@ -117,10 +117,10 @@ func TestRollbackIdempotent(t *testing.T) {
 	snap, _ := cp.Checkpoint(ctx)
 	writeFile(t, filepath.Join(root, "code.txt"), "loop-edit\n")
 
-	if err := cp.Rollback(ctx, snap); err != nil {
+	if err := cp.Rollback(ctx, snap, []string{"code.txt"}); err != nil {
 		t.Fatalf("first rollback: %v", err)
 	}
-	if err := cp.Rollback(ctx, snap); err != nil {
+	if err := cp.Rollback(ctx, snap, []string{"code.txt"}); err != nil {
 		t.Fatalf("second rollback should be safe: %v", err)
 	}
 	if got := readFile(t, filepath.Join(root, "code.txt")); got != "v1\n" {
@@ -130,7 +130,16 @@ func TestRollbackIdempotent(t *testing.T) {
 
 func TestRollbackUntakenSnapshotIsNoop(t *testing.T) {
 	cp := NewGitCheckpointer(t.TempDir())
-	if err := cp.Rollback(context.Background(), Snapshot{Taken: false}); err != nil {
+	if err := cp.Rollback(context.Background(), Snapshot{Taken: false}, []string{"code.txt"}); err != nil {
 		t.Errorf("rollback of an untaken snapshot should be a no-op, got %v", err)
+	}
+}
+
+// gitIn runs a git command inside root, failing the test on error.
+func gitIn(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }

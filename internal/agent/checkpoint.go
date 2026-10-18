@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -21,12 +23,18 @@ var ErrNoCommits = errors.New("agent: git repository has no commits to checkpoin
 
 // gitCheckpointer snapshots and restores the working tree via git (shelled out —
 // no CGO git binding). The snapshot captures the current HEAD plus the dirty
-// (tracked) working-tree state via `git stash create`, so a rollback restores
-// the user's pre-existing uncommitted changes while discarding the loop's edits.
+// (tracked) working-tree state via `git stash create`, so a restore can put back
+// the user's pre-existing uncommitted changes rather than HEAD's version.
 //
-// Documented limitation (decisions.md): `git stash create` captures tracked
-// modifications only — brand-new UNTRACKED files created during the run are not
-// reverted (removing them could clobber the user's own untracked files).
+// The restore is SCOPED to the paths the run named (see Rollback): each named
+// path is put back as it was at the checkpoint, and a named path that did not
+// exist then — a file this run created — is removed. Nothing outside that list
+// is touched, and there is no repo-wide reset.
+//
+// Consequence of scoping (decisions.md): a file this run created IS removed,
+// while anyone else's new untracked files survive. A repo-wide `git reset
+// --hard` used to do the opposite — it kept the run's half-written new files and
+// destroyed everyone else's committed-then-edited work (the 2026-10-17 incident).
 type gitCheckpointer struct {
 	root string
 }
@@ -59,19 +67,54 @@ func (g *gitCheckpointer) Checkpoint(ctx context.Context) (Snapshot, error) {
 	}, nil
 }
 
-// Rollback restores the working tree to the snapshot: hard-reset tracked files to
-// the checkpoint HEAD (discarding the loop's edits), then re-apply the captured
-// pre-existing dirty changes. Safe to call once per terminal path; idempotent.
-func (g *gitCheckpointer) Rollback(ctx context.Context, s Snapshot) error {
-	if !s.Taken {
-		return nil // nothing was snapshotted (e.g. non-git workspace)
+// Rollback restores ONLY the named paths to their checkpoint state. Safe to call
+// once per terminal path; idempotent.
+//
+// For each path:
+//   - it existed at the checkpoint → restore THAT content. The stash commit
+//     created by `git stash create` has a tree equal to the working tree at
+//     checkpoint time, so checking the path out of the stash ref restores the
+//     user's pre-existing uncommitted content, not HEAD's. With a clean tree at
+//     checkpoint there is no stash ref and HEAD is the correct source.
+//   - it did NOT exist at the checkpoint → it is this run's own new file, so it
+//     is removed.
+//
+// A path that exists now but existed at the checkpoint only in the index (a file
+// this run staged) is treated as the run's own and removed too — restoring it
+// from a tree that never had it would be the wrong direction.
+//
+// It NEVER runs `git reset --hard` and NEVER touches a path outside `paths`: a
+// repo-wide restore wipes whatever landed after the checkpoint, which destroyed
+// a concurrent run's finished work on 2026-10-17. An empty or nil `paths`
+// therefore changes nothing at all.
+func (g *gitCheckpointer) Rollback(ctx context.Context, s Snapshot, paths []string) error {
+	if !s.Taken || len(paths) == 0 {
+		return nil // nothing snapshotted (non-git workspace), or nothing this run changed
 	}
-	if _, err := g.git(ctx, "reset", "--hard", s.Head); err != nil {
-		return fmt.Errorf("agent: git reset --hard %s: %w", s.Head, err)
+	// The stash commit's tree IS the working tree at checkpoint time; with a
+	// clean checkpoint there was nothing to stash and HEAD is that tree.
+	src := s.StashRef
+	if src == "" {
+		src = s.Head
 	}
-	if s.StashRef != "" {
-		if _, err := g.git(ctx, "stash", "apply", s.StashRef); err != nil {
-			return fmt.Errorf("agent: git stash apply %s: %w", s.StashRef, err)
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, err := g.git(ctx, "cat-file", "-e", src+":"+p); err != nil {
+			// Absent at the checkpoint ⇒ this run brought it into existence.
+			// Delete it from the filesystem directly: `git rm` only ever removes
+			// tracked paths, so it silently leaves an untracked new file on disk,
+			// and `clean` would sweep up files this run never named.
+			full := filepath.Join(g.root, filepath.FromSlash(p))
+			if rmErr := os.Remove(full); rmErr != nil && !os.IsNotExist(rmErr) {
+				return fmt.Errorf("agent: remove %s: %w", p, rmErr)
+			}
+			continue
+		}
+		if _, err := g.git(ctx, "checkout", src, "--", p); err != nil {
+			return fmt.Errorf("agent: restore %s from %s: %w", p, src, err)
 		}
 	}
 	return nil

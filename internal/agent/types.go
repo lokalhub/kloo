@@ -561,9 +561,16 @@ type Snapshot struct {
 
 // Checkpointer snapshots the working tree before the first edit and restores it
 // on abort. (Seam implemented in checkpoint.go.)
+//
+// Rollback is SCOPED: it restores only the named paths — the ones THIS run
+// changed — and nothing else in the tree. A repo-wide restore destroyed work
+// that landed after the checkpoint (a concurrent run's finished edits, a
+// developer typing in the same checkout), which is why the paths are a
+// parameter rather than something the implementation infers. An empty or nil
+// paths must change nothing at all.
 type Checkpointer interface {
 	Checkpoint(ctx context.Context) (Snapshot, error)
-	Rollback(ctx context.Context, s Snapshot) error
+	Rollback(ctx context.Context, s Snapshot, paths []string) error
 }
 
 // BudgetEvidence is the report detail for a budget-exceeded stop.
