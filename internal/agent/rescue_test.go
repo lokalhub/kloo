@@ -14,7 +14,7 @@ type countingCheckpoint struct{ rollbacks int }
 func (c *countingCheckpoint) Checkpoint(context.Context) (Snapshot, error) {
 	return Snapshot{Head: "h", Taken: true}, nil
 }
-func (c *countingCheckpoint) Rollback(context.Context, Snapshot) error {
+func (c *countingCheckpoint) Rollback(context.Context, Snapshot, []string) error {
 	c.rollbacks++
 	return nil
 }

@@ -1064,7 +1064,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		rep.LastScopeDenial = lastScopeDenial
 		rep.PatchOnlyReject = patchOnlyReject
 		if l.shouldRollback(reason, lastVerify) && snap.Taken && l.Checkpoint != nil {
-			if err := l.Checkpoint.Rollback(ctx, snap); err == nil {
+			// Scope the restore to what THIS run changed. A repo-wide rollback
+			// destroys whatever landed after the checkpoint — a concurrent run's
+			// finished work, or the user typing in the same checkout (incident
+			// 2026-10-17). Sorted so the restore order is reproducible.
+			if err := l.Checkpoint.Rollback(ctx, snap, l.runPaths(editedPaths)); err == nil {
 				rep.RolledBack = true
 			}
 		}
@@ -4033,6 +4037,29 @@ func (l *Loop) protectedByVerify(path string) bool {
 		}
 	}
 	return false
+}
+
+// runPaths is the union of the paths this run edited and the files it created,
+// sorted and de-duplicated. It is the scope of a rollback: everything outside it
+// belongs to somebody else and must survive a failed run untouched.
+func (l *Loop) runPaths(edited map[string]bool) []string {
+	set := map[string]bool{}
+	for p := range edited {
+		if p = strings.TrimSpace(p); p != "" {
+			set[p] = true
+		}
+	}
+	for p := range l.createdPaths {
+		if p = strings.TrimSpace(p); p != "" {
+			set[p] = true
+		}
+	}
+	paths := make([]string, 0, len(set))
+	for p := range set {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // noteCreated records that this run brought path into existence.
