@@ -111,7 +111,7 @@ type renameSymbolTool struct{ ws Workspace }
 
 func (t renameSymbolTool) Name() string { return NameRenameSymbol }
 func (t renameSymbolTool) Description() string {
-	return "Rename an identifier across the workspace in one call: every occurrence of old whose surrounding characters are not a letter, digit or underscore becomes new, so .measured(), SeatCaps::measured() and fn measured( all change while measured_run and remeasured are left alone. It does not parse code, so it also matches the same word used as English in a comment. WITHOUT confirm it only REPORTS the files and per-file counts and writes NOTHING: call it once to see the list, then again with confirm=true to apply it. Use this instead of searching and hand-editing each file."
+	return "Rename an identifier across the workspace in one call: every occurrence of old whose surrounding characters are not a letter, digit or underscore becomes new, so .measured(), SeatCaps::measured() and fn measured( all change while measured_run and remeasured are left alone. It does not parse code, so it also matches the same word used as English in a comment. WITHOUT confirm it only REPORTS the files and per-file counts and writes NOTHING: call it once to see the list, then again with confirm=true to apply it. Use this instead of searching and hand-editing each file. With literal=true, old and new may be any text rather than one identifier, so a phrase such as \"measured table\" can be renamed to \"default table\" in the same single call (old must still be non-empty; new may be empty to delete the phrase)."
 }
 func (t renameSymbolTool) Schema() ParamSchema {
 	return ParamSchema{
@@ -120,6 +120,7 @@ func (t renameSymbolTool) Schema() ParamSchema {
 			"new":     {Type: "string", Description: "The new identifier (one [A-Za-z_][A-Za-z0-9_]* token, e.g. default_caps)."},
 			"path":    {Type: "string", Description: "Optional workspace-relative folder or single file to limit the rename to (default: the whole workspace)."},
 			"confirm": {Type: "boolean", Description: "false/absent: report the files and counts, write NOTHING (always do this first). true: actually rewrite the files."},
+			"literal": {Type: "boolean", Description: "true: old and new may be any text, not just one identifier (e.g. renaming the phrase \"measured table\" to \"default table\"). The boundary rule and the report-first rule are unchanged."},
 		},
 		Required: []string{"old", "new"},
 	}
@@ -135,11 +136,22 @@ type renameHit struct {
 func (t renameSymbolTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	oldName, _ := argString(c.Args, "old")
 	newName, _ := argString(c.Args, "new")
-	if !isIdentifier(oldName) {
-		return Result{}, fmt.Errorf("tools: rename_symbol: argument \"old\" must be a single identifier ([A-Za-z_][A-Za-z0-9_]*), got %q — rename_symbol renames one symbol, not a phrase", oldName)
-	}
-	if !isIdentifier(newName) {
-		return Result{}, fmt.Errorf("tools: rename_symbol: argument \"new\" must be a single identifier ([A-Za-z_][A-Za-z0-9_]*), got %q — the replacement must be a valid identifier", newName)
+	// literal is read BEFORE the identifier checks because it is what relaxes them.
+	// It relaxes the SHAPE of the arguments and nothing else: the boundary rule, the
+	// collision report, report-first, the walk and the binary skip are the same code
+	// path either way, so there is no second implementation to drift.
+	literal := argBool(c.Args, "literal")
+	if !literal {
+		if !isIdentifier(oldName) {
+			return Result{}, fmt.Errorf("tools: rename_symbol: argument \"old\" must be a single identifier ([A-Za-z_][A-Za-z0-9_]*), got %q — rename_symbol renames one symbol, not a phrase; pass literal: true to rename a phrase", oldName)
+		}
+		if !isIdentifier(newName) {
+			return Result{}, fmt.Errorf("tools: rename_symbol: argument \"new\" must be a single identifier ([A-Za-z_][A-Za-z0-9_]*), got %q — the replacement must be a valid identifier, or pass literal: true to replace a phrase", newName)
+		}
+	} else if oldName == "" {
+		// An empty `old` matches everywhere, so literal mode must still refuse it.
+		// An empty `new` is allowed: deleting a phrase is a legitimate rename.
+		return Result{}, fmt.Errorf("tools: rename_symbol: argument \"old\" must not be empty, even with literal: true — an empty old matches at every position and would rewrite every file")
 	}
 	if oldName == newName {
 		return Result{}, fmt.Errorf("tools: rename_symbol: \"old\" and \"new\" are both %q — there is nothing to rename", oldName)

@@ -238,3 +238,135 @@ func TestRenameIsRegistered(t *testing.T) {
 		t.Error("a path escaping the jail must be rejected")
 	}
 }
+
+// TestRenameLiteralPhraseIsRefusedWithoutTheFlag: the regression guard. `literal`
+// widens what the tool will accept, and it must widen it ONLY when asked. The measured
+// failure that motivated the flag was a run renaming the identifier half of a task and
+// then hand-editing ~20 comments; the reflex that made that safe was the refusal, so a
+// phrase with no literal flag must still error, naming the "old" argument.
+func TestRenameLiteralPhraseIsRefusedWithoutTheFlag(t *testing.T) {
+	ws, root := wsAt(t)
+	mustWrite(t, filepath.Join(root, "notes.md"), "the measured table is transcribed\n")
+
+	_, err := renameSymbolTool{ws}.Invoke(context.Background(), Call{
+		Name: NameRenameSymbol,
+		Args: map[string]any{"old": "measured table", "new": "default table"},
+	})
+	if err == nil {
+		t.Fatal(`a phrase in "old" must still be refused without literal: true`)
+	}
+	if !strings.Contains(err.Error(), `"old"`) {
+		t.Errorf("error must name the offending argument (\"old\"), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "literal") {
+		t.Errorf("the refusal should point at the way out (literal), got: %v", err)
+	}
+	// And it refused before reading anything.
+	got, rerr := os.ReadFile(filepath.Join(root, "notes.md"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "the measured table is transcribed\n" {
+		t.Errorf("the refusal must not write:\n got %q", got)
+	}
+}
+
+// TestRenameLiteralPhraseRenamesWithTheFlag: the gap itself. With literal: true the
+// phrase renames in ONE call, and the boundary rule is unchanged — it now requires the
+// character before `m` and after `e` of "measured table" to not be an identifier byte,
+// which is exactly why `remeasured tables` survives byte-identical. Asserted on file
+// content, not on a count: a count of 1 is also what a wrong match produces.
+func TestRenameLiteralPhraseRenamesWithTheFlag(t *testing.T) {
+	ws, root := wsAt(t)
+	const src = "the measured table is transcribed\nremeasured tables are not\n"
+	mustWrite(t, filepath.Join(root, "notes.md"), src)
+
+	res, err := renameSymbolTool{ws}.Invoke(context.Background(), Call{
+		Name: NameRenameSymbol,
+		Args: map[string]any{
+			"old": "measured table", "new": "default table",
+			"literal": true, "confirm": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("literal mode must accept a phrase: %v", err)
+	}
+	if !strings.Contains(res.Output, "wrote 1 file(s)") {
+		t.Errorf("output must report the file written:\n%s", res.Output)
+	}
+	got, rerr := os.ReadFile(filepath.Join(root, "notes.md"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	const want = "the default table is transcribed\nremeasured tables are not\n"
+	if string(got) != want {
+		t.Errorf("file on disk = %q\nwant               %q", got, want)
+	}
+}
+
+// TestRenameLiteralEmptyOldIsStillRefused: literal relaxes the SHAPE of the arguments,
+// not the safety. An empty `old` matches at every position, so it would rewrite every
+// text file in the workspace with the new phrase inserted between every character pair
+// — the one case where a literal rename is unambiguously a disaster, and it is refused.
+func TestRenameLiteralEmptyOldIsStillRefused(t *testing.T) {
+	ws, root := wsAt(t)
+	mustWrite(t, filepath.Join(root, "notes.md"), "the measured table is transcribed\n")
+
+	_, err := renameSymbolTool{ws}.Invoke(context.Background(), Call{
+		Name: NameRenameSymbol,
+		Args: map[string]any{"old": "", "new": "default table", "literal": true},
+	})
+	if err == nil {
+		t.Fatal(`"old": "" with literal: true must error, not match everywhere`)
+	}
+	if !strings.Contains(err.Error(), `"old"`) {
+		t.Errorf("error must name the offending argument (\"old\"), got: %v", err)
+	}
+	got, rerr := os.ReadFile(filepath.Join(root, "notes.md"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "the measured table is transcribed\n" {
+		t.Errorf("an empty old must never rewrite a file:\n got %q", got)
+	}
+}
+
+// TestRenameLiteralEmptyNewDeletesThePhrase: with literal, `new` may be empty —
+// deleting a phrase is a legitimate rename, and the identifier check would otherwise
+// refuse it for not being an identifier. Report-first still applies: the report call
+// writes nothing, the confirm call deletes.
+func TestRenameLiteralEmptyNewDeletesThePhrase(t *testing.T) {
+	ws, root := wsAt(t)
+	const src = "the measured table is transcribed\n"
+	mustWrite(t, filepath.Join(root, "notes.md"), src)
+
+	call := func(confirm bool) (Result, error) {
+		return renameSymbolTool{ws}.Invoke(context.Background(), Call{
+			Name: NameRenameSymbol,
+			Args: map[string]any{
+				"old": "measured table", "new": "",
+				"literal": true, "confirm": confirm,
+			},
+		})
+	}
+	res, err := call(false)
+	if err != nil {
+		t.Fatalf("an empty new must be accepted with literal: true: %v", err)
+	}
+	if !strings.Contains(res.Output, "NOTHING WAS WRITTEN") {
+		t.Errorf("report-first is unchanged by literal:\n%s", res.Output)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "notes.md")); string(b) != src {
+		t.Errorf("the report call must not write:\n got %q", b)
+	}
+	if _, err := call(true); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	got, rerr := os.ReadFile(filepath.Join(root, "notes.md"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "the  is transcribed\n" {
+		t.Errorf("the phrase must be deleted:\n got %q", got)
+	}
+}
