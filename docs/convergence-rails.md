@@ -49,6 +49,32 @@ recently — the failing test. One run edited the test three times, every edit a
 no-op, and never touched a source file. This is the shape of an agent passing by
 moving the goalposts.
 
+## When kloo decides the red is NOT yours to fix
+
+A scoped run can be handed a verify command that was already failing for reasons it
+is not allowed to touch. kloo works out which files the failing output implicates —
+the test files it names, plus the files those import — and if the scope denies
+**every** one of them it stops ordering an edit, says so in the corrective, and
+prints `N out of scope` on the baseline line.
+
+Two things bound that verdict, both measured:
+
+- **The import graph is followed transitively**, to a depth of three (test → helper
+  → source), cycle-guarded and capped at 24 files. One edge is not enough: a run
+  whose single writable file was imported by the test's *helper* rather than the
+  test had that file never implicated, so everything found was denied — correctly,
+  those were the gate — and the red was declared unfixable. It made no edits in 34
+  steps and 724k tokens, and a re-briefed second run did the same in 38 steps and
+  976k, each telling its own task it was somebody else's problem.
+- **At least one non-test file must be in evidence.** A Go package that did not
+  compile named only its own `_test.go` file; nothing else resolved, so "every
+  implicated file is denied" was trivially true. Where a failure is REPORTED is not
+  where the fix belongs, so an all-test set now concludes nothing.
+
+The genuinely unreachable case is unchanged and has a negative control: a spec
+**and** the source it covers both outside the allowed scope is still reported out of
+scope, which is what the feature exists for.
+
 ### `KLOO_VERIFY_AUTHORITY=1` — a partial test run is not a pass
 When the model runs a test command covering fewer files than the verify command and
 it passes, kloo names the files it skipped.

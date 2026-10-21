@@ -258,6 +258,16 @@ func DefaultRegistry(ws Workspace, opts ...RunCommandOption) *Registry {
 	r.Register(viewImageTool{ws}) // vision: look at a screenshot the agent took itself
 	r.Register(readDirTool{ws})
 	r.Register(searchTool{ws})
+	// KLOO_RENAME_SYMBOL=1 puts rename_symbol in the model's vocabulary. OFF by
+	// default, so the advertised tool surface is unchanged (TestDefaultRegistryTools
+	// and TestNativeBuildRequest pin it) while the primitive stays dispatchable — a
+	// model that reaches for it still gets a real result. registerHidden is the
+	// dark-launch seam: dispatchable, never advertised.
+	if envOn("KLOO_RENAME_SYMBOL") {
+		r.Register(renameSymbolTool{ws}) // mechanical cross-file rename in one call
+	} else {
+		r.registerHidden(renameSymbolTool{ws})
+	}
 	// KLOO_SIMPLE_EDIT=1 offers grok's three-field edit tool INSTEAD of the fenced
 	// SEARCH/REPLACE one. Off by default, so the default tool vocabulary is
 	// unchanged. Instead of, not alongside: two edit tools would confound the
