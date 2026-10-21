@@ -40,6 +40,21 @@ edit actually applies.
 *Why:* narrowing the advertised tool list alone changed nothing — the model kept
 calling `read_file` from the vocabulary it had already seen, and the loop ran it.
 
+**Two calls are exempt from the refusal.** A read that covers NEW ground — a file
+not yet seen — goes through, because that is exploration working rather than
+spinning. And exactly ONE re-read of a file whose last edit failed on a SEARCH
+anchor that is not in it goes through: a failed SEARCH is positive evidence that
+the model's copy of that one file is wrong, and a correct SEARCH/REPLACE block
+cannot be written without the current bytes. That exemption is spent by the read it
+allows, so it can never become a loop of its own, and it is granted only for a
+stale anchor — a scope, verify-path or churn refusal is not evidence of staleness,
+and a successful edit clears it.
+
+*Why the second one:* three runs in one day issued a stale-anchor edit and then had
+every recovering read refused — 13 withheld reads in the first (847k tokens, 34
+steps, nothing landed), 15 in the second, which left a call site with no method
+behind it because it could not see the file it had just changed.
+
 ### `KLOO_PROTECT_VERIFY_PATHS=1` — never edit the file you are graded against
 Refuses edits to any file the verify command names, and points at the source files
 that test imports instead.
@@ -147,6 +162,9 @@ found two real problems:
    over-eager behaviour kloo removed in v0.17.1 (`TestExploreRailAllowsManyDistinctReads`
    pins the lesson). It now lets a read of something not yet seen through, and
    refuses only RE-reads — which is what every trace behind the rail actually shows.
+   A later measurement added one more exemption to that rule: the single re-read that
+   RE-ANCHORS an edit whose SEARCH text was not found. See the rail's own section
+   above for what that costs and why it cannot loop.
 
 Neither was visible while the flags were opt-in. Flipping the defaults was worth it
 for that alone.
