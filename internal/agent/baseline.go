@@ -192,11 +192,35 @@ func (l *Loop) takeVerifyBaseline(ctx context.Context) VerifyBaseline {
 	b.FailedStage = v.FailedStage
 	b.BuildBroken, _ = buildBreak(out)
 	if files := l.failingTestFiles(out); len(files) > 0 {
-		if denied := l.scopeDenies(files); len(denied) == len(files) {
-			b.Unreachable = denied
+		// The verdict needs at least one NON-TEST file in evidence. Measured on the
+		// kloo repo itself, 2026-10-21: a Go package that did not compile named only
+		// its _test.go file, which the scope denied because it IS the gate, nothing
+		// else resolved, and "every implicated file is denied" was trivially true —
+		// the red was declared unreachable on the evidence of one file that could
+		// never have been the fix (see TestAllTestImplicatedSetIsNotUnreachable).
+		// Where a failure is REPORTED is not where the fix belongs, so an all-test
+		// set proves nothing about reachability and must conclude nothing.
+		if !allTestFiles(files) {
+			if denied := l.scopeDenies(files); len(denied) == len(files) {
+				b.Unreachable = denied
+			}
 		}
 	}
 	return b
+}
+
+// allTestFiles reports whether every file in the set is a test file, i.e. whether
+// the implicated set carries no source file at all for the reach verdict to judge.
+func allTestFiles(files []string) bool {
+	if len(files) == 0 {
+		return true
+	}
+	for _, f := range files {
+		if !repomap.IsTestPath(f) {
+			return false
+		}
+	}
+	return true
 }
 
 // newFailures returns the failing identities in cur that the baseline did NOT
@@ -343,6 +367,16 @@ func (l *Loop) scopeDenies(files []string) []string {
 // The incident's login spec fails that test — both the spec and login.page.ts /
 // login.page.scss sit outside `frontend/src/app/pages/game/**` — which is exactly
 // what makes it unreachable rather than merely awkward.
+//
+// The import graph is walked TRANSITIVELY, to implicatedImportDepth, because
+// measured on sofronios-legacy 2026-10-21 the one writable file the run was
+// ordered to edit (worker/lib/game-do.ts) is imported by the test's HELPER, not by
+// the test, and a single edge never reached it: every file the analysis found was
+// denied, the red was declared unreachable, and the model was told its own task was
+// not its problem for 34 steps and 724,120 tokens (see
+// TestImplicatedFilesFollowImportsTransitively). The `seen` map is the cycle guard
+// and maxFailingTestFiles still bounds the whole walk
+// (TestTransitiveWalkIsBoundedAndCycleSafe).
 func (l *Loop) failingTestFiles(out string) []string {
 	if strings.TrimSpace(out) == "" || l.Root == "" {
 		return nil
@@ -366,8 +400,27 @@ func (l *Loop) failingTestFiles(out string) []string {
 			continue
 		}
 		add(rel)
-		for _, imp := range l.importsOf(rel) {
-			add(imp)
+		// Breadth-first over the imports: test → helper → source, in that order, so
+		// the bound is spent on the nearest files first. Never leaves the workspace:
+		// importsOf only returns paths that ReadFile resolved inside the jail.
+		for depth, queue := 0, []string{rel}; depth < implicatedImportDepth && len(queue) > 0; depth++ {
+			var next []string
+			for _, f := range queue {
+				for _, imp := range l.importsOf(f) {
+					if seen[imp] {
+						continue
+					}
+					add(imp)
+					next = append(next, imp)
+					if len(files) >= maxFailingTestFiles {
+						break
+					}
+				}
+				if len(files) >= maxFailingTestFiles {
+					break
+				}
+			}
+			queue = next
 		}
 		if len(files) >= maxFailingTestFiles {
 			break
@@ -375,6 +428,12 @@ func (l *Loop) failingTestFiles(out string) []string {
 	}
 	return files
 }
+
+// implicatedImportDepth bounds how far down the import graph the reach analysis
+// follows. Three is enough for the shape both incidents had — test → helper →
+// source — and anything deeper is a monorepo's thousand-edge graph, which the
+// maxFailingTestFiles bound would spend before it reached a verdict.
+const implicatedImportDepth = 3
 
 // maxFailingTestFiles bounds the implicated set. A stack trace can name dozens of
 // frames; the decision only needs enough of them to be confident, and an unbounded
