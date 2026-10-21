@@ -363,6 +363,26 @@ type Loop struct {
 	// instead of dispatching it. An edit releases it immediately; otherwise it
 	// decays, so a model that will not edit can never be trapped. See forceEdit().
 	editOnlyLeft int
+	// staleAnchorPath is the path whose most recent edit failed on a SEARCH anchor
+	// that is not in the file (edit.ErrSearchNotFound), and staleAnchorUsed records
+	// whether this run has already spent its one re-read of it. Together they exempt
+	// exactly ONE read_file of exactly that path from the force-edit withhold above.
+	//
+	// Measured on sofronios-legacy, 2026-10-21 (v0.36.3, a single-file TypeScript
+	// task): the first edit failed on a stale anchor and the rail then refused every
+	// read that could have corrected it — 13 withheld read_files, 3 more guessed
+	// edits failing the same way, 847,520 tokens over 34 steps, nothing landed,
+	// BUDGET-EXCEEDED. A second run on the same app the same day: 15 consecutive
+	// withheld reads after its first edit, and it left a call site with no method
+	// behind it because it could not see the file it had just changed.
+	//
+	// The rail is right in general — the spin it breaks is RE-reading a file the
+	// model has already seen — but a failed SEARCH is positive evidence that its
+	// copy of THAT file is wrong, and re-anchoring to the real bytes is the only
+	// recovery from it. Hence one read, for that path only, and never for any other
+	// failure: a scope, verify-path or churn refusal is not evidence of staleness.
+	staleAnchorPath string
+	staleAnchorUsed bool
 	// editsImpossible latches once the SCOPE has refused a write this run. The
 	// force-edit rail then stops arming, because forcing an edit the policy will
 	// reject cannot produce one.
@@ -1455,7 +1475,13 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			derr = errProtectedPath
 		case l.editOnlyLeft > 0 && !isEditTool(call.Name) &&
 			!(call.Name == tools.NameFinish && lastVerify.Passed) &&
-			!coversNewGround(call, seenTargets):
+			!coversNewGround(call, seenTargets) && !l.reanchorRead(call):
+			// NOT refused when it is the one read that RE-ANCHORS a failed edit. A
+			// SEARCH block that did not match is positive evidence that the model's
+			// copy of that file is wrong, and re-reading it is the opposite of
+			// spinning; refusing it cost three runs their recovery on 2026-10-21
+			// (reanchorRead, and the measurement on the Loop fields).
+			//
 			// NOT refused when the call covers NEW GROUND. kloo learned this the hard
 			// way in v0.17.1: an over-eager explore rail stopped runs at 16 read-only
 			// steps with nothing written, and reading a file not yet seen is
@@ -1464,6 +1490,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// already seen, which is what every trace behind this rail actually shows:
 			// C66 re-read one file until a rail killed the run; A05 logged 10 repeated
 			// reads.
+			//
+			// Nor refused when it is the ONE re-read of the file whose last edit failed
+			// on a stale SEARCH anchor: a failed SEARCH is positive evidence the model's
+			// copy of THAT file is wrong, so re-reading it is the opposite of spinning —
+			// refusing it is what cost three runs their recovery (see reanchorRead).
 			//
 			// FORCE-EDIT RAIL. Withheld tools stay dispatchable so a stray call is
 			// never an unrecoverable unknown-tool error — but "dispatchable" must not
@@ -1495,6 +1526,16 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		}
 		if l.OnTool != nil {
 			l.OnTool(call, result, derr)
+		}
+		// Record the edit's outcome for the re-anchor exemption (see reanchorRead): a
+		// stale-anchor failure earns one re-read of THAT path, and any other outcome —
+		// including a clean apply — clears the record so the rail's normal rules resume.
+		if isEditTool(call.Name) {
+			p := str(call.Args["path"])
+			if p == "" {
+				p = str(call.Args["file_path"])
+			}
+			l.noteStaleAnchor(p, derr)
 		}
 		if derr != nil {
 			counters.ToolErrors++
@@ -3342,6 +3383,57 @@ func editRail() bool { return envOnDefault("KLOO_EDIT_RAIL") }
 // read tools for that turn. ON by default since v0.22.0; KLOO_FORCE_EDIT=0 restores
 // the previous behaviour. (Was documented as off by default while shipping on.)
 func forceEdit() bool { return envOnDefault("KLOO_FORCE_EDIT") }
+
+// noteStaleAnchor records that an edit to `path` failed because its SEARCH anchor
+// is not in the file (edit.ErrSearchNotFound) — positive evidence that the model's
+// copy of THAT file is wrong, which entitles it to one re-read (see reanchorRead
+// and the measurement on the Loop fields).
+//
+// Any other error CLEARS the record: an off-scope, protected-path or churn-banned
+// refusal says nothing about whether the model's copy is stale, and re-reading
+// cannot help it. A nil error (a successful edit) clears it too — the model has
+// re-anchored and acted, so the rail's normal rules apply again.
+//
+// errors.Is, not ==: the tools layer wraps the engine error with the path
+// ("tools: edit_file <path>"), so a direct comparison never matches a real failure.
+func (l *Loop) noteStaleAnchor(path string, err error) {
+	if errors.Is(err, edit.ErrSearchNotFound) {
+		l.staleAnchorPath = path
+		l.staleAnchorUsed = false
+		return
+	}
+	l.staleAnchorPath = ""
+	l.staleAnchorUsed = false
+}
+
+// reanchorRead reports whether a call is the ONE read_file of the path whose last
+// edit failed on a stale SEARCH anchor, and spends the exemption when it does. The
+// force-edit rail exempts that read from its withhold: refusing it is what cost
+// three runs their recovery (see the Loop fields).
+//
+// One-shot by construction — the read that is allowed marks the exemption spent,
+// so a model that does not act on the contents cannot sit in the exemption and
+// read forever. Worst case is one wasted read, never a loop. Same shape as the
+// `served` latch in readdedupe.go.
+//
+// Never true for any tool other than read_file, and never for a different path:
+// answering a failed edit by reading elsewhere is exploration, which is exactly
+// what the rail is holding back.
+func (l *Loop) reanchorRead(call tools.Call) bool {
+	if call.Name != tools.NameReadFile || l.staleAnchorPath == "" || l.staleAnchorUsed {
+		return false
+	}
+	// The read target arrives under either key, as it does for the edit tools.
+	p := str(call.Args["path"])
+	if p == "" {
+		p = str(call.Args["file_path"])
+	}
+	if p != l.staleAnchorPath {
+		return false
+	}
+	l.staleAnchorUsed = true
+	return true
+}
 
 // turnRegistry is the vocabulary advertised for the turn being built: the full
 // registry, or the edit-only view when the force-edit rail armed it. One turn

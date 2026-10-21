@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/lokalhub/kloo/internal/edit"
@@ -135,5 +137,33 @@ func TestReanchorExemptionAppliesToReadsOnly(t *testing.T) {
 		if l.reanchorRead(call) {
 			t.Fatalf("%s was exempted by a stale anchor", call.Name)
 		}
+	}
+}
+
+// THE WIRING, NOT THE METHOD.
+//
+// The five tests above pin noteStaleAnchor and reanchorRead in isolation, and an
+// implementation can pass every one of them while act() never calls either.
+// Measured 2026-10-21: the methods landed, that gate went green, and `grep` found
+// no call site anywhere in the loop — a real run behaved exactly as before. A
+// method nothing calls is not a fix.
+//
+// This is a source assertion rather than a behavioural one, deliberately and with
+// a known limit: the force-edit rail arms from the run's SECOND no-edit nudge, or
+// on a build break at a verify, and a scripted run cannot set those counters
+// directly — the first version of this test drove a whole Loop.Run, passed with no
+// wiring at all because the rail never armed, and proved nothing. Pinning the two
+// call sites is blunt, but it fails for exactly the reason the real run failed.
+func TestTheRailActuallyConsultsTheExemption(t *testing.T) {
+	src, err := os.ReadFile("loop.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "!l.reanchorRead(call)") {
+		t.Error("the force-edit withhold case does not consult reanchorRead: the exemption can never fire")
+	}
+	if !strings.Contains(body, "l.noteStaleAnchor(") {
+		t.Error("nothing ever records a stale anchor: the exemption can never be earned")
 	}
 }
