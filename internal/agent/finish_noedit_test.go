@@ -157,3 +157,54 @@ func TestNoEditStopIsRefusedOnTheProsePath(t *testing.T) {
 		t.Errorf("reason = %q, want success: the nudge should have driven a real edit", rep.Reason)
 	}
 }
+
+// TestChangeRailsApply pins the predicate in isolation: changeRailsApply is
+// mayWrite && taskWantsChange, i.e. the WRITE SCOPE outranks the TASK TEXT.
+//
+// The incident: a validation run launched with `--allow 'nothing/**'` and a prompt
+// beginning "You are the VALIDATOR. Do not edit any file." degenerated into four
+// repeated finish calls, each carrying the whole answer. The prompt QUOTES the spec
+// it validates, so taskWantsChange matched 26 change verbs in it and the no-edit
+// rail told a validator to go and make edits every write tool would refuse. The task
+// text can never be a reliable signal, because a prompt that reviews code
+// necessarily contains the vocabulary of changing code. The write scope can be, and
+// it is already known.
+//
+// taskWantsChange itself is unchanged and still correct about the text — the text
+// was never the problem. Only the rails that DEMAND a change are wrong when no
+// change is possible; the confirm-finish rail stays sensible for a read-only run.
+func TestChangeRailsApply(t *testing.T) {
+	const changeTask = "add a cart resolver and fix the rounding"
+	const questionTask = "what does the scope policy do?"
+	cases := []struct {
+		name     string
+		task     string
+		mayWrite bool
+		want     bool
+	}{
+		// The gate this pins: a change-shaped task cannot be nudged toward a change
+		// it is not permitted to make.
+		{name: "change task, scope refuses every write", task: changeTask, mayWrite: false, want: false},
+		{name: "change task, scope leaves something writable", task: changeTask, mayWrite: true, want: true},
+		// A question never asks for the tree to change, so neither value arms it.
+		{name: "question task, scope refuses every write", task: questionTask, mayWrite: false, want: false},
+		{name: "question task, scope leaves something writable", task: questionTask, mayWrite: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := changeRailsApply(tc.task, tc.mayWrite); got != tc.want {
+				t.Errorf("changeRailsApply(%q, mayWrite=%v) = %v, want %v", tc.task, tc.mayWrite, got, tc.want)
+			}
+		})
+	}
+	// The two halves must stay independently meaningful: changeRailsApply only
+	// suppresses what taskWantsChange already decided, so a change task has to read
+	// as a change task here. If this fails, the row above is vacuous and the test is
+	// pinning nothing.
+	if !taskWantsChange(changeTask) {
+		t.Errorf("taskWantsChange(%q) = false; the mayWrite=true row above asserts nothing", changeTask)
+	}
+	if taskWantsChange(questionTask) {
+		t.Errorf("taskWantsChange(%q) = true; the question rows above assert nothing", questionTask)
+	}
+}

@@ -252,3 +252,52 @@ func TestUnscopedRegistryExposesRunCommand(t *testing.T) {
 		t.Fatal("unscoped registry must expose run_command")
 	}
 }
+
+// TestAllowsAnyWrite pins the semantics of AllowsAnyWrite(root): at least one
+// allow pattern must match a file that ACTUALLY EXISTS under root.
+//
+// The root is an explicit argument, and the value that matters is "../..".
+// `go test` runs with the PACKAGE directory as the working directory, so inside
+// internal/tools the repo root is two levels up — and the allow patterns are
+// spelled against the repo root ("internal/tools/registry.go"). Passing "." here
+// would walk internal/tools, where that pattern names nothing, and the test would
+// assert the wrong thing about the wrong tree.
+//
+// The false rows are the point. An earlier implementation answered from a handful
+// of synthetic probe paths and reported that `--allow internal/tools/registry.go`
+// — the common case — could write NOTHING, which would have silently disarmed the
+// no-edit rails for every scoped run. A made-up path can never tell you whether a
+// glob reaches the tree, so the only honest answer comes from walking it.
+func TestAllowsAnyWrite(t *testing.T) {
+	const repoRoot = "../.." // go test cwd is the package dir; patterns are repo-root-relative
+	cases := []struct {
+		name  string
+		globs []string
+		root  string
+		want  bool
+	}{
+		{name: "a single real file (the common case)", globs: []string{"internal/tools/registry.go"}, root: repoRoot, want: true},
+		{name: "two real files", globs: []string{"internal/tools/registry.go", "internal/cli/root.go"}, root: repoRoot, want: true},
+		{name: "a real directory glob", globs: []string{"internal/tools/*.go"}, root: repoRoot, want: true},
+		{name: "the read-only sentinel matches nothing", globs: []string{"nothing/**"}, root: repoRoot, want: false},
+		{name: "a path that does not exist", globs: []string{"no/such/file.go"}, root: repoRoot, want: false},
+		// No allow patterns at all means "everything in the jail except what deny
+		// and read_only remove" — the rest of the tree is writable.
+		{name: "no allow patterns: the whole jail is writable", globs: nil, root: repoRoot, want: true},
+		// "" is the UNKNOWN root, not the empty tree. Failing open is deliberate:
+		// a rail that stops firing is invisible, and silently disabling it because
+		// kloo could not name the tree is worse than the false nudge it prevents.
+		{name: "unknown root fails open", globs: []string{"nothing/**"}, root: "", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewScopePolicy(tc.globs, nil, nil)
+			if err != nil {
+				t.Fatalf("NewScopePolicy(%v): %v", tc.globs, err)
+			}
+			if got := p.AllowsAnyWrite(tc.root); got != tc.want {
+				t.Errorf("AllowsAnyWrite(%q) = %v, want %v (allow %v)", tc.root, got, tc.want, tc.globs)
+			}
+		})
+	}
+}

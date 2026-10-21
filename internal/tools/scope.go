@@ -3,9 +3,18 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
+
+// scopeWalkSkipDirs are the trees a scope walk never descends into. They hold
+// generated and vendored content that no allow glob is meant to point at, and
+// walking them is the difference between a millisecond and a second on a real
+// checkout — this walk answers a rail decision, not a repo-map one.
+var scopeWalkSkipDirs = map[string]bool{".git": true, "node_modules": true}
 
 // ScopePolicy is the hard, model-facing file-scope boundary that sits INSIDE the
 // workspace jail (workspace.go). The jail (Workspace.Resolve) is the outer
@@ -21,10 +30,17 @@ import (
 //
 // Matching is on slash-normalized, workspace-relative paths. Patterns are globs
 // with documented "**" (any path segments) plus per-segment "*"/"?"; see globMatch.
+//
+// root is the workspace the policy was built for ("" when unknown). It is set by
+// Workspace.WithScope, which is the one place that holds both the policy and the
+// tree it applies to — the policy is constructed from flags and a manifest with no
+// filesystem in sight, and attaching it to the jail is where the two meet.
+// AllowsAnyWrite needs the tree to answer its question at all.
 type ScopePolicy struct {
 	allow    []scopeGlob
 	deny     []scopeGlob
 	readOnly []scopeGlob
+	root     string
 }
 
 // Decision-class strings for a scope denial. They are the stable
@@ -152,6 +168,176 @@ func (p *ScopePolicy) CanWrite(relPath string) ScopeDecision {
 		}
 	}
 	return ScopeDecision{Allowed: true, Path: rel}
+}
+
+// WithRoot returns a copy of the policy bound to the workspace rooted at root, so
+// AllowsAnyWrite can consult the real tree. Callers that build a policy without a
+// workspace (tests, harnesses) attach the root here; a nil policy returns nil.
+//
+// The root is made absolute — a relative one means the tree the caller is standing
+// in — but is deliberately NOT symlink-resolved the way the jail resolves its own.
+// EvalSymlinks on a root that does not exist walks up to the nearest real ancestor
+// and hands back THAT directory, which would have AllowsAnyWrite walk a tree the
+// caller never named and answer "yes, something is writable" for a workspace that
+// has no files at all. A missing root stays the root it was given, and the walk
+// reports the empty tree it describes. Only a root that cannot be made absolute at
+// all becomes "", which AllowsAnyWrite reads as UNKNOWN and fails open on.
+func (p *ScopePolicy) WithRoot(root string) *ScopePolicy {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.root = ""
+	if abs, err := filepath.Abs(root); err == nil {
+		c.root = filepath.Clean(abs)
+	}
+	return &c
+}
+
+// AllowsAnyWrite reports whether this policy leaves ANY path writable at all,
+// for the tree rooted at root.
+//
+// It exists because a run launched with `--allow 'nothing/**'` — a pattern that
+// matches no file in the tree — cannot change anything, and rails that tell the
+// model to go and change something are then pushing it to do the one thing every
+// write tool will refuse. Measured: such a validation run, prompted "You are the
+// VALIDATOR. Do not edit any file.", degenerated into four repeated finish calls
+// because the prompt QUOTES the spec it validates and so is full of change verbs.
+// The task text can never be the signal for that; the write scope can, and it is
+// already known.
+//
+// The answer is "at least one allow pattern matches a file that ACTUALLY EXISTS
+// under root". It cannot be answered from the patterns alone: an earlier version
+// probed a handful of synthetic paths ("x", "a/b/x", …) and reported that an
+// ordinary scoped run — `--allow internal/tools/registry.go`, the common case —
+// could write nothing, which would have switched the no-edit rails off for EVERY
+// `--allow` run, exactly the ones that need them. A made-up path can never tell
+// you whether a glob reaches the tree, so there is nothing to probe: walk it.
+//
+// The root is an explicit argument rather than the one attached by
+// Workspace.WithScope, because an absent root has to fail open to true (see
+// below) — which would make every false case unsatisfiable, and untestable, if
+// the only way to name a tree were a policy built around a workspace.
+//
+// The walk asks CanWrite rather than re-reading the globs a second way, so deny
+// and read_only keep their veto, and stops at the first writable path — the
+// caller reads this ONCE per run (agent/loop.go), not per step, and a walk per
+// step would be a real cost.
+//
+// An empty or unreadable root returns TRUE. Failing open keeps today's
+// behaviour: a rail that stops firing is invisible, and silently disabling it
+// because kloo could not stat the tree is worse than the false nudge it prevents.
+func (p *ScopePolicy) AllowsAnyWrite(root string) bool {
+	if p == nil {
+		return true // no policy: the jail is the only boundary
+	}
+	if len(p.allow) == 0 {
+		// "everything in the jail except what deny and read_only remove". A policy
+		// with only deny/read_only globs still leaves the rest of the tree writable.
+		return true
+	}
+	// "" is the UNKNOWN root — fail open, never silently disarm a rail. A bare
+	// "." is not unknown: it is "the tree I am standing in", which is the only
+	// tree a relative pattern can mean, and is what a test in this package gets.
+	if root == "" {
+		return true
+	}
+	// Absolutize the walk start, but do NOT resolve symlinks here. filepath.Rel is
+	// purely lexical, so the answer must not depend on how the caller spelled the
+	// root: Rel(".", "internal/x.go") is "internal/x.go" while
+	// Rel(".", "./internal/x.go") is "../internal/x.go", and a pattern like
+	// "internal/tools/registry.go" would match neither of two answers for the same
+	// file. filepath.Join already cleans, so a relative root becomes one absolute
+	// path and an absolute one is cleaned once; THAT string is then used as BOTH the
+	// walk start and the Rel base, so the two can never disagree.
+	//
+	// EvalSymlinks is deliberately not called. It hands back the *target* directory
+	// while WalkDir lstats the name it was handed, so for a workspace reached
+	// through a symlink the base and the reported paths disagree, every rel comes
+	// back with a "../" run that no allow glob can name, and the walk answers
+	// "nothing is writable" for a tree full of writable files.
+	start := root
+	if !filepath.IsAbs(start) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return true
+		}
+		start = filepath.Join(wd, start) // Join cleans
+	} else {
+		start = filepath.Clean(start)
+	}
+	if st, err := os.Stat(start); err != nil || !st.IsDir() {
+		return true // unreadable root: same reasoning
+	}
+	base := start
+	found := false
+	// The walk is bounded. This answers a rail decision ONCE per run, and the false
+	// answer — the one the rail exists for — is exactly the case where the early
+	// return never fires and the walk descends everything: a checkout with a
+	// virtualenv or a build tree in it is hundreds of thousands of stats for a "no".
+	// Enough of the tree to be confident is enough.
+	const walkBudget = 50000
+	var visited int
+	// The root is the first entry WalkDir reports, and it lstats it: when the root
+	// IS a symlink (a workspace linked into another tree, a checkout under a path
+	// like /var -> /private/var) that entry is the LINK, reported as a
+	// NON-DIRECTORY. It is only the doorway — no relative path to match, nothing to
+	// judge — and judging it at all would either end the walk before it descended
+	// anything (SkipDir on the root stops the whole walk) or answer "writable" from
+	// a rel of "" that matches no allow glob.
+	rootPath := base
+	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if visited++; visited > walkBudget {
+			return filepath.SkipAll
+		}
+		// Clean before comparing or taking relative. WalkDir hands back the root
+		// exactly as it was passed and the paths below it with the root's own
+		// spelling, so one uncleaned segment in the root would put every rel outside
+		// the base: filepath.Rel is purely lexical and answers
+		// Rel("./internal/tools", "./internal/tools/registry.go") with
+		// "../internal/tools/registry.go", which no allow glob can name.
+		path = filepath.Clean(path)
+		if path == rootPath {
+			return nil
+		}
+		if err != nil {
+			// A directory we cannot read must not answer "nothing is writable" —
+			// that would disable the rails for the whole run on one bad subtree.
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// A symlink is never a doorway for this walk: WalkDir does not follow one,
+		// so a link entry is a leaf. It is judged as the NAME it has in the tree,
+		// not as the target it points at — which is exactly how the write tools see
+		// it, since the jail resolves the path the model named.
+		if d.IsDir() {
+			// Skip the noise trees by NAME: generated and vendored content that no
+			// allow glob points at, and the difference between a millisecond and a
+			// second on a real checkout.
+			if scopeWalkSkipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// Match on the path RELATIVE TO THE ROOT, slash-normalized the way every
+		// scope pattern is — exactly what CanWrite sees from the write tools. An
+		// absolute rel matches no allow glob at all, and the walk would then report
+		// "nothing is writable" for every scoped run: the same wrong answer the
+		// probe paths gave, reached a different way. A Rel failure is not evidence
+		// of "not writable" either, so that file is skipped, not counted as one.
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return nil
+		}
+		if p.CanWrite(filepath.ToSlash(rel)).Allowed {
+			found = true
+			return filepath.SkipAll // one writable file is the whole answer
+		}
+		return nil
+	})
+	return found
 }
 
 // scopeError builds the *ScopeError for a denied decision on tool, with a bounded,
