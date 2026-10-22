@@ -143,3 +143,145 @@ func gitIn(t *testing.T, root string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+// fileExists reports whether path is on disk (a rollback must not have removed it).
+func fileExists(t *testing.T, path string) bool {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return true
+}
+
+// TestRollbackKeepsPreexistingUntrackedFile pins the 2026-10-21 incident: a file
+// written by an EARLIER run, sitting on disk untracked before this run started,
+// was DELETED by the rollback. `git stash create` records tracked state only, so
+// the file was absent from the snapshot tree and Rollback read that as "this run
+// created it". The checkpoint now also records the untracked set, so the file is
+// put back exactly as it was rather than removed.
+func TestRollbackKeepsPreexistingUntrackedFile(t *testing.T) {
+	root := initRepo(t, "v1\n")
+	ctx := context.Background()
+
+	// A file from an earlier run: on disk before the checkpoint, untracked.
+	legacy := filepath.Join(root, "tests", "error-masking.test.ts")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, legacy, "original from an earlier run\n")
+
+	cp := NewGitCheckpointer(root)
+	snap, err := cp.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if _, ok := snap.Untracked["tests/error-masking.test.ts"]; !ok {
+		t.Fatalf("checkpoint must record the pre-existing untracked file, got %v", snap.Untracked)
+	}
+
+	// This run edits that file, then dies on a transient model-endpoint 524.
+	writeFile(t, legacy, "half-written by this run\n")
+
+	if err := cp.Rollback(ctx, snap, []string{"tests/error-masking.test.ts"}); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if !fileExists(t, legacy) {
+		t.Fatal("rollback deleted a file that existed before the run")
+	}
+	if got := readFile(t, legacy); got != "original from an earlier run\n" {
+		t.Errorf("rollback should restore the pre-run content, got %q", got)
+	}
+}
+
+// TestRollbackKeepsPreexistingUntrackedFileWithoutContent covers the bounded
+// snapshot: a file above the size cap is recorded by PATH ONLY, with no content
+// to restore. We know it predates the run, we cannot put it back, so we do not
+// touch it — it must still survive the rollback.
+func TestRollbackKeepsPreexistingUntrackedFileWithoutContent(t *testing.T) {
+	root := initRepo(t, "v1\n")
+	cp := NewGitCheckpointer(root)
+	ctx := context.Background()
+
+	snap, err := cp.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	// Simulate the oversized-file arm of captureUntracked: path recorded, no
+	// content captured (the file is on disk but not restorable).
+	snap.Untracked["big.dat"] = ""
+
+	big := filepath.Join(root, "big.dat")
+	writeFile(t, big, "whatever this run wrote\n")
+
+	if err := cp.Rollback(ctx, snap, []string{"big.dat"}); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if !fileExists(t, big) {
+		t.Fatal("rollback deleted a file recorded as pre-existing (even without content)")
+	}
+	if got := readFile(t, big); got != "whatever this run wrote\n" {
+		t.Errorf("an unrestorable pre-existing file must be left exactly as it is, got %q", got)
+	}
+}
+
+// TestRollbackRemovesFileCreatedDuringRun is the other half of the property, and
+// the part that must keep working: a path absent from BOTH the snapshot tree and
+// the untracked record is this run's own new file, so it is removed.
+func TestRollbackRemovesFileCreatedDuringRun(t *testing.T) {
+	root := initRepo(t, "v1\n")
+	cp := NewGitCheckpointer(root)
+	ctx := context.Background()
+
+	snap, err := cp.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if _, ok := snap.Untracked["newfile.go"]; ok {
+		t.Fatal("a file the run has not created yet must not be in the untracked record")
+	}
+
+	writeFile(t, filepath.Join(root, "newfile.go"), "created by this run\n")
+
+	if err := cp.Rollback(ctx, snap, []string{"newfile.go"}); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if fileExists(t, filepath.Join(root, "newfile.go")) {
+		t.Error("a file this run created must still be removed on rollback")
+	}
+}
+
+// TestCaptureUntrackedRecordsPathsAndContent pins the recorder itself: untracked
+// non-ignored files are listed with their content, an over-cap file is recorded
+// without content (still proving it existed), and a .gitignored file is not.
+func TestCaptureUntrackedRecordsPathsAndContent(t *testing.T) {
+	root := initRepo(t, "v1\n")
+	writeFile(t, filepath.Join(root, ".gitignore"), "ignored.txt\n")
+	writeFile(t, filepath.Join(root, "loose.txt"), "loose content\n")
+	writeFile(t, filepath.Join(root, "ignored.txt"), "should not be recorded\n")
+	oversize := filepath.Join(root, "huge.bin")
+	if err := os.WriteFile(oversize, make([]byte, untrackedSnapshotCap+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cp := NewGitCheckpointer(root)
+	got, err := cp.captureUntracked(context.Background())
+	if err != nil {
+		t.Fatalf("captureUntracked: %v", err)
+	}
+	if got["loose.txt"] != "loose content\n" {
+		t.Errorf("untracked file content = %q, want the file's bytes", got["loose.txt"])
+	}
+	if _, ok := got["ignored.txt"]; ok {
+		t.Error("a .gitignored file must not be recorded as untracked")
+	}
+	content, ok := got["huge.bin"]
+	if !ok {
+		t.Fatal("an over-cap file must still be recorded by path — it existed")
+	}
+	if content != "" {
+		t.Error("an over-cap file must be recorded WITHOUT its content (bounded snapshot)")
+	}
+}

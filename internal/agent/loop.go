@@ -979,6 +979,17 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	)
 	recordRail := func(r Rail) { railFires[string(r)]++ }
 
+	// mayWrite is the structural answer to "can this run change anything at all?",
+	// taken from the write scope rather than from the task text, and read ONCE here so
+	// every rail that demands a change consults the same number. A prompt that reviews
+	// code necessarily contains the vocabulary of changing code — a validator quoting
+	// the spec it validates matched 26 change verbs — so the task text can never be the
+	// signal for whether nudging toward an edit is even possible. See changeRailsApply.
+	// l.Root is the tree the write scope's patterns are spelled against. An empty
+	// Root is the UNKNOWN tree and AllowsAnyWrite fails open to true there, which
+	// keeps today's behaviour rather than silently disarming the rails.
+	mayWrite := l.Scope.AllowsAnyWrite(l.Root)
+
 	// ensureBaseline takes the pre-edit verify baseline at most once per run, from
 	// whichever site needs it first: the first-edit hook, or the explore nudge that
 	// is about to tell the model what to fix. Idempotent, and a no-op on a run that
@@ -1283,8 +1294,15 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 				// Verify: exit=0 passed=true.` A finish-tool stop with a passing verify
 				// returns ReasonSuccess, so ReasonAnswered + green verify can ONLY be this
 				// path — the model narrates its findings and never calls a tool again.
+				//
+				// The gate is the WRITE SCOPE first, not the task text: a run that
+				// cannot write anything must never be told to change something, however
+				// change-shaped its prompt reads. mayWrite is the same
+				// Scope.AllowsAnyWrite() read once at the top of Run, so every
+				// change-demanding rail in the loop agrees on one number.
 				if step > 1 && !l.isSubagent && !noEditFinishNudged && !finishClaimNudged &&
-					!edited && len(editedPaths) == 0 && taskWantsChange(task) {
+					!edited && len(editedPaths) == 0 &&
+					changeRailsApply(task, mayWrite) {
 					noEditFinishNudged = true
 					recordRail(RailNoEditFinish)
 					convo = append(convo, msg, noEditFinishCorrective(task))
@@ -1353,8 +1371,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			// !finishClaimNudged: when the claim rail has already refused this finish,
 			// it has said the more specific thing ("you said you created X and did
 			// not"). Firing both would scold the model twice for one turn.
+			// Same scope-first gate as the prose path above: the write scope decides
+			// whether a change nudge is even possible, not the task text.
 			if step > 1 && !l.isSubagent && !noEditFinishNudged && !finishClaimNudged &&
-				!edited && len(editedPaths) == 0 && taskWantsChange(task) {
+				!edited && len(editedPaths) == 0 &&
+				changeRailsApply(task, mayWrite) {
 				noEditFinishNudged = true
 				finishSummary = ""
 				recordRail(RailNoEditFinish)

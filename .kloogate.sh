@@ -21,12 +21,12 @@ done
 # --- 1. the argument error must name the required set AND what was sent ---
 v=internal/tools/registry.go
 code=$(grep -vE '^\s*(//|/\*|\*)' "$v")
-printf '%s\n' "$code" | grep -q 'missing required argument' || fail "$v no longer raises the missing-argument error"
-printf '%s\n' "$code" | grep -qE 's\.Required|required' || fail "$v does not mention the required set where it rejects the call"
-printf '%s\n' "$code" | grep -qE 'got|sent|received|present' \
+[ "$(printf '%s\n' "${code}" | grep -c 'missing required argument' || true)" -gt 0 ] || fail "$v no longer raises the missing-argument error"
+[ "$(printf '%s\n' "${code}" | grep -cE 's\.Required|required' || true)" -gt 0 ] || fail "$v does not mention the required set where it rejects the call"
+[ "$(printf '%s\n' "${code}" | grep -cE 'got|sent|received|present' || true)" -gt 0 ] \
   || fail "$v does not report the arguments the model DID send; the feedback must name the gap, not the symptom"
 # The wrapping must survive: callers match on ErrInvalidArgs.
-printf '%s\n' "$code" | grep -q 'ErrInvalidArgs' || fail "$v dropped the %w wrap on ErrInvalidArgs; callers that match on it would stop matching"
+[ "$(printf '%s\n' "${code}" | grep -c 'ErrInvalidArgs' || true)" -gt 0 ] || fail "$v dropped the %w wrap on ErrInvalidArgs; callers that match on it would stop matching"
 
 # --- 4. a task may be supplied from a file. BEHAVIOURAL: build the binary and
 # run it. A help string and an unregistered variable satisfied a grep for
@@ -39,12 +39,12 @@ if /tmp/kloogate-bin --prompt-file "$pf" --help 2>&1 | grep -q 'unknown flag'; t
 fi
 # both at once must be refused, by that name
 both=$(/tmp/kloogate-bin "a positional task" --prompt-file "$pf" 2>&1 || true)
-printf '%s\n' "$both" | grep -q 'unknown flag' && { rm -f "$pf"; fail "--prompt-file unregistered (both-at-once path)"; }
+[ "$(printf '%s\n' "${both}" | grep -c 'unknown flag' || true)" -gt 0 ] && { rm -f "$pf"; fail "--prompt-file unregistered (both-at-once path)"; }
 printf '%s\n' "$both" | grep -qiE 'cannot be combined|both' \
   || { rm -f "$pf"; echo "  got: $both"; fail "passing a positional task AND --prompt-file must be refused by name"; }
 # a missing file must be refused, by that name
 miss=$(/tmp/kloogate-bin --prompt-file "$pf.nope" 2>&1 || true)
-printf '%s\n' "$miss" | grep -q 'prompt-file' \
+[ "$(printf '%s\n' "${miss}" | grep -c 'prompt-file' || true)" -gt 0 ] \
   || { rm -f "$pf"; echo "  got: $miss"; fail "a missing --prompt-file must be refused naming the flag"; }
 rm -f "$pf" /tmp/kloogate-bin
 
@@ -59,11 +59,11 @@ grep -rqE 'Required|required' internal/tools/registry_test.go 2>/dev/null \
 # --- build and the full suite ---
 go build ./... || fail "go build ./... failed"
 out=$(go test ./... 2>&1)
-if printf '%s\n' "$out" | grep -qE '^(FAIL|---[[:space:]]+FAIL)'; then
+if [ "$(printf '%s\n' "${out}" | grep -cE '^(FAIL|---[[:space:]]+FAIL)' || true)" -gt 0 ]; then
   echo "--- failing packages and tests ---"
   printf '%s\n' "$out" | grep -E '^(FAIL|---[[:space:]]+FAIL)' | head -20
   fail "go test ./... has failures, named above"
 fi
-printf '%s\n' "$out" | grep -q '^ok' || { printf '%s\n' "$out" | tail -20; fail "go test ./... produced no ok lines"; }
+[ "$(printf '%s\n' "${out}" | grep -c '^ok' || true)" -gt 0 ] || { printf '%s\n' "$out" | tail -20; fail "go test ./... produced no ok lines"; }
 
 echo "GATE OK (build clean, go test ./... green, all four feedback defects addressed)"
