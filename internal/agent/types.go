@@ -556,7 +556,16 @@ type MemoryStats struct {
 type Snapshot struct {
 	Head     string // HEAD commit sha at checkpoint
 	StashRef string // `git stash create` sha capturing the dirty tree ("" if clean)
-	Taken    bool   // false ⇒ no usable snapshot (e.g. non-git workspace)
+	// Untracked records the files that existed at checkpoint time but were not in
+	// git — workspace-relative path -> snapshot of its content, or "" when the
+	// file was too large to snapshot. The stash tree holds TRACKED state only, so
+	// it cannot answer "did this path exist before the run?" for an untracked
+	// file; without this record Rollback reads "absent from the tree" as "did not
+	// exist" and deletes a file that predates the run (2026-10-21). A path present
+	// with "" still counts as "existed" — it must not be deleted, it is merely not
+	// restorable.
+	Untracked map[string]string
+	Taken     bool // false ⇒ no usable snapshot (e.g. non-git workspace)
 }
 
 // Checkpointer snapshots the working tree before the first edit and restores it
