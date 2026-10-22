@@ -99,6 +99,14 @@ func (b *runBudget) Check() (bool, BudgetKind) {
 		// total spend. See the field comment: a run that is changing files is doing
 		// the job it was given, and the cost of that is the user's call, not a
 		// number kloo inferred from the context window.
+		//
+		// The unproductive allowance is the SAME number as the total ceiling, on
+		// purpose: a productive run must never be cut by a ceiling kloo inferred
+		// (TestComputedCeilingNeverStopsAProductiveRun). The read-loop symptom is
+		// answered by the repetition rail in churn.go, not by shrinking this
+		// number — a token ceiling is the wrong instrument for "it keeps reading
+		// the same file", because the loop can be cheap per turn and still never
+		// converge.
 		spent := b.tokens
 		if b.computedCeiling {
 			spent = b.unproductive

@@ -2362,6 +2362,47 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		case exploreTotal > 0 && exploreTotal%l.exploreNudgeRounds() == 0 && exploreNudgedAt != exploreTotal:
 			exploreNudgedAt = exploreTotal
 			recordRail(RailExplore)
+			// BASELINE VERIFY. The verify gate is `mutatedSinceVerify`, so a run that
+			// has only READ never verifies — the model is told to fix a failure whose
+			// text it has never seen, so it keeps reading to find it, and the reading
+			// is what stops the run. Measured on kloo-bench (41 runs): every one of the
+			// 21 PASSING runs ran verify at least once, with no exceptions, and all 7
+			// runs that reached the end with verify_attempts == 0 failed. Zero attempts
+			// is a guaranteed loss, and the nudge alone does not break it: on A29 and
+			// C07 the corrective fired three times and the model read on regardless.
+			//
+			// So when the explore rail first fires and verify has NEVER run, run it so
+			// the corrective below can point at the REAL failure. Deliberately scoped to
+			// that state rather than verifying eagerly at step 0: every passing run
+			// already verifies on its own, so this cannot perturb one — it can only add
+			// evidence to a run that is otherwise certain to lose.
+			//
+			// It runs the verify but does NOT choose the corrective: the rail logic
+			// below still decides, because the out-of-scope rail must be able to say
+			// "this red is not yours" and the edit rail must still demand an edit when
+			// the failure IS reachable. Preempting them here is what made a reachable
+			// red stop demanding an edit and an unreachable red stop naming the scope.
+			// The evidence is what changes; the decision stays where it was.
+			//
+			// Placed BEFORE auto-delegation on purpose: a handoff spends the run's one
+			// investigation, and a child handed a failure it was never shown is the same
+			// trap one level down. The evidence comes first, then the handoff.
+			baselineVerified := false
+			if l.Verifier != nil && counters.VerifyAttempts == 0 {
+				l.onState(StateVerify)
+				lastVerify = l.Verifier.Verify(ctx)
+				counters.VerifyAttempts++
+				mutatedSinceVerify = false
+				baselineVerified = lastVerify.Err == nil && !lastVerify.Passed && strings.TrimSpace(failingOutput(lastVerify)) != ""
+				if baselineVerified {
+					// Feed the REAL failure back FIRST, as its own message, so the model
+					// always sees the output it was never shown — whatever corrective the
+					// rail logic below goes on to choose. The rail still decides whether to
+					// demand an edit or declare the red out of reach; this only supplies the
+					// evidence both of those decisions were previously guessing at.
+					convo = append(convo, baselineVerifyCorrective(lastVerify.Command, failingOutput(lastVerify)))
+				}
+			}
 			// AUTO-DELEGATION. On the FIRST explore nudge, kloo delegates the
 			// investigation itself instead of asking the model to stop reading.
 			//
@@ -3357,6 +3398,23 @@ func exploreCorrective(n int) llm.Message {
 			"(c) call finish if all tasks are genuinely complete. "+
 			"Do NOT read another file. If you genuinely cannot proceed without clarification, "+
 			"reply with ONE short question and no tool call.", n)}
+}
+
+// baselineVerifyCorrective hands the model the REAL failing verify output after a
+// read-only spin. The explore corrective says "take action" but names no target;
+// this says exactly which assertion is red, which is the difference between a model
+// that guesses and one that has something to aim at.
+func baselineVerifyCorrective(cmd, out string) llm.Message {
+	const max = 4000
+	if len(out) > max {
+		out = out[:max] + "\n… (truncated)"
+	}
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"You have been reading without making any change. I ran the verify command for you "+
+			"so you can see the ACTUAL failure instead of looking for it:\n\n$ %s\n%s\n\n"+
+			"This is the failure you must fix. STOP reading and edit the source file that causes "+
+			"this specific assertion to fail — call edit_file or write_file THIS turn. "+
+			"Do not modify the test.", cmd, out)}
 }
 
 // editCorrective is the KLOO_EDIT_RAIL form of the explore nudge, used when the

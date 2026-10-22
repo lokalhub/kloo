@@ -825,7 +825,11 @@ func classifyFailure(rep *agent.Report, runErr error) (string, *failureDetail) {
 		}
 		detail.Source = "verify"
 		detail.Class = "no_verify_command"
-		detail.Message = "no verify command was available"
+		// Name the fix, not just the state. "unverified" is the outcome a user is
+		// most likely to misread as a kloo fault; the cause is always the same —
+		// nothing in the tree was recognised as a build/test command — and the
+		// remedy is one flag. Say both, so the report is actionable on its own.
+		detail.Message = "no verify command was available — nothing in the tree was recognised as a build/test command; pass --verify '<cmd>' to gate this run on one"
 		return "unverified", detail
 	case agent.ReasonAnswered:
 		if rep.FinalVerify.Command != "" && !rep.FinalVerify.Passed {

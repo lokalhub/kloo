@@ -50,20 +50,45 @@ func TestReadLedgerServesAfterCompaction(t *testing.T) {
 }
 
 // THE LOOP GUARD. A model that does not understand the pointer must not be able to
-// spin on it: the second re-read gets the real contents back.
-func TestReadLedgerPointerIsServedOnce(t *testing.T) {
+// spin on it: the pointer budget is bounded, and once spent the real contents come
+// back.
+func TestReadLedgerPointerBudgetIsBounded(t *testing.T) {
 	r := newReadLedger()
 	r.Observe("main.go", fileBody, 1, 0)
-	if ptr := r.Observe("main.go", fileBody, 4, 0); ptr == "" {
-		t.Fatal("first repeat should be deduped")
+	for i := 0; i < maxReadPointers; i++ {
+		if ptr := r.Observe("main.go", fileBody, 4+i, 0); ptr == "" {
+			t.Fatalf("repeat %d should be deduped", i+1)
+		}
 	}
-	if ptr := r.Observe("main.go", fileBody, 5, 0); ptr != "" {
-		t.Fatalf("second repeat must serve contents, not another pointer: %q", ptr)
+	if ptr := r.Observe("main.go", fileBody, 9, 0); ptr != "" {
+		t.Fatalf("after %d pointers the contents must be served, not another pointer: %q", maxReadPointers, ptr)
 	}
 	// And after serving, the cycle can dedupe again rather than being disabled for
 	// the rest of the run.
-	if ptr := r.Observe("main.go", fileBody, 6, 0); ptr == "" {
+	if ptr := r.Observe("main.go", fileBody, 10, 0); ptr == "" {
 		t.Error("ledger should re-arm after serving the contents")
+	}
+}
+
+// THE READ LOOP. A model that alternates read→search→read→search on the SAME file
+// never fires the consecutive-repeat rail (the calls differ), so the ledger is the
+// only thing standing between it and a full dump every other turn. A one-shot latch
+// let it through; the budget must hold across the interleaved turns.
+func TestReadLedgerBreaksAlternatingReadSpin(t *testing.T) {
+	r := newReadLedger()
+	r.Observe("main.go", fileBody, 1, 0)
+	dumps := 0
+	for i := 0; i < 6; i++ { // read, (search), read, (search), ...
+		if ptr := r.Observe("main.go", fileBody, 3+2*i, 0); ptr == "" {
+			dumps++
+		}
+	}
+	// One dump per budget window, not one every other turn: 6 alternating re-reads
+	// may serve the contents at most twice (once when the budget is spent, once
+	// more if the window is spent again) — never on every second turn.
+	if dumps > 2 {
+		t.Fatalf("dumps = %d over 6 alternating re-reads, want <= 2: the ledger must "+
+			"not hand the full contents back every other turn", dumps)
 	}
 }
 

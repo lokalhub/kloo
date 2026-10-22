@@ -33,11 +33,22 @@ type readMark struct {
 	hash        string
 	step        int
 	compactions int
-	// served latches the one pointer this path gets. A small local model that does
-	// not understand the pointer must not be able to spin on it: the SECOND re-read
-	// gets the real contents back, so the worst case is one wasted turn, not a loop.
-	served bool
+	// served counts the pointers this path has been given since its last real
+	// dump. A small local model that does not understand the pointer must not be
+	// able to spin on it, so the budget is bounded — but it is NOT one: a model
+	// that alternates read→search→read→search on the same file never fires the
+	// consecutive-repeat rail, and a one-shot latch handed it the full dump again
+	// on every other turn, which is the read loop this ledger exists to break.
+	// After maxReadPointers the real contents are served and the count resets, so
+	// the worst case is a bounded number of wasted turns, not a loop.
+	served int
 }
+
+// maxReadPointers is how many pointer turns a single path may get before the
+// real contents are served again. Small on purpose: enough to break an
+// alternating spin, few enough that a model which cannot use the pointer still
+// gets its content back quickly.
+const maxReadPointers = 3
 
 // readLedger tracks, per run, what has been read and whether its dump is still
 // provably in the prompt.
@@ -63,15 +74,15 @@ func (r *readLedger) Observe(path, content string, step, compactions int) string
 		return ""
 	}
 	h := contentHash(content)
-	if m, ok := r.marks[path]; ok && m.hash == h && m.compactions == compactions && !m.served {
-		m.served = true
+	if m, ok := r.marks[path]; ok && m.hash == h && m.compactions == compactions && m.served < maxReadPointers {
+		m.served++
 		r.marks[path] = m
 		return fmt.Sprintf(
 			"%s is unchanged since you read it at step %d, and its full contents are already above in this conversation — scroll up rather than re-reading. "+
 				"If you need it again anyway, read it once more and the contents will be served.",
 			path, m.step)
 	}
-	// First read, changed content, a compaction in between, or the pointer already
+	// First read, changed content, a compaction in between, or the pointer budget
 	// spent: record a fresh mark and serve the real thing.
 	r.marks[path] = readMark{hash: h, step: step, compactions: compactions}
 	return ""
