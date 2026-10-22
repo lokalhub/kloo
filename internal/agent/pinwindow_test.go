@@ -20,11 +20,21 @@ func longFile(n int, marker string, at int) string {
 	return strings.Join(lines, "\n")
 }
 
-// TestPinWindowIsOptIn: the pin is load-bearing for edit correctness (it is what
-// stops the model editing against a stale copy). Narrowing it must not happen
-// until the bench says it should.
-func TestPinWindowIsOptIn(t *testing.T) {
+// TestPinWindowIsOnByDefault: the pin is load-bearing for edit correctness (it is
+// what stops the model editing against a stale copy), so narrowing it is a
+// behaviour change that has to be deliberate — but it is also the largest per-turn
+// cost in the prompt, so the bounded pin is the default and the whole-file pin is
+// the opt-out.
+func TestPinWindowIsOnByDefault(t *testing.T) {
 	t.Setenv("KLOO_PIN_WINDOW", "")
+	if _, _, w := pinWindowOf(longFile(5000, "", -1), ""); !w {
+		t.Fatal("pin not windowed by default")
+	}
+}
+
+// TestPinWindowCanBeDisabled: KLOO_PIN_WINDOW=0 restores the whole-file pin.
+func TestPinWindowCanBeDisabled(t *testing.T) {
+	t.Setenv("KLOO_PIN_WINDOW", "0")
 	if _, _, w := pinWindowOf(longFile(5000, "", -1), ""); w {
 		t.Fatal("pin windowed with the flag off")
 	}

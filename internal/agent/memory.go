@@ -845,7 +845,7 @@ func filePin(path, fresh, anchor string) (llm.Message, bool) {
 	}, true
 }
 
-// pinMaxLines bounds the file pin when KLOO_PIN_WINDOW is on.
+// pinMaxLines bounds the file pin.
 //
 // The pin is re-sent in FULL on every single turn, so its size is a per-turn tax
 // for the rest of the run. Measured on kloo-bench C66, whose file under edit is
@@ -853,6 +853,13 @@ func filePin(path, fresh, anchor string) (llm.Message, bool) {
 // came under edit, and the run's cumulative total passed 900k by step 30. That is
 // the most likely explanation for kloo running ~2x longer than grok on cases both
 // pass, and on a case that dies to the clock it is the difference itself.
+//
+// ON BY DEFAULT since v0.37. It shipped opt-in (KLOO_PIN_WINDOW=1) because the pin
+// is load-bearing for edit correctness and narrowing it had not been benched. But
+// the pin is also the single largest per-turn cost in the prompt, and the window is
+// centred on the last edit and always says what it withheld and how to see the
+// rest — so the default is now the bounded pin, and KLOO_PIN_WINDOW=0 restores the
+// whole-file pin for anyone who wants the old behaviour.
 const pinMaxLines = 600
 
 // pinWindowOf returns the slice of a long file worth pinning: a window centred on
@@ -863,7 +870,7 @@ const pinMaxLines = 600
 // hazard — the model would believe it had seen the whole thing and write an edit
 // against a function it never read.
 func pinWindowOf(fresh, anchor string) (body, note string, windowed bool) {
-	if !envOnAgent("KLOO_PIN_WINDOW") {
+	if !pinWindowOn() {
 		return "", "", false
 	}
 	lines := strings.Split(fresh, "\n")
@@ -885,6 +892,16 @@ func pinWindowOf(fresh, anchor string) (body, note string, windowed bool) {
 	return strings.Join(lines[start:end], "\n"),
 		fmt.Sprintf(" — showing lines %d-%d of %d (the region around your last edit; read_file with an offset for the rest)",
 			start+1, end, len(lines)), true
+}
+
+// pinWindowOn reports whether the file pin is bounded. On unless explicitly
+// disabled: KLOO_PIN_WINDOW=0/false/no/off restores the whole-file pin.
+func pinWindowOn() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KLOO_PIN_WINDOW"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 // firstAnchorLine locates the most recent edit inside the re-read file. The anchor

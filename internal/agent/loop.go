@@ -332,6 +332,18 @@ type Loop struct {
 	// byte-identical turn to turn and stays inside the cacheable prefix.
 	pinnedMap     string
 	pinnedMapTurn int
+	// mapIndexRoot/Files/Symbols cache the workspace walk and symbol extraction
+	// across turns (see mapIndex). Keyed on Root so a Loop reused across
+	// workspaces cannot serve a stale tree, and on mapIndexGen so a file this run
+	// creates or deletes is picked up by the next turn's map.
+	mapIndexRoot    string
+	mapIndexGen     int
+	mapIndexFiles   []repomap.Node
+	mapIndexSymbols map[string][]repomap.Symbol
+	// mapGen counts tree-changing turns. Bumped by the loop whenever a mutating
+	// tool runs, so mapIndex can tell "nothing changed since the walk" from
+	// "the file set may have moved".
+	mapGen int
 
 	// Per-run prompt-cache accounting, reset at the top of every Run (the TUI
 	// reuses one Loop across submissions). Unexported: the Report is the contract.
@@ -1892,6 +1904,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// read-only turn, and the mutation would never be checked.
 		if mutated(readOnlyTurn, result.TimedOut, derr) {
 			mutatedSinceVerify = true
+			// The file SET may have moved (a create, a delete, a rename), so the
+			// cached walk is stale: the next turn's map must re-walk. An in-place
+			// edit does not need this — Rank re-reads contents every turn — but a
+			// new file would otherwise never appear in the map.
+			l.noteTreeChange()
 		}
 
 		// ── VERIFY ──────────────────────────────────────────────────────────
@@ -3112,19 +3129,27 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 	if l.Root == "" {
 		return ""
 	}
-	nodes, err := repomap.Walk(l.Root)
-	if err != nil {
+	// THE WALK IS CACHED FOR THE RUN, THE RANKING IS NOT.
+	//
+	// repomap.Walk + repomap.Extract are a full filesystem walk and a symbol
+	// extraction over every mapped file, and they ran on EVERY turn — including
+	// under MapPositionPinned, where the result is then thrown away because the
+	// frozen map is reused. That is pure per-turn CPU and allocation on a block
+	// whose content is not even sent.
+	//
+	// What is cached is only the part that does not depend on the task or on the
+	// budget: the file list and the per-file symbols. Rank still runs every turn
+	// against the CURRENT contents, so a file this run creates or edits is ranked
+	// with its new text — the map stays honest about the workspace, which is the
+	// property that matters. The cache is keyed on the root and dropped when the
+	// root changes, so a Loop reused across workspaces cannot serve a stale tree.
+	//
+	// It is bounded by the same aggregate content budget as the load below: a
+	// workspace too large to map is not cached, so the cache can never become the
+	// second copy of the tree that repomap_budget.go exists to prevent.
+	files, byFile := l.mapIndex()
+	if files == nil {
 		return ""
-	}
-	files := repomap.Files(nodes)
-	rels := make([]string, len(files))
-	for i, f := range files {
-		rels[i] = f.Path
-	}
-	syms := repomap.Extract(l.Root, rels)
-	byFile := map[string][]repomap.Symbol{}
-	for _, s := range syms {
-		byFile[s.File] = append(byFile[s.File], s)
 	}
 
 	// Read each mapped file's content ONCE, through the jailed workspace (never a
@@ -3159,6 +3184,45 @@ func (l *Loop) assembleContext(task string, mapBudget int) string {
 	ctxStr, _ := repomap.Assemble(ranked, budget, l.estimate)
 	return ctxStr
 }
+
+// mapIndex returns the workspace's mapped files and their symbols, walking and
+// extracting at most once per root per run. A nil slice means "no map" (no root,
+// or the walk failed), which is the same degrade-to-empty contract assembleContext
+// has always had.
+//
+// The cache is NOT invalidated by an in-place edit: Rank re-reads contents every
+// turn, so an edited file is ranked on its new text. It IS invalidated by a
+// tree-changing turn (mapGen), because a file this run creates or deletes changes
+// the FILE SET, and a stale set would hide a new file from the map — the exact
+// staleness KLOO_MAP_REFRESH exists to paper over. So the walk is reused across
+// read-only turns and re-run after a mutation, which is the common case: a run
+// reads for many turns and mutates on few.
+func (l *Loop) mapIndex() ([]repomap.Node, map[string][]repomap.Symbol) {
+	if l.mapIndexRoot == l.Root && l.mapIndexGen == l.mapGen && l.mapIndexFiles != nil {
+		return l.mapIndexFiles, l.mapIndexSymbols
+	}
+	nodes, err := repomap.Walk(l.Root)
+	if err != nil {
+		return nil, nil
+	}
+	files := repomap.Files(nodes)
+	rels := make([]string, len(files))
+	for i, f := range files {
+		rels[i] = f.Path
+	}
+	syms := repomap.Extract(l.Root, rels)
+	byFile := map[string][]repomap.Symbol{}
+	for _, s := range syms {
+		byFile[s.File] = append(byFile[s.File], s)
+	}
+	l.mapIndexRoot, l.mapIndexGen = l.Root, l.mapGen
+	l.mapIndexFiles, l.mapIndexSymbols = files, byFile
+	return files, byFile
+}
+
+// noteTreeChange records that this turn may have changed the file set, so the
+// next mapIndex re-walks. Called from the mutation path, never from a read.
+func (l *Loop) noteTreeChange() { l.mapGen++ }
 
 // reread returns the current content of path, freshly read through the jailed
 // workspace (overview §3: re-read code from disk, never trust the stale

@@ -560,6 +560,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_NO_MAP` | `1` to drop the repo map from the prompt entirely. Measured **negative**, and the mechanism is inverted — without the map kloo read *more*. |
 | `KLOO_MAP_POSITION` | `pinned`, `tail` or `system` (same as `--map-position`). |
 | `KLOO_MAP_REFRESH` | With `pinned`, re-curate the frozen map every N turns. `0` (default) freezes it for the run. Each refresh costs one full re-prefill of the map. |
+| `KLOO_PIN_WINDOW` | `0`/`false`/`no`/`off` restores the **whole-file** pin. On by default since v0.37: the pin is re-sent every turn, so a long file under edit is the largest per-turn cost in the prompt. The window is centred on the last edit and always says what it withheld. |
 | `KLOO_RESTART_ON_STALL` | `1` to restart a rail-stopped run once with a clean context. Measured **negative**. |
 | `KLOO_RESTART_FIRST_S` | Cap the first attempt (seconds) so a restart has room. Measured **negative**: two capped attempts are worth less than one uncapped one. |
 | `KLOO_SIMPLE_EDIT` | `1` to offer a three-field `search_replace` tool (`file_path`/`old_string`/`new_string`) **instead of** `edit_file`'s fenced SEARCH/REPLACE block. Untested on the bench — see the [beat-grok plan](../../../docs/apps/kloo/plans/beat-grok/README.md). |

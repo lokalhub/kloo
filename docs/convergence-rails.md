@@ -179,4 +179,4 @@ Kept in the tree, flag-gated, off, so the negative is not re-discovered:
 | `KLOO_BOUND_CMD_OUTPUT` | bounded command output, same experiment, same verdict. |
 | `KLOO_SAME_FAILURE_REDIRECT` | on a repeated identical failure, name the other files the test imports. Helped one case (0/2 → 4/5), inert on the case it was designed from. |
 | `KLOO_GROK_PROMPT`, `KLOO_SIMPLE_EDIT`, `KLOO_LINE_ANCHORS` | grok-alignment changes — action-first prompt, grok's three-field `search_replace`, `LINE_NUMBER→` anchors. **Never showed a benefit.** The original hypothesis was that kloo needed grok's agent design; it did not. |
-| `KLOO_PIN_WINDOW` | window the whole-file pin. Built, never needed by a failing case. |
+| `KLOO_PIN_WINDOW` | window the whole-file pin. Built, never needed by a failing case. **Graduated in v0.37**: the bounded pin is now the default and `KLOO_PIN_WINDOW=0` restores the whole-file pin. |
