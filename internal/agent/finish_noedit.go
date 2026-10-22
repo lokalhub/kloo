@@ -51,6 +51,27 @@ func taskWantsChange(task string) bool {
 	return changeVerbs.MatchString(t)
 }
 
+// changeRailsApply reports whether the rails that tell the model to CHANGE
+// something may fire at all.
+//
+// The write scope outranks the task text, and it has to: a validation run launched
+// with `--allow 'nothing/**'` and a prompt beginning "You are the VALIDATOR. Do not
+// edit any file." QUOTES the spec it validates, so it is full of change verbs —
+// measured, 26 of them matched. taskWantsChange concluded the task asked for edits
+// and nudged a validator to make edits every write tool would refuse; the model
+// answered again, four times, each finish carrying the whole answer. The task text
+// can never be a reliable signal, because a prompt that reviews code necessarily
+// contains the vocabulary of changing code. The write scope can be, and it is
+// already known.
+//
+// taskWantsChange is unchanged and still correct about the text — the text was
+// never the problem. Only the rails that demand a change are wrong when no change
+// is possible; the confirm-finish rail ("you stopped in prose without calling
+// finish") stays a sensible nudge for a read-only run.
+func changeRailsApply(task string, mayWrite bool) bool {
+	return mayWrite && taskWantsChange(task)
+}
+
 // noEditFinishCorrective challenges a finish that changed nothing. It states the
 // fact, gives both legitimate exits, and names the second one explicitly — a model
 // told only to "keep going" will invent an edit to satisfy the nudge, which is
