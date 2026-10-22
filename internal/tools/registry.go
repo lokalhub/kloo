@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Tool-vocabulary sentinel errors. Adapters and the loop match these with
@@ -62,13 +63,47 @@ func (s ParamSchema) JSONSchema() map[string]any {
 }
 
 // Validate checks that every required property is present in args.
+//
+// The error names the GAP, not the symptom: every required argument the call is
+// missing (reporting only the first means a model that omitted two learns about
+// one, fixes it, and fails again on the other), the full required set, and the
+// argument names the model actually sent. Measured: a run against
+// qwen3.8-flash-next churned with invalid_tool_calls=7, every one reading
+// `missing required argument "path"` — the shape it sent ([content, file]) was
+// never shown to it, so it sent the same shape seven times. A small model can
+// only correct a call it can see the difference in.
 func (s ParamSchema) Validate(args map[string]any) error {
+	var missing []string
 	for _, r := range s.Required {
 		if _, ok := args[r]; !ok {
-			return fmt.Errorf("tools: missing required argument %q: %w", r, ErrInvalidArgs)
+			missing = append(missing, r)
 		}
 	}
-	return nil
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tools: missing required argument %q: requires [%s], got [%s]: %w",
+		missing[0], joinList(s.Required), joinList(sentArgNames(args)), ErrInvalidArgs)
+}
+
+// sentArgNames lists the argument names the model actually sent, sorted so the
+// message is deterministic (the prompt prefix must stay byte-stable).
+func sentArgNames(args map[string]any) []string {
+	names := make([]string, 0, len(args))
+	for k := range args {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// joinList renders names comma-separated; empty renders as the word "none" so the
+// sentence stays readable for a call that sent no arguments at all.
+func joinList(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 // Call is the model-agnostic dispatchable tool call. Both the native-FC adapter

@@ -176,6 +176,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagDistillModel     string
 		flagDistillEndpoint  string
 		flagDistillWords     int
+		flagPromptFile       string
 	)
 
 	cmd := &cobra.Command{
@@ -184,7 +185,8 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		Long: "kloo drives any OpenAI-compatible endpoint (llama.cpp, Ollama, vLLM, " +
 			"OpenAI, OpenRouter, …) to edit and verify code autonomously.\n\n" +
 			"Launch with no task for the interactive TUI session:  kloo\n" +
-			"Or pass a task to run the autonomous loop non-interactively:  kloo \"fix the test\"",
+			"Or pass a task to run the autonomous loop non-interactively:  kloo \"fix the test\"\n" +
+			"A long task need not go through argv:  kloo --prompt-file ./task.md",
 		Args:          cobra.MaximumNArgs(1),
 		Version:       versionString(), // enables `kloo --version`; stamped by goreleaser ldflags
 		SilenceErrors: true,            // Execute() prints errors; avoids double-printing
@@ -376,7 +378,40 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			// command (or nil linter) downstream in defaultLaunchTUI/defaultRunHeadless.
 			lopts := lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
 
-			if len(args) == 0 {
+			// The task: positional, or read from --prompt-file. A 32 KB validation
+			// prompt cannot practically go through argv, and pasting it into a
+			// shell command line quotes-mangles it. Both at once is ambiguous, so
+			// it is an error rather than a precedence rule.
+			task := ""
+			if len(args) > 0 {
+				task = args[0]
+			}
+			if fs.Changed("prompt-file") {
+				if len(args) > 0 {
+					err := fmt.Errorf("--prompt-file cannot be combined with a positional task argument")
+					if flagBenchmark {
+						return exitError{code: benchmarkExitConfigError, err: err}
+					}
+					return err
+				}
+				data, err := os.ReadFile(flagPromptFile)
+				if err != nil {
+					if flagBenchmark {
+						return exitError{code: benchmarkExitConfigError, err: fmt.Errorf("--prompt-file: %w", err)}
+					}
+					return fmt.Errorf("--prompt-file: %w", err)
+				}
+				task = strings.TrimSpace(string(data))
+				if task == "" {
+					err := fmt.Errorf("--prompt-file %q is empty", flagPromptFile)
+					if flagBenchmark {
+						return exitError{code: benchmarkExitConfigError, err: err}
+					}
+					return err
+				}
+			}
+
+			if task == "" {
 				if cfg.BenchmarkMode {
 					return exitError{code: benchmarkExitConfigError, err: fmt.Errorf("--benchmark requires a task argument")}
 				}
@@ -385,7 +420,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 				return deps.LaunchTUI(cfg, flags, flagVerify, lopts, SessionOpts{New: flagNewSess, ResumeID: flagResume}, flagProfile, deps.Getenv)
 			}
 
-			return deps.RunHeadless(cfg, args[0], flagVerify, lopts, deps.Out)
+			return deps.RunHeadless(cfg, task, flagVerify, lopts, deps.Out)
 		},
 	}
 
@@ -424,6 +459,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.IntVar(&flagDistillWords, "distill-max-words", 0, "word budget for the compaction brief (0 ⇒ built-in 220). Raising it on the SAME model is the cheap control arm before routing the pass to a bigger one")
 	f.Float64Var(&flagTemp, "temperature", config.DefaultTemperature, "sampling temperature")
 	f.StringVar(&flagVerify, "verify", "", "override kloo's auto-detected verify command; when unset, kloo infers the project's build/test")
+	f.StringVar(&flagPromptFile, "prompt-file", "", "read the task from this file instead of the positional argument (for a task too long for argv)")
 	f.BoolVar(&flagBenchmark, "benchmark", false, "automation preset: run task loop with JSON summary and stable benchmark exit codes")
 	f.BoolVar(&flagNewSess, "new", false, "start a fresh session (the default; sessions are no longer auto-resumed)")
 	f.StringVar(&flagResume, "resume", "", "resume a specific saved session by id (printed on exit; see {workspace}/.kloo/sessions)")
