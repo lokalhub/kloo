@@ -135,6 +135,14 @@ func (m Model) slashContext() Model {
 	}
 	g, ok := m.runner.ContextGauge()
 	if !ok {
+		// No run has assembled a prompt yet. On a RESUMED session the prior
+		// conversation is already carried (SessionHistory), so measure what the next
+		// turn would send rather than claiming nothing is loaded — that mismatch is
+		// what made /context look empty on resume despite the context being there.
+		if rg, rok := m.runner.MeasureResumed(context.Background()); rok {
+			return m.appendItem(infoItem{text: renderContextGauge(rg) +
+				"\n  (resumed session — measured from carried history; no run yet this launch)"})
+		}
 		return m.appendItem(infoItem{text: "/context: no prompt assembled yet — submit a task first, then /context shows what it cost"})
 	}
 	return m.appendItem(infoItem{text: renderContextGauge(g)})

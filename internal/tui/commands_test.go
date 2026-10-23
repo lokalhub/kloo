@@ -25,6 +25,8 @@ func (gaugeRunner) Start(context.Context, string, RuntimeConfig, Mode, []string,
 
 func (r gaugeRunner) ContextGauge() (agent.ContextGauge, bool) { return r.g, r.ok }
 
+func (r gaugeRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) { return r.g, r.ok }
+
 // typeAndEnter types a line into the input and presses Enter.
 func typeAndEnter(m Model, line string) Model {
 	m = apply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(line)})

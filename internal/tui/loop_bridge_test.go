@@ -35,6 +35,10 @@ func (r *blockingRunner) ContextGauge() (agent.ContextGauge, bool) {
 	return agent.ContextGauge{}, false
 }
 
+func (r *blockingRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) {
+	return agent.ContextGauge{}, false
+}
+
 // recordingRunner captures the model passed to Start (over a channel so the test
 // can read it without racing the run goroutine).
 type recordingRunner struct{ got chan string }
@@ -44,6 +48,10 @@ func (r *recordingRunner) Start(ctx context.Context, task string, runtime Runtim
 }
 
 func (r *recordingRunner) ContextGauge() (agent.ContextGauge, bool) {
+	return agent.ContextGauge{}, false
+}
+
+func (r *recordingRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) {
 	return agent.ContextGauge{}, false
 }
 
@@ -564,3 +572,45 @@ func TestNewReplaysHistory(t *testing.T) {
 
 var _ sendSetter = (*LoopRunner)(nil)
 var _ tea.Msg = submitTaskMsg{}
+
+// TestMeasureResumedReflectsCarriedHistory is the guard for the resume gap: on a
+// freshly resumed session no run has assembled a prompt, so ContextGauge reports
+// ok=false and /context used to say "nothing assembled" even though the prior
+// conversation was loaded and would be re-sent. MeasureResumed must instead report
+// a real occupancy from the carried SessionHistory, and must stay ok=false when
+// there is no history (a fresh session) so /context still says "submit a task".
+func TestMeasureResumedReflectsCarriedHistory(t *testing.T) {
+	root := t.TempDir()
+	ws, err := tools.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	loop := &agent.Loop{
+		Adapter:       tools.NativeFCAdapter{},
+		Registry:      tools.DefaultRegistry(ws),
+		Root:          root,
+		ContextTokens: 131072,
+		Memory:        agent.NewWorkingMemory(),
+		System:        "You are kloo. " + strings.Repeat("Follow the rules. ", 40),
+		Model:         "fixture-model",
+	}
+	r := &LoopRunner{loop: loop}
+
+	// Fresh session: no carried history ⇒ nothing to measure.
+	if _, ok := r.MeasureResumed(context.Background()); ok {
+		t.Fatal("MeasureResumed on a fresh session should report ok=false")
+	}
+
+	// Resumed session: seed the carry the way WithSession does, then measure.
+	loop.SessionHistory = []llm.Message{
+		{Role: llm.RoleUser, Content: "earlier task: read the repo and summarise it"},
+		{Role: llm.RoleAssistant, Content: "Outcome: read 6 files, summarised the layout."},
+	}
+	g, ok := r.MeasureResumed(context.Background())
+	if !ok {
+		t.Fatal("MeasureResumed on a resumed session should report ok=true")
+	}
+	if g.Used <= 0 || g.HistoryTokens <= 0 {
+		t.Errorf("resumed gauge should count carried history: used=%d history=%d", g.Used, g.HistoryTokens)
+	}
+}

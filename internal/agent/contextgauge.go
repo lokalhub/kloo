@@ -352,3 +352,25 @@ func (l *Loop) BuildPromptForMeasurement(ctx context.Context, task string) (mess
 	}
 	return len(ps.Msgs), l.estimatedPromptTokens(l.toolSchemaChars(req.Tools)), nil
 }
+
+// BuildResumedPromptForMeasurement assembles the prompt a RESUMED session would send
+// on its next turn: the carried SessionHistory followed by the placeholder task, run
+// through the same buildPrompt as a real turn. It exists because
+// BuildPromptForMeasurement measures TURN ONE and deliberately ignores SessionHistory
+// — correct for `kloo context` on a fresh task, but wrong for a resumed session,
+// where the carried conversation is exactly what dominates the next prompt. Measuring
+// turn one there would report a figure that excludes the history and so understate
+// what resume actually loaded.
+//
+// Like BuildPromptForMeasurement it makes no model call, no tool call and no write;
+// it only leaves the measurement on the Loop for ContextGauge to read.
+func (l *Loop) BuildResumedPromptForMeasurement(ctx context.Context, task string) (messages, schemaTokens int, err error) {
+	convo := make([]llm.Message, 0, len(l.SessionHistory)+1)
+	convo = append(convo, l.SessionHistory...)
+	convo = append(convo, llm.Message{Role: llm.RoleUser, Content: task})
+	ps, req, err := l.buildPrompt(ctx, task, convo, VerifyResult{}, "")
+	if err != nil {
+		return 0, 0, err
+	}
+	return len(ps.Msgs), l.estimatedPromptTokens(l.toolSchemaChars(req.Tools)), nil
+}

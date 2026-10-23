@@ -58,4 +58,15 @@ type Runner interface {
 	// nothing. ok is false when no prompt has been assembled yet (before the first
 	// run), so /context can say so instead of printing zeros as if they were data.
 	ContextGauge() (g agent.ContextGauge, ok bool)
+
+	// MeasureResumed assembles the prompt a RESUMED session would send on its next
+	// turn (carried SessionHistory + a placeholder task) and returns its occupancy.
+	// It exists because ContextGauge is only populated after a run has assembled a
+	// prompt, so on a freshly resumed session /context would otherwise report
+	// "nothing assembled" even though the prior conversation is loaded and would be
+	// re-sent. ok is false when there is no carried history (a fresh session), so
+	// /context still says "submit a task first" rather than printing a turn-one
+	// figure as if it were carried context. Assembles nothing on the wire and costs
+	// the prompt nothing — no model call, no tool call, no write.
+	MeasureResumed(ctx context.Context) (g agent.ContextGauge, ok bool)
 }

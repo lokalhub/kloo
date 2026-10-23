@@ -29,6 +29,10 @@ func (r *scriptRunner) Start(ctx context.Context, task string, runtime RuntimeCo
 }
 func (r *scriptRunner) ContextGauge() (agent.ContextGauge, bool) { return agent.ContextGauge{}, false }
 
+func (r *scriptRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) {
+	return agent.ContextGauge{}, false
+}
+
 // TestIntegrationFullRunFrame: a full synthetic run (stream → edit card →
 // run_command card → done) renders the integrated transcript + advanced status.
 func TestIntegrationFullRunFrame(t *testing.T) {

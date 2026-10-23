@@ -109,6 +109,33 @@ func (r *LoopRunner) ContextGauge() (agent.ContextGauge, bool) {
 	return g, g.Usable > 0 && g.Used > 0
 }
 
+// MeasureResumed assembles the prompt a resumed session WOULD send on its next turn
+// — the seeded SessionHistory plus a placeholder task — and returns its occupancy.
+// It exists because ContextGauge is only populated once a run has assembled a prompt,
+// so on a freshly resumed session /context reported "no prompt assembled yet" even
+// though the prior conversation was carried and would be re-sent. That is the exact
+// gap this closes: the gauge must reflect the context that resume actually loaded,
+// not just the context a run has already paid for.
+//
+// It reuses the loop's own buildPrompt via BuildPromptForMeasurement, so it is the
+// same assembly path a real turn takes — no second copy of the arithmetic. No model
+// call, no tool call, no write. ok is false when there is no history to measure (a
+// fresh session), so /context still says "submit a task first" rather than printing
+// a turn-one figure as if it were carried context.
+func (r *LoopRunner) MeasureResumed(ctx context.Context) (agent.ContextGauge, bool) {
+	if r == nil || r.loop == nil || len(r.loop.SessionHistory) == 0 {
+		return agent.ContextGauge{}, false
+	}
+	// A placeholder task stands in for the follow-up the user has not typed yet; the
+	// carried history is what dominates the measurement, and the task string is a
+	// single short message either way.
+	if _, _, err := r.loop.BuildResumedPromptForMeasurement(ctx, "(resumed — next task)"); err != nil {
+		return agent.ContextGauge{}, false
+	}
+	g := r.loop.ContextGauge()
+	return g, g.Usable > 0 && g.Used > 0
+}
+
 // Start runs the loop for task and pumps its signals into the program. In
 // approve-each mode an edit is held via a confirmRequestMsg until the user
 // answers. It blocks until the run ends, then sends the terminal reportMsg.
