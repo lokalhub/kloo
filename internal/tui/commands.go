@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/config"
 )
 
@@ -111,9 +112,83 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashProfile(arg), nil
 	case "/verbose":
 		return m.slashVerbose(), nil
+	case "/context":
+		return m.slashContext(), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
+}
+
+// slashContext prints the window-occupancy breakdown for the last assembled prompt
+// — the same measurement `kloo context` renders on the CLI, in the transcript where
+// the user is already looking. It is a READ of agent.ContextGauge (what buildPrompt
+// already measured), never a re-derivation: the section split, the trigger and the
+// free-to-compaction figure are copied, not recomputed, because a second copy of the
+// compaction arithmetic in the renderer is how `kloo doctor` came to print a number
+// the loop disagreed with for three releases.
+//
+// Before the first run there is no assembled prompt, and the command says so rather
+// than printing zeros as if they were data.
+func (m Model) slashContext() Model {
+	if m.runner == nil {
+		return m.appendItem(infoItem{text: "/context: no runner attached — nothing has been assembled yet"})
+	}
+	g, ok := m.runner.ContextGauge()
+	if !ok {
+		return m.appendItem(infoItem{text: "/context: no prompt assembled yet — submit a task first, then /context shows what it cost"})
+	}
+	return m.appendItem(infoItem{text: renderContextGauge(g)})
+}
+
+// renderContextGauge formats a ContextGauge as the transcript's /context block: one
+// line per consumer with its share of the usable window, then the totals. Percentages
+// are of USABLE (the budget the prompt was built to) and are omitted when there is no
+// window to divide by, so a --ctx of 0 prints counts instead of a nonsense percentage.
+func renderContextGauge(g agent.ContextGauge) string {
+	var b strings.Builder
+	b.WriteString("context\n")
+	fmt.Fprintf(&b, "  window %s  usable %s  compaction at %s (%s binding)\n",
+		tokensShort(g.Window), tokensShort(g.Usable), tokensShort(g.Trigger), g.Binding)
+
+	pct := func(n int) string {
+		if g.Usable <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%4.0f%%", 100*float64(n)/float64(g.Usable))
+	}
+	row := func(label string, n int, extra string) {
+		fmt.Fprintf(&b, "  %-13s %8s  %s  %s\n", label, tokensShort(n), pct(n), extra)
+	}
+	row("system+schema", g.SystemTokens+g.SchemaTokens,
+		fmt.Sprintf("(system %s + schemas %s)", tokensShort(g.SystemTokens), tokensShort(g.SchemaTokens)))
+	mapNote := "(" + g.MapPlacement + ")"
+	if g.MapBudget > 0 {
+		mapNote = fmt.Sprintf("(%s; budget %s", g.MapPlacement, tokensShort(g.MapBudget))
+		if g.MapOverBudget > 0 {
+			mapNote += fmt.Sprintf(" — over by %s (%.2f%%)", tokensShort(g.MapOverBudget), g.MapOverBudgetPct)
+		}
+		mapNote += ")"
+	}
+	row("repo map", g.RepoMapTokens, mapNote)
+	row("pinned/hot", g.PinnedHotTokens, "(task + pins + todos — re-sent every turn)")
+	row("history", g.HistoryTokens, "(summary + recent tail — what compaction sheds)")
+	if g.Unattributed != 0 {
+		row("unattributed", g.Unattributed, "(estimator rounding; a large value here is a bug)")
+	}
+	if g.Usable <= 0 {
+		row("used", g.Used, fmt.Sprintf("in %d messages", g.Messages))
+		fmt.Fprintf(&b, "  %-13s %8s  (no window configured — set --ctx to measure occupancy)\n", "free", "n/a")
+	} else {
+		row("used", g.Used, fmt.Sprintf("of usable, in %d messages", g.Messages))
+		row("free", g.Free, fmt.Sprintf("— %s before compaction", tokensShort(g.FreeToCompaction)))
+	}
+	if g.Usable > 0 && g.FreeToCompaction < 0 {
+		b.WriteString("  note: already above the compaction trigger — the loop compacts on step one\n")
+	}
+	if g.Used > g.Usable {
+		b.WriteString("  note: the first turn alone exceeds the usable window — the assembler will shed to fit\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // slashVerbose toggles kloo's own numbers on screen: the step/token counters in the

@@ -9,9 +9,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/configtest"
 	"github.com/lokalhub/kloo/internal/llm"
 )
+
+// gaugeRunner is a Runner that reports a fixed ContextGauge, so /context can be
+// exercised without a live model.
+type gaugeRunner struct {
+	g  agent.ContextGauge
+	ok bool
+}
+
+func (gaugeRunner) Start(context.Context, string, RuntimeConfig, Mode, []string, []string) {}
+
+func (r gaugeRunner) ContextGauge() (agent.ContextGauge, bool) { return r.g, r.ok }
 
 // typeAndEnter types a line into the input and presses Enter.
 func typeAndEnter(m Model, line string) Model {
@@ -427,5 +439,63 @@ func TestNonSlashRoutesAsTask(t *testing.T) {
 	m = apply(m, submitTaskMsg{task: "make the tabs"})
 	if !contains(m.View(), "▸ you: make the tabs") {
 		t.Errorf("non-slash input should render as a user task:\n%s", m.View())
+	}
+}
+
+// TestSlashContextRendersGauge: /context prints the window-occupancy breakdown
+// from the runner's gauge — the same measurement `kloo context` renders on the CLI.
+func TestSlashContextRendersGauge(t *testing.T) {
+	m := sized(New(Config{
+		Model: "test-model", MaxSteps: 40, MaxTokens: 8000,
+		Runner: gaugeRunner{ok: true, g: agent.ContextGauge{
+			Window: 131072, Usable: 104857, Trigger: 58617, Binding: "trigger-fraction",
+			SystemTokens: 3000, SchemaTokens: 1200, RepoMapTokens: 9869, MapBudget: 9830,
+			MapOverBudget: 39, MapOverBudgetPct: 0.40, MapPlacement: "pinned",
+			PinnedHotTokens: 2000, HistoryTokens: 0,
+			Used: 16069, Free: 88788, FreeToCompaction: 42548, Messages: 3,
+		}},
+	}), tw, th)
+
+	m = typeAndEnter(m, "/context")
+	v := m.View()
+	for _, want := range []string{
+		"context",
+		"window 131k",
+		"usable 105k",
+		"compaction at 58.6k",
+		"trigger-fraction binding",
+		"system+schema",
+		"repo map",
+		"pinned/hot",
+		"history",
+		"used",
+		"free",
+		"before compaction",
+	} {
+		if !contains(v, want) {
+			t.Errorf("/context output missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// TestSlashContextBeforeAnyRun: with no assembled prompt the command says so
+// rather than printing zeros as if they were data.
+func TestSlashContextBeforeAnyRun(t *testing.T) {
+	m := sized(New(Config{
+		Model: "test-model", MaxSteps: 40, MaxTokens: 8000,
+		Runner: gaugeRunner{ok: false},
+	}), tw, th)
+	m = typeAndEnter(m, "/context")
+	if !contains(m.View(), "no prompt assembled yet") {
+		t.Errorf("/context before a run should say so:\n%s", m.View())
+	}
+}
+
+// TestSlashContextNoRunner: with no runner attached the command is a clear notice,
+// not a panic.
+func TestSlashContextNoRunner(t *testing.T) {
+	m := typeAndEnter(newSized(), "/context")
+	if !contains(m.View(), "no runner attached") {
+		t.Errorf("/context with no runner should say so:\n%s", m.View())
 	}
 }

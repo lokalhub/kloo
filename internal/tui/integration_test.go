@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
+	"github.com/lokalhub/kloo/internal/agent"
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
@@ -26,6 +27,7 @@ func (r *scriptRunner) Start(ctx context.Context, task string, runtime RuntimeCo
 		r.send(msg)
 	}
 }
+func (r *scriptRunner) ContextGauge() (agent.ContextGauge, bool) { return agent.ContextGauge{}, false }
 
 // TestIntegrationFullRunFrame: a full synthetic run (stream → edit card →
 // run_command card → done) renders the integrated transcript + advanced status.

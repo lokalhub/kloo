@@ -31,12 +31,20 @@ func (r *blockingRunner) Start(ctx context.Context, task string, runtime Runtime
 	<-r.release
 }
 
+func (r *blockingRunner) ContextGauge() (agent.ContextGauge, bool) {
+	return agent.ContextGauge{}, false
+}
+
 // recordingRunner captures the model passed to Start (over a channel so the test
 // can read it without racing the run goroutine).
 type recordingRunner struct{ got chan string }
 
 func (r *recordingRunner) Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, files, images []string) {
 	r.got <- runtime.Model
+}
+
+func (r *recordingRunner) ContextGauge() (agent.ContextGauge, bool) {
+	return agent.ContextGauge{}, false
 }
 
 type runtimeClient struct {
