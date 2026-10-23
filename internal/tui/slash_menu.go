@@ -26,6 +26,7 @@ var slashCommands = []slashCommand{
 	{name: "/add", desc: "pin a file to context"},
 	{name: "/mode", desc: "set permission dial"},
 	{name: "/verbose", desc: "show/hide kloo's own counters", noArg: true},
+	{name: "/context", desc: "view context usage", noArg: true},
 }
 
 // slashMenu is the lightweight inline command menu shown above the input while

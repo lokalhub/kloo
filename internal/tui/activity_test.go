@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+
+	"github.com/lokalhub/kloo/internal/agent"
 )
 
 // noopRunner is a Runner whose Start does nothing, so submitTask marks the model
@@ -15,6 +17,8 @@ import (
 type noopRunner struct{}
 
 func (noopRunner) Start(context.Context, string, RuntimeConfig, Mode, []string, []string) {}
+
+func (noopRunner) ContextGauge() (agent.ContextGauge, bool) { return agent.ContextGauge{}, false }
 
 // activeModel builds a sized, RUNNING model with a task, a pinned summary, and a
 // few activity entries — the C8 active-run state used by the frame goldens.

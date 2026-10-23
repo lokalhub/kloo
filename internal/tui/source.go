@@ -4,6 +4,8 @@ import (
 	"context"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lokalhub/kloo/internal/agent"
 )
 
 // TaskSource is the seam that feeds submitted task strings into the program as
@@ -49,4 +51,11 @@ type Runner interface {
 	// images are attachments for the task message, as data URLs; they travel
 	// separately from task because they are sent as vision content parts, not text.
 	Start(ctx context.Context, task string, runtime RuntimeConfig, mode Mode, contextFiles []string, images []string)
+
+	// ContextGauge returns the window-occupancy measurement from the last assembled
+	// prompt (agent.ContextGauge), for the /context command. It is a pure read of
+	// what buildPrompt already measured — it assembles nothing and costs the prompt
+	// nothing. ok is false when no prompt has been assembled yet (before the first
+	// run), so /context can say so instead of printing zeros as if they were data.
+	ContextGauge() (g agent.ContextGauge, ok bool)
 }

@@ -98,6 +98,17 @@ func (r *LoopRunner) WithRunHooks(before func(context.Context, string, RuntimeCo
 // setSend connects the program's message sink (called by Run).
 func (r *LoopRunner) setSend(send func(tea.Msg)) { r.send = send }
 
+// ContextGauge exposes the last assembled prompt's occupancy to the TUI for the
+// /context command. ok is false until a prompt has been assembled (Usable and Used
+// both zero), so /context can say "no run yet" rather than print zeros as data.
+func (r *LoopRunner) ContextGauge() (agent.ContextGauge, bool) {
+	if r == nil || r.loop == nil {
+		return agent.ContextGauge{}, false
+	}
+	g := r.loop.ContextGauge()
+	return g, g.Usable > 0 && g.Used > 0
+}
+
 // Start runs the loop for task and pumps its signals into the program. In
 // approve-each mode an edit is held via a confirmRequestMsg until the user
 // answers. It blocks until the run ends, then sends the terminal reportMsg.
