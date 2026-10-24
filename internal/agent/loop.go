@@ -934,8 +934,11 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		// A7 safety-stop state. safetyEv/lastScopeDenial are copied onto the Report at
 		// finish; verifyFailStreak/verifyFailKey track consecutive identical verifier
 		// failures for the repeated-verify stop rule (independent of the churn rail).
-		safetyEv         *SafetyEvidence
-		lastScopeDenial  *ScopeDenial
+		safetyEv        *SafetyEvidence
+		lastScopeDenial *ScopeDenial
+		// offScope accumulates the DISTINCT denied paths for the end-of-run summary
+		// (offscope.go), alongside lastScopeDenial's single latest record.
+		offScope         offScopeTracker
 		patchOnlyReject  *ToolReject
 		verifyFailStreak int
 		verifyFailKey    string
@@ -1105,6 +1108,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		rep.LastScopeDenial = lastScopeDenial
+		rep.OffScope = offScope.report(l.Scope.AllowPatterns())
 		rep.PatchOnlyReject = patchOnlyReject
 		if l.shouldRollback(reason, lastVerify) && snap.Taken && l.Checkpoint != nil {
 			// Scope the restore to what THIS run changed. A repo-wide rollback
@@ -1588,6 +1592,10 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			if scopeErr.Class == tools.ScopeClassReadOnly {
 				counters.ReadOnlyEdits++
 			}
+			// The counter is attempts; this is the set of paths. An operator reading
+			// off_scope_edits=1 learns a number, and the one-flag fix stays buried in
+			// the mid-log observation (offscope.go).
+			offScope.note(scopeErr)
 			// The scope has refused a write, so no amount of forcing will produce one.
 			// Latch it and release the rail NOW rather than spending the rest of its
 			// budget withholding the read tools.
