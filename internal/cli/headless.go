@@ -408,6 +408,11 @@ func printHeadlessReport(out io.Writer, rep *agent.Report, elapsed time.Duration
 	if !toolCountersZero(rep.ToolCounters) {
 		fmt.Fprintf(out, "  tool counters: %s\n", formatToolCounters(rep.ToolCounters))
 	}
+	if os := rep.OffScope; os != nil && len(os.Denials) > 0 {
+		// Immediately after the counters, because off_scope_edits=N is the line that
+		// raises the question this block answers (offscope_summary.go).
+		printOffScopeWrites(out, os)
+	}
 	if rep.RolledBack {
 		fmt.Fprintln(out, "  rolled back to checkpoint")
 	}
@@ -566,10 +571,13 @@ type runSummary struct {
 	// above are NOT duplicated). FilesChanged is emitted in benchmark mode (or when
 	// non-empty); OffScopeEdits mirrors the report counter; CorrectionCount is the sum
 	// of rail_fires; FinalReason is the most specific terminal class.
-	FilesChanged    *filesChangedSummary `json:"files_changed,omitempty"`
-	OffScopeEdits   int                  `json:"off_scope_edits"`
-	CorrectionCount int                  `json:"correction_count"`
-	FinalReason     string               `json:"final_reason"`
+	FilesChanged  *filesChangedSummary `json:"files_changed,omitempty"`
+	OffScopeEdits int                  `json:"off_scope_edits"`
+	// OffScopeWrites names the DISTINCT paths denied, beside the attempt counter
+	// above. Omitted when nothing was denied.
+	OffScopeWrites  *offScopeWritesSummary `json:"off_scope_writes,omitempty"`
+	CorrectionCount int                    `json:"correction_count"`
+	FinalReason     string                 `json:"final_reason"`
 }
 
 type hookSummary struct {
@@ -686,6 +694,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 		// B3 accounting deltas derived from the report (files_changed needs the git
 		// root and is filled by the CLI entry point via withFilesChanged).
 		s.OffScopeEdits = rep.ToolCounters.OffScopeEdits
+		s.OffScopeWrites = offScopeSummary(rep.OffScope)
 		s.CorrectionCount = correctionCount(rep.RailFires)
 	}
 	if runErr != nil && s.Error == "" {

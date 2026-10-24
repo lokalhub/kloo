@@ -630,6 +630,11 @@ type Report struct {
 	// run that was denied and then ended calmly (answered/unverified) can still be
 	// classified off_scope_edit in the headless JSON even without a --stop-on rule.
 	LastScopeDenial *ScopeDenial
+	// OffScope names the DISTINCT paths this run was refused a write to, plus the
+	// allow list in force, so the summary can print the paths and a paste-able
+	// --allow instead of only a count (offscope.go). nil when none were denied.
+	// Distinct from LastScopeDenial, which is one record for the JSON classifier.
+	OffScope *OffScopeWrites
 	// PatchOnlyReject is the most recent model-facing run_command rejected by
 	// patch-only mode (A4), so a run ending calmly afterwards classifies as
 	// tool_call_invalid / patch_only_forbidden_tool. nil when none.
