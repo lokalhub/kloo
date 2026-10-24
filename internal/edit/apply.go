@@ -1,7 +1,9 @@
 package edit
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 )
@@ -36,12 +38,19 @@ func ApplyBlock(content string, b Block) (string, error) {
 // ApplyToFile applies a single block to the file at path (already a resolved
 // absolute path — the workspace jail is applied by the file tools, not here).
 //
-// The empty-SEARCH new-file form is delegated to CreateFile (task 03). For an
-// in-place edit, the file is read, ApplyBlock is run, and the result is written
-// back only on success — on ErrSearchNotFound (or any apply error) nothing is
-// written and the on-disk file is left byte-identical.
+// The empty-SEARCH form means ADD AT THE END (append.go): it is routed to
+// CreateFile when path does not exist and to AppendToFile when it does, so a model
+// that has new code to add always has a shape that works. For an in-place edit,
+// the file is read, ApplyBlock is run, and the result is written back only on
+// success — on ErrSearchNotFound (or any apply error) nothing is written and the
+// on-disk file is left byte-identical.
 func ApplyToFile(path string, b Block) error {
 	if b.Search == "" {
+		if _, err := os.Lstat(path); err == nil {
+			return AppendToFile(path, b)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("edit: stat %s: %w", path, err)
+		}
 		return CreateFile(path, b)
 	}
 

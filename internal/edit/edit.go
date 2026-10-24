@@ -37,9 +37,18 @@ var (
 	ErrFileExists = errors.New("edit: file already exists")
 
 	// ErrEmptySearch is returned by ApplyBlock when handed an empty SEARCH on
-	// existing content: the empty-SEARCH form is the new-file create path
-	// (CreateFile), not an in-place edit.
-	ErrEmptySearch = errors.New("edit: empty SEARCH is the new-file form")
+	// existing content: the empty-SEARCH form is the add-at-the-end path
+	// (CreateFile / AppendToFile), not an in-place edit.
+	ErrEmptySearch = errors.New("edit: empty SEARCH is the add-at-the-end form")
+
+	// ErrAlreadyPresent is returned by the append (empty-SEARCH on an existing
+	// file) path when the text to append is ALREADY in the file verbatim.
+	//
+	// This is the guard that makes append safe to retry. The churn shape this whole
+	// form exists to stop is a model re-sending the same edit; without this check a
+	// retried append would quietly hand it a second copy of the same function. The
+	// file is left byte-identical.
+	ErrAlreadyPresent = errors.New("edit: the text to append is already in the file")
 )
 
 // Marker lines of the aider SEARCH/REPLACE grammar (matched after trimming the

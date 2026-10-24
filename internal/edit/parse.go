@@ -133,15 +133,63 @@ func Parse(s string) ([]Block, error) {
 // thinks it edited, the file is untouched, and the run loops. A diff that opens a
 // real but broken block still surfaces ErrMalformedBlock; only genuinely
 // block-shaped input is accepted.
+// A FENCED block with a broken marker sequence gets one lenient retry through
+// parseBare, with the ``` fence lines stripped. parseBare already recovers the
+// measured "SEARCH without a ======= divider" shape (the model writes
+// ">>>>>>> REPLACE" where the divider belongs), but only for UNFENCED input:
+// strict Parse rejected the same mistake first whenever the model ALSO wrapped it
+// in a fence, so the identical defect was recoverable or fatal depending on a
+// cosmetic ```. The retry can only succeed on block-shaped input — parseBare
+// returns ErrMalformedBlock for anything it cannot read — so the strict error is
+// still what surfaces when there is genuinely no block to recover.
+//
+// The retry is REFUSED when it would produce an empty REPLACE section. Without
+// the ======= divider there is nothing in the text that says where the search
+// lines stop and the replacement lines start, and parseBare resolves that by
+// treating everything before ">>>>>>> REPLACE" as SEARCH. That reading is right
+// for the measured shape (replacement lines follow the misplaced marker) and a
+// pure GUESS when nothing follows it — the block is then read as "delete these
+// lines", which is not a deletion the model asked for. A guess at a destructive
+// intent is worse than the strict error, so that one keeps failing loudly.
 func ParseFlexible(s string) ([]Block, error) {
 	blocks, err := Parse(s)
 	if err != nil {
+		if recovered, rerr := parseBare(stripFences(s)); rerr == nil && len(recovered) > 0 && noEmptyReplace(recovered) {
+			return recovered, nil
+		}
 		return nil, err
 	}
 	if len(blocks) > 0 {
 		return blocks, nil
 	}
 	return parseBare(s)
+}
+
+// noEmptyReplace reports whether every block carries replacement text. See
+// ParseFlexible: a recovered block with an empty REPLACE is an unresolvable guess,
+// not a recovery.
+func noEmptyReplace(blocks []Block) bool {
+	for _, b := range blocks {
+		if b.Replace == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// stripFences drops every line that is nothing but a ``` fence (with or without a
+// language tag), so a fenced block can be re-read by the unfenced parser without
+// its closing fence landing inside a section body.
+func stripFences(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if isOpenFence(l) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
 }
 
 // parseBare parses unfenced SEARCH/REPLACE blocks: the bare marker sequence with
