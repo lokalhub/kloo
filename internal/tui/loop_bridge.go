@@ -75,6 +75,13 @@ func (r *LoopRunner) WithSession(store *session.Store, sess *session.Session) *L
 	r.store, r.sess = store, sess
 	if sess != nil {
 		r.session = append([]llm.Message{}, sess.Messages...)
+		// Seed the loop's carry at attach time, not only at Start: /context on a
+		// freshly resumed session reads the loop, and before the first task this
+		// launch Start has not run yet — so the gauge saw an empty history and
+		// reported "no prompt assembled yet" even though resume had loaded it.
+		if r.loop != nil && len(r.session) > 0 {
+			r.loop.SessionHistory = r.session
+		}
 	}
 	return r
 }
@@ -123,7 +130,29 @@ func (r *LoopRunner) ContextGauge() (agent.ContextGauge, bool) {
 // fresh session), so /context still says "submit a task first" rather than printing
 // a turn-one figure as if it were carried context.
 func (r *LoopRunner) MeasureResumed(ctx context.Context) (agent.ContextGauge, bool) {
-	if r == nil || r.loop == nil || len(r.loop.SessionHistory) == 0 {
+	if r == nil || r.loop == nil {
+		return agent.ContextGauge{}, false
+	}
+	// The carried conversation lives on the RUNNER (r.session, seeded from the saved
+	// session by WithSession), not on the loop: Start only copies it into
+	// loop.SessionHistory when a run begins. So on a freshly resumed session — before
+	// any task this launch — loop.SessionHistory is still empty and measuring it
+	// reported "no prompt assembled yet" even though the history was loaded. Seed the
+	// loop from the runner's carry first, so the measurement sees what resume loaded.
+	if len(r.session) > 0 {
+		r.loop.SessionHistory = r.session
+	}
+	if len(r.loop.SessionHistory) == 0 {
+		// A session saved by an older kloo (or one whose runs produced no recap)
+		// carries a human-facing Transcript but no model-facing Messages. The
+		// conversation IS loaded — the TUI replays it — so measure it from the
+		// transcript rather than claiming nothing is assembled. Without this the
+		// gauge stayed empty on exactly the sessions users resume most.
+		if carried := r.transcriptAsHistory(); len(carried) > 0 {
+			r.loop.SessionHistory = carried
+		}
+	}
+	if len(r.loop.SessionHistory) == 0 {
 		return agent.ContextGauge{}, false
 	}
 	// A placeholder task stands in for the follow-up the user has not typed yet; the
@@ -134,6 +163,31 @@ func (r *LoopRunner) MeasureResumed(ctx context.Context) (agent.ContextGauge, bo
 	}
 	g := r.loop.ContextGauge()
 	return g, g.Usable > 0 && g.Used > 0
+}
+
+// transcriptAsHistory rebuilds a model-facing history from the session's display
+// transcript, for sessions whose Messages carry is empty. It is a measurement-only
+// fallback: it never writes back to the session, so a resumed run still persists
+// the recap it actually produced. Roles map user→user, assistant→assistant, and a
+// tool line→assistant (a one-line action summary is what the model would have seen
+// as its own turn), which is the same shape sessionRecap emits.
+func (r *LoopRunner) transcriptAsHistory() []llm.Message {
+	if r.sess == nil || len(r.sess.Transcript) == 0 {
+		return nil
+	}
+	out := make([]llm.Message, 0, len(r.sess.Transcript))
+	for _, it := range r.sess.Transcript {
+		text := strings.TrimSpace(it.Text)
+		if text == "" {
+			continue
+		}
+		role := llm.RoleAssistant
+		if it.Kind == "user" {
+			role = llm.RoleUser
+		}
+		out = append(out, llm.Message{Role: role, Content: text})
+	}
+	return out
 }
 
 // Start runs the loop for task and pumps its signals into the program. In

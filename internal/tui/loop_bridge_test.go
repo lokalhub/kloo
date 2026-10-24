@@ -601,10 +601,17 @@ func TestMeasureResumedReflectsCarriedHistory(t *testing.T) {
 		t.Fatal("MeasureResumed on a fresh session should report ok=false")
 	}
 
-	// Resumed session: seed the carry the way WithSession does, then measure.
-	loop.SessionHistory = []llm.Message{
+	// Resumed session: seed the carry the way WithSession does — on the RUNNER, not
+	// on the loop. Start only copies r.session into loop.SessionHistory when a run
+	// begins, so before any task this launch the loop's field is still empty; that
+	// is exactly the state /context sees on a fresh resume, and the one that used to
+	// fall through to "no prompt assembled yet".
+	r.session = []llm.Message{
 		{Role: llm.RoleUser, Content: "earlier task: read the repo and summarise it"},
 		{Role: llm.RoleAssistant, Content: "Outcome: read 6 files, summarised the layout."},
+	}
+	if len(loop.SessionHistory) != 0 {
+		t.Fatal("precondition: loop.SessionHistory must be empty before a run")
 	}
 	g, ok := r.MeasureResumed(context.Background())
 	if !ok {
@@ -612,5 +619,46 @@ func TestMeasureResumedReflectsCarriedHistory(t *testing.T) {
 	}
 	if g.Used <= 0 || g.HistoryTokens <= 0 {
 		t.Errorf("resumed gauge should count carried history: used=%d history=%d", g.Used, g.HistoryTokens)
+	}
+}
+
+// A session saved by an older kloo carries a human-facing Transcript but no
+// model-facing Messages. The conversation is still loaded (the TUI replays it), so
+// /context must measure it instead of reporting "no prompt assembled yet" — the
+// exact symptom users hit on resume.
+func TestMeasureResumedFallsBackToTranscript(t *testing.T) {
+	root := t.TempDir()
+	ws, err := tools.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	loop := &agent.Loop{
+		Adapter:       tools.NativeFCAdapter{},
+		Registry:      tools.DefaultRegistry(ws),
+		Root:          root,
+		ContextTokens: 131072,
+		Memory:        agent.NewWorkingMemory(),
+		System:        "You are kloo. " + strings.Repeat("Follow the rules. ", 40),
+		Model:         "fixture-model",
+	}
+	r := &LoopRunner{loop: loop, sess: &session.Session{
+		ID: "legacy",
+		Transcript: []session.DisplayItem{
+			{Kind: "user", Text: "earlier task: read the repo and summarise it"},
+			{Kind: "assistant", Text: "Outcome: read 6 files, summarised the layout."},
+			{Kind: "tool", Text: "read_file internal/tui/commands.go [ok]"},
+		},
+	}}
+	g, ok := r.MeasureResumed(context.Background())
+	if !ok {
+		t.Fatal("MeasureResumed should measure a transcript-only session, not report nothing")
+	}
+	if g.Used <= 0 || g.HistoryTokens <= 0 {
+		t.Errorf("transcript fallback should count carried history: used=%d history=%d", g.Used, g.HistoryTokens)
+	}
+	// Measurement must not write back: the session's model-facing carry stays empty
+	// so the next run persists the recap it actually produced.
+	if len(r.sess.Messages) != 0 {
+		t.Errorf("measurement must not mutate the session: messages=%d", len(r.sess.Messages))
 	}
 }
