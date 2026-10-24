@@ -141,7 +141,10 @@ func EditFile(ws Workspace, relPath, blockText string) error {
 	// not a SEARCH/REPLACE block. Returning success here let the model believe it
 	// edited while the file was untouched — the run then loops re-"editing" forever.
 	if len(blocks) == 0 {
-		return fmt.Errorf("tools: edit_file %s: no SEARCH/REPLACE block found in diff — wrap the change as <<<<<<< SEARCH / ======= / >>>>>>> REPLACE: %w", relPath, edit.ErrMalformedBlock)
+		// The error names the shape that ARRIVED and both shapes that work, anchored
+		// in this file's own lines — see edit_shape.go for the measured reason a
+		// generic restatement of the grammar is worse than no answer at all.
+		return noBlockError(relPath, abs)
 	}
 	// Single-file tool: retarget every parsed block to the resolved path.
 	for i := range blocks {

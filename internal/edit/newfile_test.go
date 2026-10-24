@@ -72,7 +72,8 @@ func TestCreateFile(t *testing.T) {
 }
 
 // TestApplyToFileNewFormDelegates: ApplyToFile with an empty SEARCH routes to the
-// new-file create path.
+// new-file create path when the file is absent, and to the append path when it is
+// already there.
 func TestApplyToFileNewFormDelegates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "made.go")
 	if err := ApplyToFile(path, Block{Search: "", Replace: "created via ApplyToFile\n"}); err != nil {
@@ -82,8 +83,13 @@ func TestApplyToFileNewFormDelegates(t *testing.T) {
 	if string(got) != "created via ApplyToFile\n" {
 		t.Errorf("content = %q", got)
 	}
-	// And it refuses to clobber on a second call.
-	if err := ApplyToFile(path, Block{Search: "", Replace: "again"}); !errors.Is(err, ErrFileExists) {
-		t.Errorf("want ErrFileExists on re-create, got %v", err)
+	// A second empty-SEARCH call APPENDS rather than clobbering: the form means
+	// "add at the end" and routes to CreateFile only when the file is absent.
+	if err := ApplyToFile(path, Block{Search: "", Replace: "again\n"}); err != nil {
+		t.Errorf("second empty-SEARCH call must append, got %v", err)
+	}
+	got, _ = os.ReadFile(path)
+	if string(got) != "created via ApplyToFile\nagain\n" {
+		t.Errorf("content after append = %q", got)
 	}
 }

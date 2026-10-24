@@ -77,24 +77,35 @@ func groupByFile(blocks []Block) (order []string, byFile map[string][]Block) {
 // stageFile computes the final content for one file by folding its blocks in
 // source order, entirely in memory. It returns an error (no write should follow)
 // if any block fails. The empty-SEARCH (create) form is honoured only as the
-// file's first content-producing block and refuses to clobber an existing file.
+// file's first content-producing block. The empty-SEARCH form is the
+// add-at-the-end form: it creates path when absent and appends when present.
 func stageFile(path string, blocks []Block) (string, error) {
 	staged := ""
 	loaded := false
 
 	for _, b := range blocks {
 		if b.Search == "" {
-			// New-file create form.
-			if loaded {
-				return "", fmt.Errorf("edit: %s: create block after content already staged: %w", path, ErrFileExists)
+			// Add-at-the-end form (append.go): create when the file is absent, append
+			// when it is there. Routing through the SAME appendTo helper ApplyToFile
+			// uses means the batch and single-block paths cannot disagree.
+			if !loaded {
+				data, err := readFileCapped(path)
+				switch {
+				case err == nil:
+					staged, loaded = string(data), true
+				case errors.Is(err, fs.ErrNotExist):
+					// Nothing on disk: this block CREATES the file with its content.
+					staged, loaded = b.Replace, true
+					continue
+				default:
+					return "", fmt.Errorf("edit: read %s: %w", path, err)
+				}
 			}
-			if _, err := os.Lstat(path); err == nil {
-				return "", fmt.Errorf("edit: %s: %w", path, ErrFileExists)
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return "", fmt.Errorf("edit: stat %s: %w", path, err)
+			out, err := appendTo(staged, b.Replace)
+			if err != nil {
+				return "", fmt.Errorf("edit: append to %s: %w", path, err)
 			}
-			staged = b.Replace
-			loaded = true
+			staged = out
 			continue
 		}
 

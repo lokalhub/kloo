@@ -156,21 +156,24 @@ func TestApplyDeterminism(t *testing.T) {
 	}
 }
 
-// TestApplyNewFileRefusesClobber: an empty-SEARCH create on an existing file
-// fails with ErrFileExists and does not overwrite it.
-func TestApplyNewFileRefusesClobber(t *testing.T) {
+// TestApplyEmptySearchNeverClobbers: an empty-SEARCH block on an EXISTING file
+// APPENDS (append.go) — the form means "add at the end" — and the original
+// content survives byte-for-byte. The no-clobber rule this test was written to
+// pin is what matters and it still holds; what changed is that the model now gets
+// its content landed instead of a dead-end ErrFileExists.
+func TestApplyEmptySearchNeverClobbers(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "there.go")
 	write(t, f, "ORIGINAL\n")
 
-	res, err := Apply([]Block{{File: f, Search: "", Replace: "NEW"}})
-	if !errors.Is(err, ErrFileExists) {
-		t.Fatalf("want ErrFileExists, got %v", err)
+	res, err := Apply([]Block{{File: f, Search: "", Replace: "NEW\n"}})
+	if err != nil {
+		t.Fatalf("append on an existing file must succeed, got %v", err)
 	}
-	if read(t, f) != "ORIGINAL\n" {
-		t.Errorf("file was clobbered: %q", read(t, f))
+	if got := read(t, f); got != "ORIGINAL\nNEW\n" {
+		t.Errorf("want the original preserved and NEW appended, got %q", got)
 	}
-	if res.Files[0].Written {
-		t.Errorf("result should report unwritten")
+	if !res.Files[0].Written {
+		t.Errorf("result should report written")
 	}
 }
