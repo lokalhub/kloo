@@ -39,6 +39,10 @@ func (r *blockingRunner) MeasureResumed(context.Context) (agent.ContextGauge, bo
 	return agent.ContextGauge{}, false
 }
 
+func (r *blockingRunner) RenameSession(string) (string, error) { return "", nil }
+
+func (r *blockingRunner) SessionID() string { return "" }
+
 // recordingRunner captures the model passed to Start (over a channel so the test
 // can read it without racing the run goroutine).
 type recordingRunner struct{ got chan string }
@@ -54,6 +58,10 @@ func (r *recordingRunner) ContextGauge() (agent.ContextGauge, bool) {
 func (r *recordingRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) {
 	return agent.ContextGauge{}, false
 }
+
+func (r *recordingRunner) RenameSession(string) (string, error) { return "", nil }
+
+func (r *recordingRunner) SessionID() string { return "" }
 
 type runtimeClient struct {
 	endpoint string

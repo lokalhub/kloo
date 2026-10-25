@@ -181,3 +181,75 @@ func TestTitleBounded(t *testing.T) {
 		t.Errorf("Title long len = %d, want 58", len([]rune(got)))
 	}
 }
+
+// TestValidID: the id IS the file name, so only letters, digits, '-' and '_' are
+// allowed — a '/', '.', or space would escape the sessions dir or break listing.
+func TestValidID(t *testing.T) {
+	for _, ok := range []string{"kloo-lokal", "abc_123", "A1", "20260101-120000"} {
+		if !ValidID(ok) {
+			t.Errorf("ValidID(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "has space", "../escape", "a/b", "dot.name", "emoji🙂", strings.Repeat("x", maxIDLen+1)} {
+		if ValidID(bad) {
+			t.Errorf("ValidID(%q) = true, want false", bad)
+		}
+	}
+}
+
+// TestRenameMovesFile: renaming a session writes the new file, removes the old one,
+// and the new name loads back with its conversation intact.
+func TestRenameMovesFile(t *testing.T) {
+	ws := t.TempDir()
+	st := NewStore(ws)
+	now := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	sess := &Session{ID: NewID(now), Title: "t", Runs: 1, Created: now, Updated: now,
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}}}
+	if err := st.Save(sess); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	oldID := sess.ID
+	if err := st.Rename(sess, "kloo-lokal"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if sess.ID != "kloo-lokal" {
+		t.Errorf("session id = %q, want kloo-lokal", sess.ID)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".kloo", "sessions", oldID+".json")); !os.IsNotExist(err) {
+		t.Errorf("old session file should be gone, stat err = %v", err)
+	}
+	got, err := st.Load("kloo-lokal")
+	if err != nil {
+		t.Fatalf("Load renamed: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Content != "hi" {
+		t.Errorf("renamed session lost its conversation: %+v", got)
+	}
+}
+
+// TestRenameRejectsBadAndColliding: an invalid name or one already taken is an
+// error and leaves the OLD file and id intact — a rename must never lose a session.
+func TestRenameRejectsBadAndColliding(t *testing.T) {
+	ws := t.TempDir()
+	st := NewStore(ws)
+	now := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	a := &Session{ID: "keep-me", Created: now, Updated: now}
+	b := &Session{ID: "taken", Created: now, Updated: now}
+	for _, s := range []*Session{a, b} {
+		if err := st.Save(s); err != nil {
+			t.Fatalf("Save %s: %v", s.ID, err)
+		}
+	}
+	if err := st.Rename(a, "bad name"); err == nil {
+		t.Errorf("Rename to an invalid id should error")
+	}
+	if err := st.Rename(a, "taken"); err == nil {
+		t.Errorf("Rename onto an existing id should error")
+	}
+	if a.ID != "keep-me" {
+		t.Errorf("failed rename changed the id to %q", a.ID)
+	}
+	if _, err := st.Load("keep-me"); err != nil {
+		t.Errorf("old session file should still load: %v", err)
+	}
+}

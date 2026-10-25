@@ -69,4 +69,16 @@ type Runner interface {
 	// figure as if it were carried context. Assembles nothing on the wire and costs
 	// the prompt nothing — no model call, no tool call, no write.
 	MeasureResumed(ctx context.Context) (g agent.ContextGauge, ok bool)
+
+	// RenameSession gives the current session a new id and returns the id now in
+	// effect. It is the /rename command: a stable, human-chosen name (letters,
+	// digits, '-' and '_') lets a RESTARTED session re-associate with its prior
+	// context, which an id minted from the clock cannot do once the process is
+	// gone. On error the old id is still in effect — a bad name never costs the
+	// conversation. A runner with no session returns an error.
+	RenameSession(newID string) (string, error)
+
+	// SessionID returns the id of the session this runner is attached to ("" when
+	// there is none), so /rename can report the old name and the TUI can show it.
+	SessionID() string
 }

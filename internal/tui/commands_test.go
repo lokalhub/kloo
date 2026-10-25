@@ -27,6 +27,10 @@ func (r gaugeRunner) ContextGauge() (agent.ContextGauge, bool) { return r.g, r.o
 
 func (r gaugeRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) { return r.g, r.ok }
 
+func (r gaugeRunner) RenameSession(string) (string, error) { return "", nil }
+
+func (r gaugeRunner) SessionID() string { return "" }
+
 // typeAndEnter types a line into the input and presses Enter.
 func typeAndEnter(m Model, line string) Model {
 	m = apply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(line)})
@@ -499,5 +503,74 @@ func TestSlashContextNoRunner(t *testing.T) {
 	m := typeAndEnter(newSized(), "/context")
 	if !contains(m.View(), "no runner attached") {
 		t.Errorf("/context with no runner should say so:\n%s", m.View())
+	}
+}
+
+// renameRunner is a Runner whose session can be renamed, so /rename can be
+// exercised without a live model or a real store.
+type renameRunner struct {
+	gaugeRunner
+	id  string
+	err error
+}
+
+func (r *renameRunner) RenameSession(newID string) (string, error) {
+	if r.err != nil {
+		return r.id, r.err
+	}
+	r.id = newID
+	return r.id, nil
+}
+
+func (r *renameRunner) SessionID() string { return r.id }
+
+// TestSlashRenameSetsSessionName: /rename <name> renames the session and tells the
+// user how to resume it under the new name.
+func TestSlashRenameSetsSessionName(t *testing.T) {
+	r := &renameRunner{id: "20260101-120000"}
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: r}), tw, th)
+	m = typeAndEnter(m, "/rename kloo-lokal")
+	if r.id != "kloo-lokal" {
+		t.Errorf("/rename should set the session id, got %q", r.id)
+	}
+	v := m.View()
+	for _, want := range []string{"session renamed", "20260101-120000", "kloo-lokal", "--resume kloo-lokal"} {
+		if !contains(v, want) {
+			t.Errorf("/rename output missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// TestSlashRenameRejectedKeepsOldName: a rejected name leaves the OLD id in effect
+// and says so — a typo must never cost the user their conversation.
+func TestSlashRenameRejectedKeepsOldName(t *testing.T) {
+	r := &renameRunner{id: "keep-me", err: errors.New(`"bad name" is not a valid name`)}
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: r}), tw, th)
+	m = typeAndEnter(m, "/rename bad name")
+	if r.id != "keep-me" {
+		t.Errorf("a rejected rename must not change the id, got %q", r.id)
+	}
+	v := m.View()
+	if !contains(v, "not a valid name") || !contains(v, "still keep-me") {
+		t.Errorf("/rename rejection should explain and show the kept name:\n%s", v)
+	}
+}
+
+// TestSlashRenameNoArgShowsCurrent: with no argument the command reports the
+// current name instead of guessing one.
+func TestSlashRenameNoArgShowsCurrent(t *testing.T) {
+	r := &renameRunner{id: "kloo-lokal"}
+	m := sized(New(Config{Model: "test-model", MaxSteps: 40, MaxTokens: 8000, Runner: r}), tw, th)
+	m = typeAndEnter(m, "/rename")
+	if !contains(m.View(), "session: kloo-lokal") {
+		t.Errorf("/rename with no arg should show the current name:\n%s", m.View())
+	}
+}
+
+// TestSlashRenameNoRunner: with no runner attached the command is a clear notice.
+func TestSlashRenameNoRunner(t *testing.T) {
+	m := typeAndEnter(newSized(), "/rename x")
+	if !contains(m.View(), "no session attached") {
+		t.Errorf("/rename with no runner should say so:\n%s", m.View())
 	}
 }

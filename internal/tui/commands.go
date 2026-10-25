@@ -114,6 +114,8 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m.slashVerbose(), nil
 	case "/context":
 		return m.slashContext(), nil
+	case "/rename":
+		return m.slashRename(arg), nil
 	default:
 		return m.appendItem(infoItem{text: "unknown command: " + cmd}), nil
 	}
@@ -146,6 +148,38 @@ func (m Model) slashContext() Model {
 		return m.appendItem(infoItem{text: "/context: no prompt assembled yet — submit a task first, then /context shows what it cost"})
 	}
 	return m.appendItem(infoItem{text: renderContextGauge(g)})
+}
+
+// slashRename gives the current session a stable, human-chosen name. The id is
+// what --resume takes, so a name like "kloo-lokal" lets a RESTARTED session pick
+// the same conversation back up — the clock-minted id it replaces is only known
+// from the exit hint, and a restart loses it.
+//
+// The name is validated by the runner/store (letters, digits, '-' and '_'), and a
+// rejected or colliding name leaves the OLD id in effect: a typo must never cost
+// the user their conversation. With no argument the command reports the current
+// name instead of guessing one.
+func (m Model) slashRename(arg string) Model {
+	name := strings.TrimSpace(arg)
+	if m.runner == nil {
+		return m.appendItem(infoItem{text: "/rename: no session attached — nothing to rename"})
+	}
+	if name == "" {
+		if id := m.runner.SessionID(); id != "" {
+			return m.appendItem(infoItem{text: "session: " + id + "\n  rename it with:  /rename <name>   (letters, digits, '-' and '_')"})
+		}
+		return m.appendItem(infoItem{text: "/rename needs a name:  /rename <name>   (letters, digits, '-' and '_')"})
+	}
+	old := m.runner.SessionID()
+	id, err := m.runner.RenameSession(name)
+	if err != nil {
+		return m.appendItem(infoItem{text: "/rename: " + err.Error() + "\n  session is still " + id})
+	}
+	if old == id {
+		return m.appendItem(infoItem{text: "session is already named " + id})
+	}
+	return m.appendItem(infoItem{text: "session renamed: " + old + " → " + id +
+		"\n  resume it later with:  kloo --resume " + id})
 }
 
 // renderContextGauge formats a ContextGauge as the transcript's /context block: one
