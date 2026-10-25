@@ -84,6 +84,21 @@ const (
 	DefaultLLMRetryMaxDelay   = 30 * time.Second
 	DefaultLLMColdLoadTimeout = 120 * time.Second
 	DefaultLLMStreamIdle      = 5 * time.Minute
+
+	// DefaultVerifyTimeout is the ceiling the verify command runs under. It is 5
+	// minutes because that is what verify ALREADY inherited from run_command when
+	// nothing set a timeout — naming the knob must not retune a single existing
+	// run, so the number is pinned equal to tools.DefaultCommandTimeout by a test
+	// in internal/cli (internal/config stays dependency-free, so it cannot import
+	// the constant itself).
+	//
+	// Why the knob exists: a 13m16s run produced a correct fix across nine files
+	// and threw it away. The project's gate had to build seven Rust test binaries
+	// into a cold CARGO_TARGET_DIR, crossed five minutes, and was killed — and the
+	// error told the user to "re-run it with a larger timeout_seconds", a
+	// run_command tool argument no user could set. The remedy the product
+	// prescribed was the one remedy it did not offer.
+	DefaultVerifyTimeout = 5 * time.Minute
 )
 
 // DefaultLLMRetryableStatusCodes are the HTTP statuses worth retrying.
@@ -177,6 +192,8 @@ const (
 	EnvLLMRetryMaxDelay     = "KLOO_LLM_RETRY_MAX_DELAY"
 	EnvLLMColdLoadTimeout   = "KLOO_LLM_COLD_LOAD_TIMEOUT"
 	EnvLLMStreamIdleTimeout = "KLOO_LLM_STREAM_IDLE_TIMEOUT"
+	// EnvVerifyTimeout is the verify gate's ceiling (same as --verify-timeout).
+	EnvVerifyTimeout = "KLOO_VERIFY_TIMEOUT"
 
 	// Distiller (compaction summariser) env knobs. EnvDistill is the long-standing
 	// opt-OUT switch read by the agent package; the rest route the pass to a
@@ -384,6 +401,10 @@ type Config struct {
 	LLMRetryMaxDelay        time.Duration
 	LLMColdLoadTimeout      time.Duration
 	LLMStreamIdleTimeout    time.Duration
+	// VerifyTimeout bounds the VERIFY command (and its --precheck/--postcheck
+	// hooks, which run through the same jailed execution). It does NOT bound the
+	// advisory lint: see --verify-timeout in docs/configuration.md.
+	VerifyTimeout time.Duration
 }
 
 // MCPServerEntry is one entry of the profile's reserved "mcpServers" block. It is
@@ -499,6 +520,8 @@ type Flags struct {
 	LLMRetryMaxDelay        *time.Duration
 	LLMColdLoadTimeout      *time.Duration
 	LLMStreamIdleTimeout    *time.Duration
+	// VerifyTimeout is --verify-timeout. nil ⇒ flag not set.
+	VerifyTimeout *time.Duration
 	// Distill (--distill / --no-distill), DistillProvider (--distill-provider),
 	// DistillModel (--distill-model), DistillEndpoint (--distill-endpoint) and
 	// DistillMaxWords (--distill-max-words) configure the compaction summariser.
@@ -543,6 +566,7 @@ type profileEntry struct {
 	LLMRetryMaxDelay        *string  `json:"llmRetryMaxDelay,omitempty"`
 	LLMColdLoadTimeout      *string  `json:"llmColdLoadTimeout,omitempty"`
 	LLMStreamIdleTimeout    *string  `json:"llmStreamIdleTimeout,omitempty"`
+	VerifyTimeout           *string  `json:"verifyTimeout,omitempty"`
 }
 
 // providerEntry is one entry of the reserved "providers" profile block, selected
@@ -934,6 +958,11 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 			cfg.LLMStreamIdleTimeout = d
 		}
 	}
+	if e.VerifyTimeout != nil {
+		if d, err := parseDurationSetting(*e.VerifyTimeout); err == nil {
+			cfg.VerifyTimeout = d
+		}
+	}
 }
 
 // Resolve computes the effective Config from the precedence chain
@@ -972,6 +1001,7 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		LLMRetryMaxDelay:        DefaultLLMRetryMaxDelay,
 		LLMColdLoadTimeout:      DefaultLLMColdLoadTimeout,
 		LLMStreamIdleTimeout:    DefaultLLMStreamIdle,
+		VerifyTimeout:           DefaultVerifyTimeout,
 	}
 
 	// Effort tier (flag > env > default): seeds the loop budgets + churn from a
@@ -1270,6 +1300,11 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 			cfg.LLMStreamIdleTimeout = d
 		}
 	}
+	if v := getenv(EnvVerifyTimeout); v != "" {
+		if d, err := parseDurationSetting(v); err == nil {
+			cfg.VerifyTimeout = d
+		}
+	}
 	if v := getenv(EnvAPIKey); v != "" {
 		cfg.APIKey = v // explicit env override beats a provider-supplied key
 	} else if cfg.APIKey == "" {
@@ -1427,6 +1462,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	}
 	if flags.LLMStreamIdleTimeout != nil {
 		cfg.LLMStreamIdleTimeout = *flags.LLMStreamIdleTimeout
+	}
+	if flags.VerifyTimeout != nil {
+		cfg.VerifyTimeout = *flags.VerifyTimeout
 	}
 
 	// The run's token ceiling is COMPUTED LAST, because it is derived from the

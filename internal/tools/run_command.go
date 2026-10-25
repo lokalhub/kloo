@@ -17,12 +17,17 @@ const NameRunCommand = "run_command"
 
 // run_command defaults.
 const (
-	// defaultCommandTimeout is generous because the agent runs real build/test/
+	// DefaultCommandTimeout is generous because the agent runs real build/test/
 	// install steps (e.g. `npm install`, `ionic start`, `cargo build`) that take
 	// minutes — a tight default silently killed them mid-run, and a small model
 	// rarely thinks to raise timeout_seconds. The per-call timeout_seconds arg
 	// still overrides this in either direction.
-	defaultCommandTimeout = 5 * time.Minute
+	//
+	// It is EXPORTED because it is also the ceiling the verify gate inherits when
+	// nothing sets one, and the --verify-timeout default must be this same number
+	// or naming the knob would silently retune every existing run. One number, two
+	// readers: config.DefaultVerifyTimeout is pinned equal to it by a test.
+	DefaultCommandTimeout = 5 * time.Minute
 	defaultMaxOutput      = 64 * 1024 // 64 KiB per stream
 )
 
@@ -83,7 +88,7 @@ func WithAllowedEnv(names []string) RunCommandOption {
 
 // NewRunCommandTool builds the run_command tool jailed to ws.
 func NewRunCommandTool(ws Workspace, opts ...RunCommandOption) RunCommandTool {
-	t := RunCommandTool{ws: ws, timeout: defaultCommandTimeout, maxOutput: defaultMaxOutput}
+	t := RunCommandTool{ws: ws, timeout: DefaultCommandTimeout, maxOutput: defaultMaxOutput}
 	for _, opt := range opts {
 		opt(&t)
 	}
