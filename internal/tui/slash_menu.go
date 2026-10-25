@@ -27,6 +27,7 @@ var slashCommands = []slashCommand{
 	{name: "/mode", desc: "set permission dial"},
 	{name: "/verbose", desc: "show/hide kloo's own counters", noArg: true},
 	{name: "/context", desc: "view context usage", noArg: true},
+	{name: "/rename", desc: "name this session (for --resume)"},
 }
 
 // slashMenu is the lightweight inline command menu shown above the input while

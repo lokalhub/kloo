@@ -86,6 +86,43 @@ func (r *LoopRunner) WithSession(store *session.Store, sess *session.Session) *L
 	return r
 }
 
+// RenameSession gives the current session a new id (the /rename command). The
+// in-memory session is updated and, when a store is attached, the file is moved so
+// the new name survives a restart — which is the whole point: a restarted session
+// re-associates with its prior context BY ID, so a name that only lived in memory
+// would be lost the moment the process exits.
+//
+// It returns the id now in effect and an error. On error the OLD id is still in
+// effect (the store leaves the old file intact), so a bad or colliding name can
+// never cost the user their conversation.
+func (r *LoopRunner) RenameSession(newID string) (string, error) {
+	if r == nil || r.sess == nil {
+		return "", fmt.Errorf("no session attached — nothing to rename")
+	}
+	if !session.ValidID(newID) {
+		return r.sess.ID, fmt.Errorf("%q is not a valid name (letters, digits, '-' and '_' only, max 64)", newID)
+	}
+	if r.store == nil {
+		// In-memory only (tests / a store that failed to init): rename the session
+		// object so the rest of this launch uses the name, but say it won't persist.
+		r.sess.ID = newID
+		return newID, nil
+	}
+	if err := r.store.Rename(r.sess, newID); err != nil {
+		return r.sess.ID, err
+	}
+	return r.sess.ID, nil
+}
+
+// SessionID returns the id of the session this runner is attached to ("" when
+// there is none), so the TUI can show it and /rename can report the old name.
+func (r *LoopRunner) SessionID() string {
+	if r == nil || r.sess == nil {
+		return ""
+	}
+	return r.sess.ID
+}
+
 // WithStatusWriter attaches an optional completion hook used by the CLI to write
 // the same structured JSON summary as headless runs after visible TUI runs.
 func (r *LoopRunner) WithStatusWriter(fn func(RuntimeConfig, *agent.Report, time.Duration) error) *LoopRunner {

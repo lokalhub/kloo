@@ -33,6 +33,10 @@ func (r *scriptRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool
 	return agent.ContextGauge{}, false
 }
 
+func (r *scriptRunner) RenameSession(string) (string, error) { return "", nil }
+
+func (r *scriptRunner) SessionID() string { return "" }
+
 // TestIntegrationFullRunFrame: a full synthetic run (stream → edit card →
 // run_command card → done) renders the integrated transcript + advanced status.
 func TestIntegrationFullRunFrame(t *testing.T) {

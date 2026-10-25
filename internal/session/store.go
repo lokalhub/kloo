@@ -86,6 +86,64 @@ func (s *Store) klooDir() string { return filepath.Dir(s.dir) }
 // NewID mints a sortable, human-readable id from the clock.
 func NewID(now time.Time) string { return now.Format("20060102-150405") }
 
+// ValidID reports whether id is usable as a session id: non-empty, at most
+// maxIDLen characters, and only letters, digits, '-' and '_'. The charset is
+// deliberately narrow because the id IS the file name ({id}.json) — allowing
+// '/', '.', or a space would let a rename escape the sessions directory or
+// produce a file the listing can't round-trip.
+func ValidID(id string) bool {
+	if id == "" || len(id) > maxIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// maxIDLen bounds a session id so a rename can't mint a name longer than a
+// filesystem comfortably takes (and so the exit hint stays one line).
+const maxIDLen = 64
+
+// Rename gives a session a new id, moving its file so the next launch can
+// --resume the new name. It is the durable half of /rename: the TUI updates the
+// in-memory session and calls this so the name survives a restart — which is the
+// whole point, since a restarted session re-associates by id.
+//
+// Errors are returned, never swallowed: an invalid id, a collision with an
+// existing session, or a failed write must leave the OLD file intact so the
+// conversation is never lost to a rename.
+func (s *Store) Rename(sess *Session, newID string) error {
+	if sess == nil {
+		return fmt.Errorf("session: rename: no session")
+	}
+	if !ValidID(newID) {
+		return fmt.Errorf("session: rename: %q is not a valid id (letters, digits, '-' and '_' only, max %d)", newID, maxIDLen)
+	}
+	if newID == sess.ID {
+		return nil // nothing to do — not an error
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, newID+".json")); err == nil {
+		return fmt.Errorf("session: rename: %q already exists", newID)
+	}
+	oldID := sess.ID
+	sess.ID = newID
+	if err := s.Save(sess); err != nil {
+		sess.ID = oldID // keep the in-memory session pointing at the file that exists
+		return err
+	}
+	// Remove the old file only AFTER the new one is safely written, so a crash
+	// between the two leaves a duplicate rather than a lost conversation.
+	if oldID != "" && oldID != newID {
+		_ = os.Remove(filepath.Join(s.dir, oldID+".json"))
+	}
+	return nil
+}
+
 // Title derives a one-line title from the first task (bounded).
 func Title(task string) string {
 	t := strings.TrimSpace(strings.ReplaceAll(task, "\n", " "))

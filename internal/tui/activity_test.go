@@ -24,6 +24,10 @@ func (noopRunner) MeasureResumed(context.Context) (agent.ContextGauge, bool) {
 	return agent.ContextGauge{}, false
 }
 
+func (noopRunner) RenameSession(string) (string, error) { return "", nil }
+
+func (noopRunner) SessionID() string { return "" }
+
 // activeModel builds a sized, RUNNING model with a task, a pinned summary, and a
 // few activity entries — the C8 active-run state used by the frame goldens.
 func activeModel(t *testing.T, w, h int) Model {
