@@ -64,7 +64,9 @@ rg '^KLOO_RESULT_JSON ' runs/qwen3/001/stdout.log \
 
 The summary includes `failure_code`, `failure_detail`, `tool_counters`,
 `rail_fires`, verify result, and transcript tail, plus the accounting deltas
-`files_changed` (`{count, paths}`), `off_scope_edits`, `off_scope_writes` (the
+`files_changed` (`{count, paths, rolled_back}` — `rolled_back:true` means the run
+was rolled back, so those paths are what it WROTE and not what is on disk),
+`off_scope_edits`, `off_scope_writes` (the
 distinct scope-denied paths and the allow list in force), `correction_count` (sum of
 `rail_fires`), and `final_reason` (the most specific terminal class). Layered
 [verifier hooks](configuration.md#verifier-hooks---precheck----postcheck)

@@ -273,7 +273,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	summary := buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr)
 	memoryStore(ctx, cfg, mcpMgr, cwd, task, summary, rep, writerLogf(out))
 	if cfg.JSONSummary || cfg.BenchmarkMode {
-		withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the JSON
+		withFilesChanged(&summary, ws.Root(), rep) // B3: changed-file accounting for the JSON
 		printRunSummaryJSON(out, summary)
 	}
 	if cfg.BenchmarkMode {
@@ -589,6 +589,12 @@ type hookSummary struct {
 type filesChangedSummary struct {
 	Count int      `json:"count"`
 	Paths []string `json:"paths"`
+	// RolledBack says whether these paths are still ON DISK. false (the common case)
+	// means the tree holds them; true means the run was rolled back and the paths are
+	// the run's own record of what it wrote, not a reading of the tree. Emitted
+	// ALWAYS, never omitempty: an absent field would leave "are these files there?"
+	// unanswerable, which is the question the incident below turned on.
+	RolledBack bool `json:"rolled_back"`
 }
 
 func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, elapsed time.Duration, runErr error) runSummary {
@@ -751,10 +757,35 @@ func finalReason(s runSummary) string {
 	return s.Reason
 }
 
-// withFilesChanged fills the B3 files_changed accounting from the git working tree
-// at root (sorted, deterministic). It is a no-op when root is empty. Called by the
-// CLI entry points (which know the workspace root); a non-git repo yields count:0.
-func withFilesChanged(s *runSummary, root string) {
+// withFilesChanged fills the B3 files_changed accounting: what this run wrote,
+// sorted and deterministic. Called by the CLI entry points (which know the workspace
+// root and hold the report); a non-git repo yields count:0.
+//
+// Normally that is the git working tree. For a ROLLED-BACK run it cannot be: the
+// rollback has already removed the files being accounted for, so the tree answers a
+// different question than the one being asked.
+//
+// Incident 2026-10-25. A scoped run (--allow two files, --stop-on off-scope-edit)
+// wrote both allowed files, then attempted package.json. The stop rule ended the run
+// and the rollback removed the two new files, as it should. This function then read
+// the restored tree and the JSON said failure_code off_scope_edit with
+// files_changed {count: 0, paths: []}. The harness consuming that JSON recorded four
+// `must_contain "…" not found` failures for strings the model had actually written,
+// plus "no new: path was created", and handed the next reader the diagnosis "the
+// model never did the work" — about a run that did the work and then stepped out of
+// bounds. The ordering was the defect: writes → safety stop → rollback → accounting.
+//
+// So a rolled-back run is accounted from its OWN record of its writes (captured
+// before the restore), with rolled_back marking those paths as gone from disk. The
+// rollback itself is unchanged; this is a reporting fix.
+func withFilesChanged(s *runSummary, root string, rep *agent.Report) {
+	if rep != nil && rep.RolledBack {
+		// Checked before root, because the run's record is valid even for a workspace
+		// this call cannot inspect.
+		paths := append([]string{}, rep.ChangedPaths...)
+		s.FilesChanged = &filesChangedSummary{Count: len(paths), Paths: paths, RolledBack: true}
+		return
+	}
 	if root == "" {
 		return
 	}

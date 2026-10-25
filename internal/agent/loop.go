@@ -1114,12 +1114,16 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		rep.LastScopeDenial = lastScopeDenial
 		rep.OffScope = offScope.report(l.Scope.AllowPatterns())
 		rep.PatchOnlyReject = patchOnlyReject
+		// What this run wrote, recorded BEFORE the rollback below can remove it. The
+		// rollback is right to delete the files; the report is wrong to then have no
+		// memory of them (types.go ChangedPaths, incident 2026-10-25).
+		rep.ChangedPaths = l.runPaths(editedPaths)
 		if l.shouldRollback(reason, lastVerify) && snap.Taken && l.Checkpoint != nil {
 			// Scope the restore to what THIS run changed. A repo-wide rollback
 			// destroys whatever landed after the checkpoint — a concurrent run's
 			// finished work, or the user typing in the same checkout (incident
 			// 2026-10-17). Sorted so the restore order is reproducible.
-			if err := l.Checkpoint.Rollback(ctx, snap, l.runPaths(editedPaths)); err == nil {
+			if err := l.Checkpoint.Rollback(ctx, snap, rep.ChangedPaths); err == nil {
 				rep.RolledBack = true
 			}
 		}
