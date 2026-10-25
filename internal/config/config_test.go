@@ -271,6 +271,12 @@ func TestResolve(t *testing.T) {
 			got.LLMRetryMaxDelay = tc.want.LLMRetryMaxDelay
 			got.LLMColdLoadTimeout = tc.want.LLMColdLoadTimeout
 			got.LLMStreamIdleTimeout = tc.want.LLMStreamIdleTimeout
+			// Same treatment for the verify gate's ceiling: its own precedence is
+			// pinned in verify_timeout_test.go, not in nine want literals.
+			if got.VerifyTimeout != DefaultVerifyTimeout {
+				t.Errorf("VerifyTimeout = %s; the verify gate must default to %s", got.VerifyTimeout, DefaultVerifyTimeout)
+			}
+			got.VerifyTimeout = tc.want.VerifyTimeout
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Resolve mismatch\n got: %+v\nwant: %+v", got, tc.want)
 			}

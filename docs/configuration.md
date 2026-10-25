@@ -252,6 +252,7 @@ churn detection as the primary guard).
 | `--llm-retry-max-delay` | `30s` | Maximum exponential backoff. |
 | `--llm-cold-load-timeout` | `2m` | Non-streaming model-call timeout. |
 | `--llm-stream-idle-timeout` | `5m` | Streaming no-token idle timeout. |
+| `--verify-timeout` | `5m` | Ceiling for the **verify command** and its `--precheck`/`--postcheck` hooks. Raise it when the *gate itself* is slow: a verify killed for exceeding this is an **error outcome**, so the run rolls back to its checkpoint and the work is discarded — one run lost a correct nine-file fix because its gate had to build seven Rust test binaries into a cold `CARGO_TARGET_DIR` on its first complete pass and crossed five minutes. `--verify-timeout 15m` is the fix for that shape of gate. It does **not** apply to the advisory lint, which stays on a short 20s leash on purpose (a hanging linter must degrade to silence, not stall every edit). Env: `KLOO_VERIFY_TIMEOUT`; profile key: `verifyTimeout`. |
 | `--no-think` | `false` | Ask compatible OpenAI-style backends to disable thinking/reasoning by sending `reasoning_effort: "none"` on chat requests. |
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
 | `--no-chat-gate` | `false` | Disable the interactive **conversational gate**. The gate is one extra no-tools model call made before each interactive run: it replies `TASK` to hand an actionable message to the agent loop, and anything else is shown to you as the answer with the run stopping at `steps: 0 · ANSWERED`. It keeps a weak model from re-doing finished work on a "thanks". Turn it off when the model classifies your messages badly or you do not want the extra call per message. Profile key: `"noChatGate": true`. Headless runs and subagents never use the gate. |
@@ -528,6 +529,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_LLM_RETRY_MAX_DELAY` | Maximum retry backoff. |
 | `KLOO_LLM_COLD_LOAD_TIMEOUT` | Non-streaming model-call timeout. |
 | `KLOO_LLM_STREAM_IDLE_TIMEOUT` | Streaming no-token idle timeout. |
+| `KLOO_VERIFY_TIMEOUT` | Ceiling for the verify command (same as `--verify-timeout`). A bare number is seconds; `12m` also parses. |
 | `KLOO_API_KEY` | Bearer token for the endpoint. Required for hosted providers (OpenRouter, OpenAI, …); not needed for a local llama.cpp / Ollama server, which has no auth. |
 | `OPENAI_API_KEY` | Fallback bearer token used only when `KLOO_API_KEY` is unset. |
 | `KLOO_MCP` | Set to `0` / `false` to disable all [MCP servers](mcp.md). `--no-mcp` overrides it; both override the profile. |
@@ -1368,6 +1370,7 @@ Common sections, all optional:
     "llmRetryMaxDelay": "30s",
     "llmColdLoadTimeout": "2m",
     "llmStreamIdleTimeout": "5m",
+    "verifyTimeout": "15m",         // raise when the GATE is slow (cold build); 5m default
     "noThink": true,                // ask compatible backends to disable reasoning
     "noChatGate": true              // skip the interactive conversational gate
   },
@@ -1412,7 +1415,7 @@ Per-model fields: `toolFormat`, `temperature`, `fewShotPath`, `maxContextTokens`
 `repeatAbortRounds`, `llmMaxRetries`,
 `maxTokens`, `maxWallClockSeconds`, `churnRounds`, `promptCache`, `llmMaxRetries`,
 `llmRetryCodes`, `llmRetryBaseDelay`, `llmRetryMaxDelay`,
-`llmColdLoadTimeout`, `llmStreamIdleTimeout`, `noThink`.
+`llmColdLoadTimeout`, `llmStreamIdleTimeout`, `verifyTimeout`, `noThink`.
 Per-tier (`efforts`) fields: `maxSteps`, `churnRounds`, `maxTokens`,
 `maxWallClockSeconds` (budgets only — no model).
 

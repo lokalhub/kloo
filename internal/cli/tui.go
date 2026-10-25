@@ -104,10 +104,14 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	reloadProfile := buildReloadProfile(baseFlags, getenv, clientFactory)
 
 	loop := &agent.Loop{
-		Client:     client,
-		Adapter:    adapter,
-		Registry:   reg,
-		Verifier:   buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(os.Stderr)),
+		Client:   client,
+		Adapter:  adapter,
+		Registry: reg,
+		// The verify ceiling is resolved config, not a constant: the TUI used to pass
+		// NO timeout and inherit tools.DefaultCommandTimeout, so a gate whose first
+		// complete run took longer than five minutes was killed and the run rolled
+		// back with no knob anywhere to raise it (--verify-timeout).
+		Verifier:   buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(os.Stderr), agent.WithVerifyTimeout(cfg.VerifyTimeout.Seconds())),
 		Linter:     buildLinter(ws, lintCmd, lintPerFile),
 		Budget:     agent.NewBudget(cfg, nil),
 		Churn:      agent.NewChurnDetector(cfg.ChurnRounds),

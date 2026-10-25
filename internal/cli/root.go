@@ -170,6 +170,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagRetryMax         time.Duration
 		flagColdLoad         time.Duration
 		flagStreamIdle       time.Duration
+		flagVerifyTimeout    time.Duration
 		flagMaxRetries       int
 		flagNoDistill        bool
 		flagDistillProvider  string
@@ -364,6 +365,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("llm-stream-idle-timeout") {
 				flags.LLMStreamIdleTimeout = &flagStreamIdle
 			}
+			if fs.Changed("verify-timeout") {
+				flags.VerifyTimeout = &flagVerifyTimeout
+			}
 
 			cfg, err := config.Resolve(flags, deps.Getenv, flagProfile)
 			if err != nil {
@@ -485,6 +489,7 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.DurationVar(&flagRetryMax, "llm-retry-max-delay", config.DefaultLLMRetryMaxDelay, "maximum model-call retry backoff")
 	f.DurationVar(&flagColdLoad, "llm-cold-load-timeout", config.DefaultLLMColdLoadTimeout, "non-streaming model call timeout")
 	f.DurationVar(&flagStreamIdle, "llm-stream-idle-timeout", config.DefaultLLMStreamIdle, "streaming no-token idle timeout")
+	f.DurationVar(&flagVerifyTimeout, "verify-timeout", config.DefaultVerifyTimeout, "ceiling for the VERIFY command (and its --precheck/--postcheck hooks); raise it when the gate itself is slow — a cold build whose first complete run exceeds it is killed and the run rolls back. Does NOT apply to the advisory lint")
 
 	cmd.AddCommand(newDoctorCmd(&deps))
 	cmd.AddCommand(newProbeCmd(&deps))
@@ -654,6 +659,9 @@ func buildConfigFlagsFromCommand(cmd *cobra.Command, values configFlagValues) (c
 	if fs.Changed("llm-stream-idle-timeout") {
 		flags.LLMStreamIdleTimeout = &values.LLMStreamIdleTimeout
 	}
+	if fs.Changed("verify-timeout") {
+		flags.VerifyTimeout = &values.VerifyTimeout
+	}
 	return flags, nil
 }
 
@@ -709,6 +717,7 @@ type configFlagValues struct {
 	LLMRetryMaxDelay     time.Duration
 	LLMColdLoadTimeout   time.Duration
 	LLMStreamIdleTimeout time.Duration
+	VerifyTimeout        time.Duration
 }
 
 func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
@@ -763,6 +772,7 @@ func addConfigFlags(f *pflag.FlagSet, v *configFlagValues) {
 	f.DurationVar(&v.LLMRetryMaxDelay, "llm-retry-max-delay", config.DefaultLLMRetryMaxDelay, "maximum model-call retry backoff")
 	f.DurationVar(&v.LLMColdLoadTimeout, "llm-cold-load-timeout", config.DefaultLLMColdLoadTimeout, "non-streaming model call timeout")
 	f.DurationVar(&v.LLMStreamIdleTimeout, "llm-stream-idle-timeout", config.DefaultLLMStreamIdle, "streaming no-token idle timeout")
+	f.DurationVar(&v.VerifyTimeout, "verify-timeout", config.DefaultVerifyTimeout, "ceiling for the VERIFY command (and its --precheck/--postcheck hooks); raise it when the gate itself is slow — a cold build whose first complete run exceeds it is killed and the run rolls back. Does NOT apply to the advisory lint")
 }
 
 // Execute builds the root command with production dependencies and runs it,

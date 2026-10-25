@@ -95,9 +95,25 @@ type CommandVerifier struct {
 // VerifyOption configures a CommandVerifier.
 type VerifyOption func(*CommandVerifier)
 
-// WithVerifyTimeout sets a per-verify timeout (seconds) for the command.
+// WithVerifyTimeout sets a per-verify timeout (seconds) for the command. The CLI
+// resolves it from --verify-timeout / KLOO_VERIFY_TIMEOUT / the profile's
+// verifyTimeout; 0 or less leaves timeout_seconds unset, so the command inherits
+// tools.DefaultCommandTimeout exactly as it did before the knob existed.
 func WithVerifyTimeout(seconds float64) VerifyOption {
 	return func(v *CommandVerifier) { v.timeoutSec = seconds }
+}
+
+// timeout is the ceiling this verify actually runs under — the configured value,
+// or the run_command default that an unset verifier silently inherits. It exists
+// for the TIMEOUT MESSAGE: a run killed at a ceiling it does not name leaves the
+// user with no way to pick a bigger one, and the inherited case is precisely the
+// one that bit us (the interactive path passed no option, so a naive report would
+// have said "killed after 0s").
+func (v *CommandVerifier) timeout() time.Duration {
+	if v.timeoutSec > 0 {
+		return time.Duration(v.timeoutSec * float64(time.Second))
+	}
+	return tools.DefaultCommandTimeout
 }
 
 // WithStructuralCheck adds a structural gate applied only when exit==0; when it
@@ -230,6 +246,19 @@ func (v *CommandVerifier) Verify(ctx context.Context) VerifyResult {
 	}
 	if err != nil {
 		// Non-runnable / timeout / jail escape — an error outcome, not a pass.
+		//
+		// A TIMEOUT is re-worded here, and only here. run_command's own message
+		// ("re-run it with a larger timeout_seconds") is addressed to the MODEL,
+		// which can set that tool argument. On the verify path nobody can: the
+		// harness owns the call. A 13m16s run once discarded a correct nine-file
+		// fix because its gate needed a cold Rust build of seven test binaries and
+		// crossed the 5-minute ceiling — and the only remedy it printed was one the
+		// product did not offer. Name the knob the reader actually has, and the
+		// ceiling it was killed at, so the next value is obvious.
+		if errors.Is(err, tools.ErrCommandTimeout) {
+			err = fmt.Errorf("the verify command was killed after %s — if the gate just needs longer (a cold build, a slow install), raise the ceiling with --verify-timeout (e.g. --verify-timeout %s): %w",
+				v.timeout(), 3*v.timeout(), tools.ErrCommandTimeout)
+		}
 		vr.Err = err
 		vr.Passed = false
 		return vr

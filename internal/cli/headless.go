@@ -21,12 +21,6 @@ import (
 	"github.com/lokalhub/kloo/internal/tools"
 )
 
-// headlessVerifyTimeout is the per-verify timeout for the headless loop's verify
-// step (the acceptance benchmark's `npm run build` + structural harness). Kept at
-// least as generous as the run_command default so a slow build is never the tighter
-// ceiling.
-const headlessVerifyTimeout = 300 // seconds (matches the run_command default)
-
 // defaultRunHeadless composes the same full stack as defaultLaunchTUI (P00 client,
 // P01/P02 tools+jail, P03 repo map, P04 loop + safety rails) but runs the loop
 // NON-interactively: progress, tool calls, and streamed text are written to out as
@@ -94,7 +88,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		// before a corrective is composed, so kloo never orders an edit it will
 		// refuse — see agent/baseline.go for the run where it did, 21 times.
 		Scope:                   ws.Scope(),
-		Verifier:                buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(headlessVerifyTimeout)),
+		Verifier:                buildLayeredVerifier(ws, verifyCmd, cfg.Prechecks, cfg.Postchecks, writerLogf(out), agent.WithVerifyTimeout(cfg.VerifyTimeout.Seconds())),
 		Linter:                  buildLinter(ws, lintCmd, lintPerFile),
 		Budget:                  agent.NewBudget(cfg, nil),
 		Churn:                   agent.NewChurnDetector(cfg.ChurnRounds),
