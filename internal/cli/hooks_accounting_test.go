@@ -127,7 +127,7 @@ func TestWithFilesChangedGitRepo(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "a.txt"), []byte("a\n"), 0o644)
 
 	var s runSummary
-	withFilesChanged(&s, root)
+	withFilesChanged(&s, root, nil)
 	if s.FilesChanged == nil {
 		t.Fatal("files_changed should be populated for a git repo")
 	}
@@ -139,7 +139,7 @@ func TestWithFilesChangedGitRepo(t *testing.T) {
 // TestWithFilesChangedNonGitEmpty: a non-git dir yields count 0 and an empty list.
 func TestWithFilesChangedNonGitEmpty(t *testing.T) {
 	var s runSummary
-	withFilesChanged(&s, t.TempDir())
+	withFilesChanged(&s, t.TempDir(), nil)
 	if s.FilesChanged == nil || s.FilesChanged.Count != 0 || len(s.FilesChanged.Paths) != 0 {
 		t.Fatalf("non-git files_changed = %+v, want count 0 empty list", s.FilesChanged)
 	}

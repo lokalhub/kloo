@@ -200,7 +200,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 		runner.WithStatusWriter(func(runtime tui.RuntimeConfig, rep *agent.Report, elapsed time.Duration) error {
 			runCfg := tuiRuntimeConfig(cfg, runtime)
 			summary := buildRunSummary(runCfg, verifyCmd, rep, elapsed, nil)
-			withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the status file
+			withFilesChanged(&summary, ws.Root(), rep) // B3: changed-file accounting for the status file
 			return writeRunSummaryFile(statusPath, summary)
 		})
 	}

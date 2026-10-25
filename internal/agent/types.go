@@ -641,7 +641,22 @@ type Report struct {
 	PatchOnlyReject *ToolReject
 	Err             error
 	RolledBack      bool
-	TokensUsed      int
+	// ChangedPaths is this run's OWN record of the in-scope files it created or
+	// modified (sorted, de-duplicated; the same set runPaths hands the restore).
+	// Captured at finish BEFORE any rollback, because the rollback deletes exactly
+	// the evidence an after-the-fact reading of the tree would look for.
+	//
+	// Incident 2026-10-25: a scoped run wrote both of its --allow files, attempted a
+	// third outside the allow list, and --stop-on off-scope-edit ended it. The
+	// rollback removed the two new files (correctly), and the headless JSON — which
+	// reads the git tree after the run returns — reported files_changed count 0. The
+	// harness consuming it recorded four "must_contain not found" checks for strings
+	// the model HAD written and concluded the model never did the work. A run's
+	// writes are history; the tree is only its latest state, and the two stopped
+	// agreeing the moment a rollback landed between them. RolledBack says whether
+	// these paths are still on disk.
+	ChangedPaths []string
+	TokensUsed   int
 	// PromptTokens is the run's cumulative prompt (input) tokens, and
 	// CachedPromptTokens how many of those the provider served from its prefix
 	// cache. Hosted providers bill a cache hit at a steep discount, so the ratio
